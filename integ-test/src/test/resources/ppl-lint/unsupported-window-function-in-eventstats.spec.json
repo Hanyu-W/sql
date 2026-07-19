@@ -1,0 +1,29 @@
+{
+  "ruleId": "unsupported-window-function-in-eventstats",
+  "index": "opensearch-sql_test_index_account",
+  "cases": [
+    {
+      "id": "eventstats-rank",
+      "query": "source={{index}} | eventstats rank() as rank_value",
+      "frontendDiagnosticCount": 1,
+      "backendExpected": {
+        "httpStatus": 400,
+        "body": {
+          "status": 400,
+          "error": {
+            "type": "CalciteUnsupportedException",
+            "reason": "Unexpected window function: rank"
+          }
+        }
+      }
+    },
+    {
+      "id": "eventstats-avg-control",
+      "query": "source={{index}} | eventstats avg(age) as avg_age",
+      "frontendDiagnosticCount": 0,
+      "backendExpected": {
+        "httpStatus": 200
+      }
+    }
+  ]
+}
