@@ -9,6 +9,7 @@ import static org.opensearch.sql.legacy.TestUtils.getResponseBody;
 import static org.opensearch.sql.plugin.rest.RestPPLQueryAction.QUERY_API_ENDPOINT;
 
 import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -28,12 +29,14 @@ import org.opensearch.sql.legacy.TestUtils;
 import org.opensearch.sql.ppl.PPLIntegTestCase;
 
 /**
- * Backend half of the schema-v2 PPL lint rule validation contract.
+ * Backend half of the schema-v3 PPL lint rule validation contract.
  *
  * <p>This test drives the live {@code POST /_plugins/_ppl} endpoint on the SQL plugin built from
- * the current checkout. For every contract case (see {@code
- * src/test/resources/ppl-lint/contracts/*.spec.json}) it applies the case's cluster settings and
- * asserts, per {@code backend.kind}:
+ * the current checkout. For every contract (see {@code
+ * src/test/resources/ppl-lint/contracts/*.spec.json}) it selects the single {@code expectations[]}
+ * entry that matches the candidate backend version (exactly one must match, or the contract fails
+ * before any query runs), applies the contract's cluster settings, and asserts, per query's {@code
+ * backend.kind}:
  *
  * <ul>
  *   <li>{@code rejection} — the query returns the contracted HTTP status and structured error body
@@ -44,26 +47,34 @@ import org.opensearch.sql.ppl.PPLIntegTestCase;
  *       confirmed by a single run, e.g. head nondeterminism, fallback warnings).
  * </ul>
  *
- * <p>The contract files are shared verbatim with the SQL-owned OSD frontend adapter ({@code
+ * <p>The contract files are shared verbatim with the SQL-owned OSD detector runner ({@code
  * scripts/ppl-lint/run-frontend-contract.mjs}) so the same reviewed cases pin both the OSD analyzer
  * diagnostic count and the SQL backend behavior; neither side can drift without a red build. The
  * rejection-body parsing mirrors {@link
  * org.opensearch.sql.calcite.remote.CalciteErrorReportStageIT}; the Calcite setup follows {@link
  * org.opensearch.sql.calcite.remote.CalcitePPLEventstatsIT}.
  *
+ * <p>While the ephemeral cluster is alive, the test also exports the candidate runtime grammar
+ * bundle it built ({@code GET /_plugins/_ppl/_grammar}) and a small target manifest pairing the
+ * bundle with the backend version and grammar hash. These become workflow artifacts that the
+ * detector-validation job injects into OSD's headless lint API, so both halves validate against the
+ * SAME candidate grammar (design §4.2, §4.3). Export runs only when {@code
+ * -Dppl.lint.grammar.bundle} is set (CI); local runs without it are unaffected.
+ *
  * <p>The suite honors {@code -Dppl.lint.schedule=pr|nightly} (default {@code pr}): PR runs only the
- * fast, deterministic {@code schedule:pr} contracts; nightly runs the full corpus including the
- * runtime-only and softer-oracle rules.
+ * fast, deterministic {@code schedule:pr} contracts; nightly runs the full corpus.
  */
 public class PplLintRuleValidationIT extends PPLIntegTestCase {
 
   private static final String CONTRACT_DIR = "src/test/resources/ppl-lint/contracts";
   private static final String MANIFEST = CONTRACT_DIR + "/manifest.json";
+  private static final String GRAMMAR_API_ENDPOINT = "/_plugins/_ppl/_grammar";
 
   /** Which contracts to run this session; PR is the fast blocking subset. */
   private final String schedule = System.getProperty("ppl.lint.schedule", "pr");
 
   private int[] clusterVersion;
+  private String engineVersionRaw;
 
   @Override
   public void init() throws Exception {
@@ -81,6 +92,11 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
     List<JSONObject> contracts = loadScheduledContracts();
     List<String> failures = new ArrayList<>();
     JSONArray report = new JSONArray();
+
+    // Export the candidate grammar bundle + target manifest while the cluster is
+    // alive. Runs before the contract loop so the artifacts are emitted even if a
+    // contract later fails.
+    exportGrammarArtifacts(failures);
 
     for (JSONObject contract : contracts) {
       String ruleId = contract.getString("ruleId");
@@ -102,33 +118,44 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       JSONObject contract, String ruleId, List<String> failures, JSONArray report)
       throws IOException {
     String index = contract.getString("index");
-    JSONArray cases = contract.getJSONArray("cases");
+    JSONObject queries = contract.getJSONObject("queries");
+    JSONArray expectations = contract.getJSONArray("expectations");
     JSONObject fixture = contract.optJSONObject("backendFixture");
+    boolean calciteOn = fixtureCalciteEnabled(fixture);
 
     List<String> applied = applyClusterSettings(fixture);
     try {
-      for (int i = 0; i < cases.length(); i++) {
-        JSONObject testCase = cases.getJSONObject(i);
-        String caseId = testCase.getString("id");
-        String query = testCase.getString("query").replace("{{index}}", index);
-
-        String minVersion = testCase.optString("minVersionRequired", null);
-        if (minVersion != null && !versionAtLeast(minVersion)) {
-          log(ruleId, caseId, "SKIP (needs >= " + minVersion + ")");
+      JSONObject selected = selectExpectation(ruleId, expectations, calciteOn, failures);
+      if (selected == null) {
+        return; // no/ambiguous version expectation — failure already recorded.
+      }
+      JSONObject expectedQueries = selected.getJSONObject("queries");
+      for (String queryName : expectedQueries.keySet()) {
+        if (!queries.has(queryName)) {
+          failures.add(
+              "["
+                  + ruleId
+                  + "] expectation references unknown query \""
+                  + queryName
+                  + "\" (not in the top-level queries map)");
           continue;
         }
-
-        JSONObject backend = resolveBackend(testCase);
+        JSONObject queryDef = queries.getJSONObject(queryName);
+        String role = queryDef.optString("role", "trigger");
+        String query = queryDef.getString("query").replace("{{index}}", index);
+        JSONObject expected = expectedQueries.getJSONObject(queryName);
+        JSONObject backend = expected.getJSONObject("backend");
         String kind = backend.getString("kind");
-        JSONObject entry = reportEntry(ruleId, caseId, query, kind);
+
+        JSONObject entry = reportEntry(ruleId, queryName, role, query, kind);
         try {
-          verifyCase(kind, caseId, query, backend, entry);
+          verifyCase(kind, queryName, query, backend, entry);
           entry.put("outcome", "pass");
-          log(ruleId, caseId, "PASS (" + kind + ")");
+          log(ruleId, queryName, "PASS (" + kind + ", " + role + ")");
         } catch (AssertionError | RuntimeException e) {
           entry.put("outcome", "fail").put("error", String.valueOf(e.getMessage()));
-          failures.add("[" + ruleId + "/" + caseId + "] " + e.getMessage());
-          log(ruleId, caseId, "FAIL (" + kind + "): " + e.getMessage());
+          failures.add("[" + ruleId + "/" + queryName + "] " + e.getMessage());
+          log(ruleId, queryName, "FAIL (" + kind + "): " + e.getMessage());
         }
         report.put(entry);
       }
@@ -137,107 +164,140 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
     }
   }
 
+  /**
+   * Select the single {@code expectations[]} entry that applies to the candidate backend version
+   * and engine. Exactly one must match: zero means the rule test does not cover this version
+   * (design §9), and more than one means overlapping ranges — both fail before execution (§5.3).
+   */
+  private JSONObject selectExpectation(
+      String ruleId, JSONArray expectations, boolean calciteOn, List<String> failures) {
+    List<JSONObject> matches = new ArrayList<>();
+    for (int i = 0; i < expectations.length(); i++) {
+      JSONObject exp = expectations.getJSONObject(i);
+      if (!versionMatchesRange(exp.optString("version", null))) {
+        continue;
+      }
+      String engine = exp.optString("engine", "");
+      if ("calcite".equals(engine) && !calciteOn) {
+        continue;
+      }
+      matches.add(exp);
+    }
+    String versionLabel = engineVersionRaw == null ? "unknown" : engineVersionRaw;
+    if (matches.size() == 1) {
+      return matches.get(0);
+    }
+    if (matches.isEmpty()) {
+      failures.add(
+          "[" + ruleId + "] no version expectation matches backend version " + versionLabel);
+    } else {
+      failures.add(
+          "["
+              + ruleId
+              + "] "
+              + matches.size()
+              + " expectations match backend version "
+              + versionLabel
+              + " (exactly one required)");
+    }
+    return null;
+  }
+
   private void verifyCase(
-      String kind, String caseId, String query, JSONObject backend, JSONObject reportEntry)
+      String kind, String queryName, String query, JSONObject backend, JSONObject entry)
       throws IOException {
+    BackendObservation obs = observeBackend(query);
+    entry.put("rejected", obs.rejected);
+    entry.put("observed", obs.toJson());
     switch (kind) {
       case "rejection":
-        verifyRejectedCase(
-            caseId,
-            query,
-            backend.getInt("httpStatus"),
-            backend.getJSONObject("body"),
-            reportEntry);
+        assertRejection(
+            queryName, query, obs, backend.getInt("httpStatus"), backend.getJSONObject("body"));
         break;
       case "result-shape":
-        verifyResultShape(caseId, query, backend.optJSONObject("expect"));
+        assertResultShape(queryName, query, obs, backend.optJSONObject("expect"));
         break;
       case "advisory":
-        verifyAdvisory200(caseId, query);
+        assertAdvisory(queryName, query, obs);
         break;
       default:
         throw new IllegalArgumentException(
-            "case \"" + caseId + "\": unknown backend.kind \"" + kind + "\"");
+            "case \"" + queryName + "\": unknown backend.kind \"" + kind + "\"");
     }
   }
 
-  /** Back-compat: accept both v2 {@code backend} and the legacy {@code backendExpected} shape. */
-  private JSONObject resolveBackend(JSONObject testCase) {
-    if (testCase.has("backend")) {
-      return testCase.getJSONObject("backend");
-    }
-    JSONObject legacy = testCase.getJSONObject("backendExpected");
-    int status = legacy.getInt("httpStatus");
-    JSONObject backend = new JSONObject();
-    if (status == 200) {
-      return backend.put("kind", "result-shape").put("httpStatus", 200);
-    }
-    return backend
-        .put("kind", "rejection")
-        .put("httpStatus", status)
-        .put("body", legacy.getJSONObject("body"));
-  }
-
-  /** A rejected query must throw with the contracted status and structured error fields. */
-  private void verifyRejectedCase(
-      String caseId,
-      String query,
-      int expectedStatus,
-      JSONObject expectedBody,
-      JSONObject reportEntry) {
-    ResponseException exception = assertThrows(ResponseException.class, () -> runPplQuery(query));
-
-    int actualStatus = exception.getResponse().getStatusLine().getStatusCode();
-
-    JSONObject body;
+  /**
+   * Run the query once and categorize the observed backend behavior independently of the
+   * expectation, so the report carries the true behavior even when a case fails (e.g. a trigger the
+   * backend unexpectedly accepted). A non-2xx surfaces as a {@link ResponseException} from the REST
+   * client, which is the rejection signal.
+   */
+  private BackendObservation observeBackend(String query) throws IOException {
     try {
-      body = new JSONObject(getResponseBody(exception.getResponse(), true));
-    } catch (IOException e) {
-      throw new RuntimeException(
-          "case \"" + caseId + "\": failed to read rejection response body for query: " + query, e);
+      JSONObject response = runPplQuery(query);
+      return BackendObservation.accepted(response);
+    } catch (ResponseException e) {
+      int status = e.getResponse().getStatusLine().getStatusCode();
+      JSONObject body;
+      try {
+        body = new JSONObject(getResponseBody(e.getResponse(), true));
+      } catch (IOException ioe) {
+        throw new RuntimeException(
+            "failed to read rejection response body for query: " + query, ioe);
+      }
+      return BackendObservation.rejected(status, body);
     }
+  }
 
-    // Record the observed status/type/reason before asserting so backend-report.json
-    // carries the byte-exact engine wording even for a failing case — this is what
-    // the snapshot should be updated to when the contract is deliberately changed.
-    JSONObject observed = new JSONObject().put("httpStatus", actualStatus);
-    JSONObject actualError = body.optJSONObject("error");
-    if (actualError != null) {
-      observed.put("type", actualError.opt("type")).put("reason", actualError.opt("reason"));
-    }
-    reportEntry.put("observed", observed);
-
+  /** A rejected query must have thrown with the contracted status and structured error fields. */
+  private void assertRejection(
+      String queryName,
+      String query,
+      BackendObservation obs,
+      int expectedStatus,
+      JSONObject expectedBody) {
+    assertTrue(
+        "case \""
+            + queryName
+            + "\": expected the backend to REJECT the query but it was accepted: "
+            + query,
+        obs.rejected);
     assertEquals(
-        "case \"" + caseId + "\": unexpected HTTP status for query: " + query,
+        "case \"" + queryName + "\": unexpected HTTP status for query: " + query,
         expectedStatus,
-        actualStatus);
-
+        obs.status);
     assertEquals(
-        "case \"" + caseId + "\": unexpected top-level status field for query: " + query,
+        "case \"" + queryName + "\": unexpected top-level status field for query: " + query,
         expectedBody.getInt("status"),
-        body.getInt("status"));
+        obs.body.getInt("status"));
 
     JSONObject expectedError = expectedBody.getJSONObject("error");
-
+    JSONObject actualError = obs.body.getJSONObject("error");
     assertEquals(
-        "case \"" + caseId + "\": unexpected error.type for query: " + query,
+        "case \"" + queryName + "\": unexpected error.type for query: " + query,
         expectedError.getString("type"),
         actualError.getString("type"));
     if (expectedError.has("reason")) {
       assertEquals(
-          "case \"" + caseId + "\": unexpected error.reason for query: " + query,
+          "case \"" + queryName + "\": unexpected error.reason for query: " + query,
           expectedError.getString("reason"),
           actualError.getString("reason"));
     }
   }
 
   /** A result-shape case returns 200 whose datarows match the declared expectations. */
-  private void verifyResultShape(String caseId, String query, JSONObject expect)
-      throws IOException {
-    JSONObject response = runPplQuery(query);
+  private void assertResultShape(
+      String queryName, String query, BackendObservation obs, JSONObject expect) {
     assertTrue(
         "case \""
-            + caseId
+            + queryName
+            + "\": expected a 200 result but the backend rejected the query: "
+            + query,
+        !obs.rejected);
+    JSONObject response = obs.response;
+    assertTrue(
+        "case \""
+            + queryName
             + "\": expected a datarows array in the 200 response for query: "
             + query,
         response.has("datarows"));
@@ -248,12 +308,12 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
 
     if (expect.optBoolean("datarowsNonEmpty", false)) {
       assertTrue(
-          "case \"" + caseId + "\": expected non-empty datarows for query: " + query,
+          "case \"" + queryName + "\": expected non-empty datarows for query: " + query,
           datarows.length() > 0);
     }
     if (expect.has("datarowsCount")) {
       assertEquals(
-          "case \"" + caseId + "\": unexpected datarows count for query: " + query,
+          "case \"" + queryName + "\": unexpected datarows count for query: " + query,
           expect.getInt("datarowsCount"),
           datarows.length());
     }
@@ -262,7 +322,7 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       int columnIndex = schemaColumnIndex(response, column);
       assertTrue(
           "case \""
-              + caseId
+              + queryName
               + "\": column \""
               + column
               + "\" not found in schema for query: "
@@ -270,7 +330,7 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
           columnIndex >= 0);
       assertTrue(
           "case \""
-              + caseId
+              + queryName
               + "\": expected non-empty datarows to check null column for query: "
               + query,
           datarows.length() > 0);
@@ -278,7 +338,7 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
         JSONArray row = datarows.getJSONArray(r);
         assertTrue(
             "case \""
-                + caseId
+                + queryName
                 + "\": expected column \""
                 + column
                 + "\" to be null in every row but row "
@@ -293,14 +353,20 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
   }
 
   /** An advisory case only requires the query to be accepted (HTTP 200 with data). */
-  private void verifyAdvisory200(String caseId, String query) throws IOException {
-    JSONObject response = runPplQuery(query);
+  private void assertAdvisory(String queryName, String query, BackendObservation obs) {
     assertTrue(
         "case \""
-            + caseId
+            + queryName
+            + "\": expected the query to be accepted (advisory) but it was "
+            + "rejected: "
+            + query,
+        !obs.rejected);
+    assertTrue(
+        "case \""
+            + queryName
             + "\": expected a datarows array in the 200 response for query: "
             + query,
-        response.has("datarows"));
+        obs.response.has("datarows"));
   }
 
   /**
@@ -338,7 +404,90 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
     return -1;
   }
 
+  /** Observed backend behavior for one query, captured before asserting the expectation. */
+  private static final class BackendObservation {
+    final boolean rejected;
+    final int status;
+    final JSONObject body; // rejection body, or null when accepted
+    final JSONObject response; // accepted 200 response, or null when rejected
+
+    private BackendObservation(boolean rejected, int status, JSONObject body, JSONObject response) {
+      this.rejected = rejected;
+      this.status = status;
+      this.body = body;
+      this.response = response;
+    }
+
+    static BackendObservation accepted(JSONObject response) {
+      return new BackendObservation(false, 200, null, response);
+    }
+
+    static BackendObservation rejected(int status, JSONObject body) {
+      return new BackendObservation(true, status, body, null);
+    }
+
+    JSONObject toJson() {
+      JSONObject o = new JSONObject().put("httpStatus", status).put("rejected", rejected);
+      if (body != null) {
+        JSONObject err = body.optJSONObject("error");
+        if (err != null) {
+          o.put("type", err.opt("type")).put("reason", err.opt("reason"));
+        }
+      }
+      return o;
+    }
+  }
+
+  // --- grammar bundle export -------------------------------------------------
+
+  /**
+   * Fetch the candidate runtime grammar bundle and write it plus a target manifest, so the
+   * detector-validation job can lint against the SAME grammar this backend built. Best-effort by
+   * design: a run without {@code -Dppl.lint.grammar.bundle} (local dev) exports nothing; in CI a
+   * fetch/write failure is a real failure — a missing bundle means the detector half cannot run.
+   */
+  private void exportGrammarArtifacts(List<String> failures) {
+    String bundlePath = System.getProperty("ppl.lint.grammar.bundle");
+    if (bundlePath == null || bundlePath.isEmpty()) {
+      return;
+    }
+    try {
+      Response response = client().performRequest(new Request("GET", GRAMMAR_API_ENDPOINT));
+      String bundleBody = getResponseBody(response, true);
+      Files.write(Paths.get(bundlePath), bundleBody.getBytes(StandardCharsets.UTF_8));
+
+      JSONObject bundle = new JSONObject(bundleBody);
+      String grammarHash = bundle.optString("grammarHash", "");
+
+      String targetPath = System.getProperty("ppl.lint.target");
+      if (targetPath != null && !targetPath.isEmpty()) {
+        JSONObject target =
+            new JSONObject()
+                .put("engineVersion", engineVersionRaw == null ? "" : engineVersionRaw)
+                .put("grammarHash", grammarHash)
+                .put("grammarBundle", Paths.get(bundlePath).getFileName().toString());
+        Files.write(Paths.get(targetPath), target.toString(2).getBytes(StandardCharsets.UTF_8));
+      }
+      log("_grammar", "export", "wrote candidate bundle (" + grammarHash + ") to " + bundlePath);
+    } catch (Exception e) {
+      failures.add(
+          "[grammar-export] failed to fetch/write " + GRAMMAR_API_ENDPOINT + ": " + e.getMessage());
+    }
+  }
+
   // --- cluster settings ------------------------------------------------------
+
+  /** True when the contract's fixture leaves Calcite enabled (the default). */
+  private boolean fixtureCalciteEnabled(JSONObject fixture) {
+    if (fixture == null) {
+      return true;
+    }
+    JSONObject settings = fixture.optJSONObject("clusterSettings");
+    if (settings == null || !settings.has("calcite")) {
+      return true;
+    }
+    return settings.getBoolean("calcite");
+  }
 
   /**
    * Apply the contract's cluster settings and return the list of settings changed so the caller can
@@ -402,6 +551,7 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       Response response = client().performRequest(new Request("GET", "/"));
       JSONObject body = new JSONObject(getResponseBody(response, false));
       String number = body.getJSONObject("version").getString("number");
+      engineVersionRaw = number;
       return parseVersion(number);
     } catch (Exception e) {
       // Unknown version → do not skip anything.
@@ -409,16 +559,70 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
     }
   }
 
-  private boolean versionAtLeast(String required) {
+  /**
+   * Test a space-separated semver range (e.g. {@code ">=3.6.0 <3.8.0"}) against the candidate
+   * backend version. An empty/absent range or an unknown cluster version matches (do not
+   * over-filter). Supports the {@code >= > <= < =} comparators the design uses.
+   */
+  private boolean versionMatchesRange(String range) {
+    if (range == null || range.trim().isEmpty()) {
+      return true;
+    }
     if (clusterVersion == null) {
       return true;
     }
-    int[] want = parseVersion(required);
-    for (int i = 0; i < 3; i++) {
-      if (clusterVersion[i] > want[i]) return true;
-      if (clusterVersion[i] < want[i]) return false;
+    for (String token : range.trim().split("\\s+")) {
+      if (!satisfiesComparator(token)) {
+        return false;
+      }
     }
     return true;
+  }
+
+  private boolean satisfiesComparator(String token) {
+    String op;
+    String ver;
+    if (token.startsWith(">=")) {
+      op = ">=";
+      ver = token.substring(2);
+    } else if (token.startsWith("<=")) {
+      op = "<=";
+      ver = token.substring(2);
+    } else if (token.startsWith(">")) {
+      op = ">";
+      ver = token.substring(1);
+    } else if (token.startsWith("<")) {
+      op = "<";
+      ver = token.substring(1);
+    } else if (token.startsWith("=")) {
+      op = "=";
+      ver = token.substring(1);
+    } else {
+      op = "=";
+      ver = token;
+    }
+    int cmp = compareVersion(clusterVersion, parseVersion(ver));
+    switch (op) {
+      case ">=":
+        return cmp >= 0;
+      case "<=":
+        return cmp <= 0;
+      case ">":
+        return cmp > 0;
+      case "<":
+        return cmp < 0;
+      default:
+        return cmp == 0;
+    }
+  }
+
+  private int compareVersion(int[] a, int[] b) {
+    for (int i = 0; i < 3; i++) {
+      if (a[i] != b[i]) {
+        return Integer.compare(a[i], b[i]);
+      }
+    }
+    return 0;
   }
 
   private int[] parseVersion(String raw) {
@@ -489,10 +693,12 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
 
   // --- reporting -------------------------------------------------------------
 
-  private JSONObject reportEntry(String ruleId, String caseId, String query, String kind) {
+  private JSONObject reportEntry(
+      String ruleId, String queryName, String role, String query, String kind) {
     return new JSONObject()
         .put("ruleId", ruleId)
-        .put("caseId", caseId)
+        .put("queryName", queryName)
+        .put("role", role)
         .put("query", query)
         .put("kind", kind);
   }
@@ -503,7 +709,7 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       return;
     }
     try {
-      Files.write(Paths.get(target), report.toString(2).getBytes());
+      Files.write(Paths.get(target), report.toString(2).getBytes(StandardCharsets.UTF_8));
     } catch (IOException e) {
       System.err.println("[ppl-lint] could not write backend report to " + target + ": " + e);
     }

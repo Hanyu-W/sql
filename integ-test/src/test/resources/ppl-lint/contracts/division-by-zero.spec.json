@@ -1,9 +1,8 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "ruleId": "division-by-zero",
-  "oracleClass": "result-shape",
   "grammarSurface": "compiled-simplified",
-  "schedule": "pr",
+  "schedule": "nightly",
   "wiring": {
     "detector": "division-by-zero",
     "enabled": true,
@@ -21,24 +20,39 @@
     "isCalcite": true
   },
   "index": "opensearch-sql_test_index_account",
-  "cases": [
-    {
-      "id": "divide-by-zero-literal",
-      "query": "source={{index}} | eval ratio = balance / 0 | fields ratio | head 1",
-      "frontend": { "diagnosticCount": 1, "severity": "warning" },
-      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "ratio" } }
+  "queries": {
+    "divide-by-zero-literal": {
+      "role": "trigger",
+      "query": "source={{index}} | eval ratio = balance / 0 | fields ratio | head 1"
     },
-    {
-      "id": "divide-by-nonzero-control",
-      "query": "source={{index}} | eval ratio = balance / 2 | fields ratio | head 1",
-      "frontend": { "diagnosticCount": 0 },
-      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+    "divide-by-nonzero-control": {
+      "role": "control",
+      "query": "source={{index}} | eval ratio = balance / 2 | fields ratio | head 1"
     },
+    "modulo-by-zero-flagged": {
+      "role": "trigger",
+      "query": "source={{index}} | eval m = balance % 0 | fields m | head 1"
+    }
+  },
+  "expectations": [
     {
-      "id": "modulo-by-zero-flagged",
-      "query": "source={{index}} | eval m = balance % 0 | fields m | head 1",
-      "frontend": { "diagnosticCount": 1, "severity": "warning" },
-      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "m" } }
+      "version": ">=0.0.0",
+      "queries": {
+        "divide-by-zero-literal": {
+          "detectorCount": 1,
+          "severity": "warning",
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "ratio" } }
+        },
+        "divide-by-nonzero-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+        },
+        "modulo-by-zero-flagged": {
+          "detectorCount": 1,
+          "severity": "warning",
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "m" } }
+        }
+      }
     }
   ]
 }

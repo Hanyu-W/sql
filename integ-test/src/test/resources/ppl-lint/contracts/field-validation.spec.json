@@ -1,9 +1,8 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "ruleId": "field-validation",
-  "oracleClass": "rejection",
   "grammarSurface": "compiled-simplified",
-  "schedule": "pr",
+  "schedule": "nightly",
   "wiring": {
     "detector": "field-validation",
     "enabled": true,
@@ -35,32 +34,48 @@
     }
   },
   "index": "opensearch-sql_test_index_account",
-  "cases": [
-    {
-      "id": "unknown-field-existence",
-      "query": "source={{index}} | where nonexistent_field > 3",
-      "frontend": { "diagnosticCount": 1, "severity": "error", "matchMessage": "nonexistent_field" },
-      "backend": {
-        "kind": "rejection",
-        "httpStatus": 400,
-        "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Field [nonexistent_field] not found." } }
-      }
+  "queries": {
+    "unknown-field-existence": {
+      "role": "trigger",
+      "query": "source={{index}} | where nonexistent_field > 3"
     },
-    {
-      "id": "grok-field-slot-shape-typo",
-      "query": "source={{index}} | grok field=firstname \"%{WORD:w}\"",
-      "frontend": { "diagnosticCount": 1, "severity": "error" },
-      "backend": {
-        "kind": "rejection",
-        "httpStatus": 400,
-        "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Field [field] not found." } }
-      }
+    "grok-field-slot-shape-typo": {
+      "role": "trigger",
+      "query": "source={{index}} | grok field=firstname \"%{WORD:w}\""
     },
+    "known-field-control": {
+      "role": "control",
+      "query": "source={{index}} | where age > 30 | head 1"
+    }
+  },
+  "expectations": [
     {
-      "id": "known-field-control",
-      "query": "source={{index}} | where age > 30 | head 1",
-      "frontend": { "diagnosticCount": 0 },
-      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+      "version": ">=3.4.0",
+      "queries": {
+        "unknown-field-existence": {
+          "detectorCount": 1,
+          "severity": "error",
+          "matchMessage": "nonexistent_field",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Field [nonexistent_field] not found." } }
+          }
+        },
+        "grok-field-slot-shape-typo": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Field [field] not found." } }
+          }
+        },
+        "known-field-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+        }
+      }
     }
   ]
 }

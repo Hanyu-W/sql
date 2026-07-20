@@ -5,27 +5,36 @@
 #
 # Local developer entry point for the PPL lint rule validation contract.
 #
-# Runs both halves of the cross-repository check from a SQL checkout:
-#   1. Frontend: loads the compiled OpenSearch-Dashboards (OSD) PPL analyzer and
-#      asserts the rule's diagnostic counts against the shared contract.
-#   2. Backend: runs the Gradle integration test against a live /_plugins/_ppl
-#      endpoint on the SQL plugin built from this checkout.
+# Runs both halves of the cross-repository check from a SQL checkout, in the same
+# order as CI (design §3.1):
+#   1. Backend: runs the Gradle integration test against a live /_plugins/_ppl
+#      endpoint on the SQL plugin built from this checkout, and — while the
+#      cluster is alive — exports the candidate runtime grammar bundle
+#      (ppl-grammar-bundle.json), a target manifest (target.json), and the
+#      observed backend report (backend-report.json).
+#   2. Detector: bootstraps an OpenSearch-Dashboards (OSD) checkout, deserializes
+#      the candidate bundle through OSD's headless lint API, runs the real
+#      detectors against the same queries, and asserts the detector-vs-backend
+#      differential.
+#
+# The backend half must run first: the detector half lints against the bundle it
+# exports. Use SKIP_BACKEND=1 only if you already have the three artifacts.
 #
 # Usage:
-#   # OSD main frontend check plus SQL backend IT (fetches OSD into .ci/)
+#   # OSD main detector check plus SQL backend IT (fetches OSD into .ci/)
 #   ./scripts/ppl-lint-rule-validation.sh
 #
 #   # Reuse an existing OSD checkout (skips clone + bootstrap if node_modules present)
 #   OSD_SOURCE_PATH=../OpenSearch-Dashboards ./scripts/ppl-lint-rule-validation.sh
 #
 #   # Reproduce a CI run against a specific OSD revision
-#   OSD_REF=<sha-from-job-summary> ./scripts/ppl-lint-rule-validation.sh
+#   OSD_REF=<sha-from-run-manifest> ./scripts/ppl-lint-rule-validation.sh
 #
-#   # Skip one half
+#   # Skip one half (detector needs the backend artifacts to exist already)
 #   SKIP_BACKEND=1 ./scripts/ppl-lint-rule-validation.sh
-#   SKIP_FRONTEND=1 ./scripts/ppl-lint-rule-validation.sh
+#   SKIP_DETECTOR=1 ./scripts/ppl-lint-rule-validation.sh
 #
-#   # Run the full nightly corpus (runtime-only + advisory rules + coverage)
+#   # Run the full nightly corpus (all rules + coverage assertion)
 #   PPL_LINT_SCHEDULE=nightly ./scripts/ppl-lint-rule-validation.sh
 
 set -euo pipefail
@@ -37,22 +46,36 @@ OSD_REPO_URL="${OSD_REPO_URL:-https://github.com/opensearch-project/OpenSearch-D
 OSD_REF="${OSD_REF:-main}"
 DEFAULT_OSD_CHECKOUT="$SQL_ROOT/.ci/OpenSearch-Dashboards"
 CONTRACT_DIR="$SQL_ROOT/integ-test/src/test/resources/ppl-lint/contracts"
-FRONTEND_SCRIPT="$SQL_ROOT/scripts/ppl-lint/run-frontend-contract.mjs"
+DETECTOR_SCRIPT="$SQL_ROOT/scripts/ppl-lint/run-frontend-contract.mjs"
 IT_CLASS="org.opensearch.sql.calcite.remote.PplLintRuleValidationIT"
 # pr (fast, blocking subset) or nightly (full corpus + coverage assertion).
 PPL_LINT_SCHEDULE="${PPL_LINT_SCHEDULE:-pr}"
 
+# Candidate artifacts the backend half exports and the detector half consumes.
+GRAMMAR_BUNDLE="$SQL_ROOT/ppl-grammar-bundle.json"
+TARGET_MANIFEST="$SQL_ROOT/target.json"
+BACKEND_REPORT="$SQL_ROOT/backend-report.json"
+DETECTOR_REPORT="$SQL_ROOT/detector-report.json"
+
 log() { echo "[ppl-lint-rule-validation] $*"; }
 
-resolve_opensearch_version() {
-  local raw
-  raw=$(grep -oE '"opensearch.version", "[^"]+"' build.gradle | head -1 |
-    sed -E 's/.*"opensearch.version", "([^"]+)"/\1/')
-  echo "${raw%%-*}"
+run_backend() {
+  log "Running backend integration test: $IT_CLASS (schedule=$PPL_LINT_SCHEDULE)"
+  ./gradlew :integ-test:integTest --tests "$IT_CLASS" \
+    -Dppl.lint.schedule="$PPL_LINT_SCHEDULE" \
+    -Dppl.lint.report="$BACKEND_REPORT" \
+    -Dppl.lint.grammar.bundle="$GRAMMAR_BUNDLE" \
+    -Dppl.lint.target="$TARGET_MANIFEST"
+  log "Backend integration test passed. Exported: $(basename "$GRAMMAR_BUNDLE"), $(basename "$TARGET_MANIFEST")."
 }
 
-run_frontend() {
+run_detector() {
   local osd_checkout="$1"
+
+  if [[ ! -f "$GRAMMAR_BUNDLE" ]]; then
+    log "ERROR: $GRAMMAR_BUNDLE not found. Run the backend half first (do not set SKIP_BACKEND=1)."
+    exit 2
+  fi
 
   if [[ ! -d "$osd_checkout/node_modules" ]]; then
     log "Bootstrapping OSD at $osd_checkout (this can take a while)..."
@@ -61,20 +84,27 @@ run_frontend() {
     log "Reusing bootstrapped OSD at $osd_checkout (node_modules present)."
   fi
 
-  local os_version
-  os_version="$(resolve_opensearch_version)"
-  log "Running frontend contract against OSD analyzer (PPL_SQL_VERSION=$os_version, schedule=$PPL_LINT_SCHEDULE)..."
+  log "Running detector validation against the candidate bundle (schedule=$PPL_LINT_SCHEDULE)..."
   (
     cd "$osd_checkout"
     PPL_LINT_CONTRACT_DIR="$CONTRACT_DIR" \
       PPL_LINT_SCHEDULE="$PPL_LINT_SCHEDULE" \
-      PPL_SQL_VERSION="$os_version" \
-      PPL_LINT_REPORT="$SQL_ROOT/frontend-report.json" \
-      node -r ./src/setup_node_env "$FRONTEND_SCRIPT"
+      PPL_LINT_GRAMMAR_BUNDLE="$GRAMMAR_BUNDLE" \
+      PPL_LINT_TARGET_MANIFEST="$TARGET_MANIFEST" \
+      PPL_LINT_BACKEND_REPORT="$BACKEND_REPORT" \
+      PPL_LINT_REPORT="$DETECTOR_REPORT" \
+      node -r ./src/setup_node_env "$DETECTOR_SCRIPT"
   )
+  log "Detector validation passed."
 }
 
-if [[ "${SKIP_FRONTEND:-0}" != "1" ]]; then
+if [[ "${SKIP_BACKEND:-0}" != "1" ]]; then
+  run_backend
+else
+  log "SKIP_BACKEND=1 — skipping the SQL backend integration test (using existing artifacts)."
+fi
+
+if [[ "${SKIP_DETECTOR:-0}" != "1" ]]; then
   if [[ -n "${OSD_SOURCE_PATH:-}" ]]; then
     OSD_CHECKOUT="$(cd "$OSD_SOURCE_PATH" && pwd)"
     log "Using existing OSD checkout: $OSD_CHECKOUT"
@@ -95,20 +125,9 @@ if [[ "${SKIP_FRONTEND:-0}" != "1" ]]; then
   OSD_SHA="$(git -C "$OSD_CHECKOUT" rev-parse HEAD)"
   log "OSD revision under test: $OSD_SHA"
 
-  run_frontend "$OSD_CHECKOUT"
-  log "Frontend contract passed."
+  run_detector "$OSD_CHECKOUT"
 else
-  log "SKIP_FRONTEND=1 — skipping the OSD frontend contract."
-fi
-
-if [[ "${SKIP_BACKEND:-0}" != "1" ]]; then
-  log "Running backend integration test: $IT_CLASS (schedule=$PPL_LINT_SCHEDULE)"
-  ./gradlew :integ-test:integTest --tests "$IT_CLASS" \
-    -Dppl.lint.schedule="$PPL_LINT_SCHEDULE" \
-    -Dppl.lint.report="$SQL_ROOT/backend-report.json"
-  log "Backend integration test passed."
-else
-  log "SKIP_BACKEND=1 — skipping the SQL backend integration test."
+  log "SKIP_DETECTOR=1 — skipping the OSD detector contract."
 fi
 
 log "Done."
