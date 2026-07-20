@@ -224,6 +224,10 @@ jobs:
           PPL_LINT_BACKEND_REPORT: ${{ github.workspace }}/artifacts/backend-report.json
           PPL_LINT_REPORT: ${{ github.workspace }}/detector-report.json
         run: |
+          # pipefail so the runner's non-zero exit propagates through `tee` —
+          # otherwise the pipeline takes tee's (success) status and a real
+          # detector failure would go green (a vacuous pass).
+          set -o pipefail
           node -r ./src/setup_node_env \
             "$GITHUB_WORKSPACE/scripts/ppl-lint/run-frontend-contract.mjs" \
             | tee "$GITHUB_WORKSPACE/detector-contract.log"
