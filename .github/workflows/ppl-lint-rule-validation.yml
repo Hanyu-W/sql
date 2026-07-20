@@ -1,23 +1,30 @@
 name: PPL lint rule validation
 
-# Cross-repository check: the OpenSearch-Dashboards (OSD) PPL lint rule
-# `unsupported-window-function-in-eventstats` and the SQL backend must agree.
+# Cross-repository check: the OpenSearch-Dashboards (OSD) PPL lint rules and the
+# SQL backend must agree. A shared, reviewed corpus of contract files pins each
+# rule's OSD analyzer diagnostic count to the live SQL engine's behavior, so
+# neither side can drift unilaterally without a red build.
 #
 # Frontend half (frontend job): a SQL-owned Node script loads the compiled OSD
-# analyzer from an OSD checkout and asserts the rule's diagnostic counts. This
-# runs on a bare ubuntu-latest runner because OSD requires a modern Node whose
-# prebuilt binary needs a newer glibc than the OpenSearch CI container (Amazon
-# Linux 2) provides.
-# Backend half (backend job): a Gradle integration test sends the same queries
-# to the live `/_plugins/_ppl` endpoint of the SQL plugin built from this
-# checkout. This runs inside the OpenSearch CI container because the Gradle
-# test cluster needs it.
+# analyzer from an OSD checkout and asserts each rule's diagnostic counts and
+# catalog wiring. This runs on a bare ubuntu-latest runner because OSD requires a
+# modern Node whose prebuilt binary needs a newer glibc than the OpenSearch CI
+# container (Amazon Linux 2) provides.
+# Backend half (backend job): a Gradle integration test sends the same queries to
+# the live `/_plugins/_ppl` endpoint of the SQL plugin built from this checkout.
+# This runs inside the OpenSearch CI container because the Gradle test cluster
+# needs it.
 #
 # Both jobs are required; a failure on either side fails the SQL PR check.
 #
-# The OSD detector is loaded from `main` by default (PR and nightly runs), so a
-# removed or changed detector is detected. `workflow_dispatch` can target a
-# specific OSD ref to reproduce a run or test an unmerged OSD branch.
+# Schedule: pull_request and workflow_dispatch run the fast, deterministic
+# `schedule:pr` subset. The nightly cron runs the full corpus — runtime-only
+# rules, advisory/soft-oracle rules, and a coverage assertion that every enabled
+# OSD catalog rule has a contract file.
+#
+# The OSD detector is loaded from `main` by default, so a removed or changed
+# detector is caught. `workflow_dispatch` can target a specific OSD ref to
+# reproduce a run or pre-validate an unmerged OSD branch.
 
 on:
   pull_request:
@@ -28,6 +35,11 @@ on:
       osd_ref:
         description: OSD commit or branch to test instead of main
         required: false
+        type: string
+      schedule:
+        description: Contract schedule to run (pr or nightly)
+        required: false
+        default: pr
         type: string
 
 jobs:
@@ -43,6 +55,22 @@ jobs:
         env:
           REQUESTED_REF: ${{ inputs.osd_ref }}
         run: echo "ref=${REQUESTED_REF:-main}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve contract schedule
+        id: schedule
+        env:
+          REQUESTED_SCHEDULE: ${{ inputs.schedule }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ -n "$REQUESTED_SCHEDULE" ]; then
+            value="$REQUESTED_SCHEDULE"
+          elif [ "$EVENT_NAME" = "schedule" ]; then
+            value="nightly"
+          else
+            value="pr"
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+          echo "Contract schedule: \`$value\`" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Checkout OpenSearch-Dashboards
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -99,20 +127,25 @@ jobs:
       - name: Run frontend contract
         working-directory: .ci/OpenSearch-Dashboards
         env:
-          PPL_LINT_CONTRACT_FILE: ${{ github.workspace }}/integ-test/src/test/resources/ppl-lint/unsupported-window-function-in-eventstats.spec.json
+          PPL_LINT_CONTRACT_DIR: ${{ github.workspace }}/integ-test/src/test/resources/ppl-lint/contracts
+          PPL_LINT_SCHEDULE: ${{ steps.schedule.outputs.value }}
           PPL_SQL_VERSION: ${{ steps.os-version.outputs.version }}
+          PPL_LINT_REPORT: ${{ github.workspace }}/frontend-report.json
         run: |
           node -r ./src/setup_node_env \
             "$GITHUB_WORKSPACE/scripts/ppl-lint/run-frontend-contract.mjs" \
             | tee "$GITHUB_WORKSPACE/frontend-contract.log"
 
-      - name: Upload frontend log
-        if: ${{ failure() }}
+      - name: Upload frontend report and corpus
+        if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         continue-on-error: true
         with:
-          name: ppl-lint-frontend-contract-log
-          path: frontend-contract.log
+          name: ppl-lint-frontend-report
+          path: |
+            frontend-contract.log
+            frontend-report.json
+            integ-test/src/test/resources/ppl-lint/contracts
 
   Get-CI-Image-Tag:
     uses: opensearch-project/opensearch-build/.github/workflows/get-ci-image-tag.yml@761e093b8c1349cc07f21c1d681d3b30bf9e1999 # main
@@ -134,6 +167,21 @@ jobs:
       - name: Checkout SQL pull request
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Resolve contract schedule
+        id: schedule
+        env:
+          REQUESTED_SCHEDULE: ${{ inputs.schedule }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ -n "$REQUESTED_SCHEDULE" ]; then
+            value="$REQUESTED_SCHEDULE"
+          elif [ "$EVENT_NAME" = "schedule" ]; then
+            value="nightly"
+          else
+            value="pr"
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
       - name: Set up JDK 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
@@ -144,7 +192,16 @@ jobs:
       - name: Run backend integration test
         run: |
           chown -R 1000:1000 "$(pwd)"
-          su "$(id -un 1000)" -c "./gradlew :integ-test:integTest --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT"
+          su "$(id -un 1000)" -c "./gradlew :integ-test:integTest --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT -Dppl.lint.schedule=${{ steps.schedule.outputs.value }} -Dppl.lint.report=$(pwd)/backend-report.json"
+
+      - name: Upload backend report
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        continue-on-error: true
+        with:
+          name: ppl-lint-backend-report
+          path: |
+            backend-report.json
 
       - name: Upload failure artifacts
         if: ${{ failure() }}

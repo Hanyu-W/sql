@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 2,
+  "ruleId": "field-validation",
+  "oracleClass": "rejection",
+  "grammarSurface": "compiled-simplified",
+  "schedule": "pr",
+  "wiring": {
+    "detector": "field-validation",
+    "enabled": true,
+    "severity": "error",
+    "runtimeOnly": false,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": {}
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false }
+  },
+  "frontendContext": {
+    "isCalcite": true,
+    "visibleIndices": ["{{index}}"],
+    "deriveFromMapping": {
+      "account_number": "long",
+      "balance": "long",
+      "age": "long",
+      "firstname": "text",
+      "lastname": "text",
+      "gender": "text",
+      "address": "text",
+      "employer": "text",
+      "email": "text",
+      "city": "text",
+      "state": "text"
+    }
+  },
+  "index": "opensearch-sql_test_index_account",
+  "cases": [
+    {
+      "id": "unknown-field-existence",
+      "query": "source={{index}} | where nonexistent_field > 3",
+      "frontend": { "diagnosticCount": 1, "severity": "error", "matchMessage": "nonexistent_field" },
+      "backend": {
+        "kind": "rejection",
+        "httpStatus": 400,
+        "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Field [nonexistent_field] not found." } }
+      }
+    },
+    {
+      "id": "grok-field-slot-shape-typo",
+      "query": "source={{index}} | grok field=firstname \"%{WORD:w}\"",
+      "frontend": { "diagnosticCount": 1, "severity": "error" },
+      "backend": {
+        "kind": "rejection",
+        "httpStatus": 400,
+        "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Field [field] not found." } }
+      }
+    },
+    {
+      "id": "known-field-control",
+      "query": "source={{index}} | where age > 30 | head 1",
+      "frontend": { "diagnosticCount": 0 },
+      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 2,
+  "ruleId": "union-min-datasets",
+  "oracleClass": "rejection",
+  "grammarSurface": "runtime-bundle",
+  "schedule": "nightly",
+  "requiredParserRules": ["unionCommand", "unionDataset", "pplCommands"],
+  "wiring": {
+    "detector": "union-min-datasets",
+    "enabled": true,
+    "severity": "error",
+    "runtimeOnly": true,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": { "minVersion": "3.7.0", "engine": "calcite" }
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false }
+  },
+  "frontendContext": {
+    "isCalcite": true
+  },
+  "index": "opensearch-sql_test_index_account",
+  "cases": [
+    {
+      "id": "union-single-dataset",
+      "query": "| union [ source={{index}} ]",
+      "minVersionRequired": "3.7.0",
+      "engineRequired": "calcite",
+      "frontend": { "diagnosticCount": 1, "severity": "error" },
+      "backend": {
+        "kind": "rejection",
+        "httpStatus": 400,
+        "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Union command requires at least two datasets. Provided: 1" } }
+      }
+    },
+    {
+      "id": "union-two-datasets-control",
+      "query": "| union [ source={{index}} ] [ source={{index}} ]",
+      "minVersionRequired": "3.7.0",
+      "engineRequired": "calcite",
+      "frontend": { "diagnosticCount": 0 },
+      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+    }
+  ]
+}
