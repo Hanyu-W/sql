@@ -133,8 +133,8 @@ jobs:
 
       - name: Run backend integration test (live /_plugins/_ppl)
         run: |
-          chown -R 1000:1000 `pwd`
-          su `id -un 1000` -c "./gradlew :integ-test:integTest --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT"
+          chown -R 1000:1000 "$(pwd)"
+          su "$(id -un 1000)" -c "./gradlew :integ-test:integTest --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT"
 
       - name: Upload failure artifacts
         if: ${{ failure() }}
