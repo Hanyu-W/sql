@@ -4,7 +4,7 @@
  */
 
 /**
- * SQL-owned frontend contract adapter for the PPL lint rule validation CI.
+ * SQL-owned detector-validation runner for the PPL lint rule validation CI.
  *
  * This script is executed from inside an OpenSearch-Dashboards (OSD) checkout,
  * for example:
@@ -12,56 +12,61 @@
  *   cd .ci/OpenSearch-Dashboards
  *   PPL_LINT_CONTRACT_DIR=<abs path to contracts dir> \
  *   PPL_LINT_SCHEDULE=pr \
- *   PPL_SQL_VERSION=<opensearch test version> \
- *   PPL_LINT_REPORT=<abs path to frontend-report.json> \
+ *   PPL_LINT_GRAMMAR_BUNDLE=<abs path to ppl-grammar-bundle.json> \
+ *   PPL_LINT_TARGET_MANIFEST=<abs path to target.json> \
+ *   PPL_LINT_BACKEND_REPORT=<abs path to backend-report.json> \
+ *   PPL_LINT_REPORT=<abs path to detector-report.json> \
  *   node -r ./src/setup_node_env \
  *     "$GITHUB_WORKSPACE/scripts/ppl-lint/run-frontend-contract.mjs"
  *
  * `node -r ./src/setup_node_env` installs OSD's process-wide auto-transpilation
  * hook (`@osd/optimizer`'s `registerNodeAutoTranspilation`), which transpiles
- * `packages/osd-monaco/src/**` TypeScript on `require()` regardless of where the
- * entry script lives. That is what lets this SQL-owned `.mjs` load the compiled
- * OSD analyzer without OSD's own Jest.
+ * `src/plugins/**` and `packages/osd-monaco/src/**` TypeScript on `require()`
+ * regardless of where the entry script lives. That is what lets this SQL-owned
+ * `.mjs` load OSD's Node-safe headless lint API without OSD's own Jest.
  *
- * The analyzer, catalog and detector registry are NOT re-exported from the
- * `@osd/monaco` package barrel, so they are loaded via their deep module paths.
- * Because this is an ES module, `require` is obtained with `createRequire`, and
- * the modules are resolved against the OSD checkout root (process.cwd()) rather
- * than the location of this script (which lives in the SQL repo, not OSD).
- *
- * This adapter is the frontend half of a schema-v2 cross-repository differential
+ * This is the detector half of a schema-v3 cross-repository differential
  * contract (see integ-test/src/test/resources/ppl-lint/contracts/*.spec.json).
- * It asserts three things per rule:
+ * Unlike the earlier PoC — which linted with the compiled analyzer or a
+ * hand-rolled reparse against OSD `main`'s checked-in grammar — it lints against
+ * the *candidate* runtime grammar bundle the SQL backend job exported, via OSD's
+ * production headless API (`headless_ppl_lint`). Both halves therefore validate
+ * the exact same candidate grammar (design §4.3).
+ *
+ * It asserts, per contract:
  *   1. Wiring: the OSD catalog entry deep-equals the contract's `wiring` block,
- *      so a silently removed/retyped/regated detector reds the build.
- *   2. Diagnostics: for each case the analyzer emits exactly the contracted
- *      number of `ruleId` diagnostics (the differential the backend half pins to
- *      live-engine behavior).
- *   3. Coverage (nightly only): every enabled catalog rule has a contract file.
+ *      so a silently removed/retyped/re-gated/re-severitied detector reds the
+ *      build.
+ *   2. Detector: for the single version expectation that matches the candidate
+ *      backend version, each query emits exactly the contracted number of
+ *      `ruleId` diagnostics at the contracted severity.
+ *   3. Differential (when PPL_LINT_BACKEND_REPORT is supplied): the observed
+ *      backend behavior for each query agrees with the observed detector output
+ *      — a trigger the detector flags is one the backend rejected; a control the
+ *      detector passes is one the backend accepted (design §3.2, §4.3).
+ *   4. Coverage (nightly only): every enabled catalog rule has a contract file.
  */
 
 import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
 
-const RULE_MODULE = 'packages/osd-monaco/src/ppl/ppl_language_analyzer';
-const CATALOG_MODULE = 'packages/osd-monaco/src/ppl/lint/catalog';
-const DETECTOR_REGISTRY_MODULE = 'packages/osd-monaco/src/ppl/lint/detector_registry';
-const LINT_RUNNER_MODULE = 'packages/osd-monaco/src/ppl/lint/lint_runner';
-const RULE_INDEX_MODULE = 'packages/osd-monaco/src/ppl/lint/rule_index';
-const GRAMMAR_MODULE = 'packages/osd-antlr-grammar/target/index.js';
-// Explain lint lives only on OSD branches that ship the explain rule class; the
-// adapter feature-detects it and skips explain cases when it is absent.
-const RUN_EXPLAIN_MODULE = 'packages/osd-monaco/src/ppl/lint/explain/run_explain_lint';
+// OSD's Node-safe headless lint API (design §4.3). Deep-path module; resolved
+// against the OSD checkout root, not this script's SQL-repo location.
+const HEADLESS_MODULE = 'src/plugins/data/public/antlr/opensearch_ppl/headless_ppl_lint';
+// The Monaco-free engine barrel (@osd/monaco/ppl-lint) exposes the catalog; the
+// detector registry is a deep import used only for the wiring registration check.
+const CATALOG_MODULE = 'packages/osd-monaco/ppl-lint';
+const DETECTOR_REGISTRY_MODULE = 'packages/osd-monaco/target/ppl/lint/detector_registry.js';
 
 function log(message) {
   // eslint-disable-next-line no-console
-  console.log(`[ppl-lint-frontend-contract] ${message}`);
+  console.log(`[ppl-lint-detector-contract] ${message}`);
 }
 
 function fatal(message) {
   // eslint-disable-next-line no-console
-  console.error(`[ppl-lint-frontend-contract] FATAL: ${message}`);
+  console.error(`[ppl-lint-detector-contract] FATAL: ${message}`);
   process.exit(2);
 }
 
@@ -138,19 +143,84 @@ function loadOsd() {
     }
   };
 
-  const { PPLLanguageAnalyzer } = resolveOsd(RULE_MODULE);
+  const headless = resolveOsd(HEADLESS_MODULE);
   const { getBundledCatalog } = resolveOsd(CATALOG_MODULE);
-  const { getDetector } = resolveOsd(DETECTOR_REGISTRY_MODULE);
-  const { runLint } = resolveOsd(LINT_RUNNER_MODULE);
-  const ruleIndex = resolveOsd(RULE_INDEX_MODULE);
-  const grammar = resolveOsd(GRAMMAR_MODULE, { optional: true });
-  const explain = resolveOsd(RUN_EXPLAIN_MODULE, { optional: true });
+  const registry = resolveOsd(DETECTOR_REGISTRY_MODULE, { optional: true });
 
-  if (typeof PPLLanguageAnalyzer !== 'function') {
-    fatal(`PPLLanguageAnalyzer was not a constructor when loaded from ${RULE_MODULE}.`);
+  const { deserializeBundleOrThrow, lintQueryWithBundle } = headless;
+  if (typeof deserializeBundleOrThrow !== 'function' || typeof lintQueryWithBundle !== 'function') {
+    fatal(
+      `Headless lint API not found in ${HEADLESS_MODULE}. ` +
+        `Expected exports deserializeBundleOrThrow + lintQueryWithBundle. ` +
+        `Is the OSD checkout on a branch that ships the headless API (design §4.3)?`
+    );
+  }
+  if (typeof getBundledCatalog !== 'function') {
+    fatal(`getBundledCatalog not found in ${CATALOG_MODULE}.`);
   }
 
-  return { PPLLanguageAnalyzer, getBundledCatalog, getDetector, runLint, ruleIndex, grammar, explain, osdRoot };
+  const getDetector = registry && registry.getDetector;
+  return { deserializeBundleOrThrow, lintQueryWithBundle, getBundledCatalog, getDetector, osdRoot };
+}
+
+/** Load the candidate grammar bundle + deserialize it once (fail loud; CI has no fallback). */
+function loadCandidateGrammar(osd) {
+  const bundlePath = process.env.PPL_LINT_GRAMMAR_BUNDLE;
+  if (!bundlePath) {
+    fatal(
+      'PPL_LINT_GRAMMAR_BUNDLE is not set. Detector validation lints against the candidate ' +
+        'runtime grammar bundle exported by the backend job; there is no compiled fallback.'
+    );
+  }
+  if (!fs.existsSync(bundlePath)) {
+    fatal(`Candidate grammar bundle not found: ${bundlePath}`);
+  }
+  let bundle;
+  try {
+    bundle = JSON.parse(fs.readFileSync(bundlePath, 'utf8'));
+  } catch (error) {
+    fatal(`Could not parse grammar bundle ${bundlePath}: ${error.message}`);
+  }
+  try {
+    return osd.deserializeBundleOrThrow(bundle);
+  } catch (error) {
+    fatal(`Could not deserialize candidate grammar bundle: ${error.message}`);
+  }
+  return undefined; // unreachable
+}
+
+/** Read the target manifest (engineVersion + grammarHash) written beside the bundle. */
+function loadTarget() {
+  const targetPath = process.env.PPL_LINT_TARGET_MANIFEST;
+  if (targetPath && fs.existsSync(targetPath)) {
+    try {
+      return JSON.parse(fs.readFileSync(targetPath, 'utf8'));
+    } catch (error) {
+      log(`WARN: could not parse target manifest ${targetPath}: ${error.message}`);
+    }
+  }
+  // Back-compat / local runs without a target manifest.
+  return { engineVersion: process.env.PPL_SQL_VERSION || '', grammarHash: '' };
+}
+
+/** Index the backend report by `${ruleId}::${queryName}` for the differential. */
+function loadBackendReport() {
+  const reportPath = process.env.PPL_LINT_BACKEND_REPORT;
+  if (!reportPath || !fs.existsSync(reportPath)) {
+    return undefined;
+  }
+  let entries;
+  try {
+    entries = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+  } catch (error) {
+    log(`WARN: could not parse backend report ${reportPath}: ${error.message}`);
+    return undefined;
+  }
+  const byKey = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    byKey.set(`${entry.ruleId}::${entry.queryName}`, entry);
+  }
+  return byKey;
 }
 
 /** Coerce "3.8.0-SNAPSHOT" / "3.8" to a comparable [major, minor, patch]. */
@@ -161,15 +231,77 @@ function parseVersion(v) {
   return [Number(m[1]), Number(m[2] || 0), Number(m[3] || 0)];
 }
 
-function versionGte(a, b) {
-  const pa = parseVersion(a);
-  const pb = parseVersion(b);
-  if (!pa || !pb) return true; // unknown → do not skip
+function compareVersion(a, b) {
   for (let i = 0; i < 3; i++) {
-    if (pa[i] > pb[i]) return true;
-    if (pa[i] < pb[i]) return false;
+    if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  }
+  return 0;
+}
+
+/**
+ * Test a space-separated semver range (e.g. ">=3.6.0 <3.8.0") against the
+ * candidate backend version. An empty range or an unknown version matches (do
+ * not over-filter). Mirrors PplLintRuleValidationIT.versionMatchesRange.
+ */
+function versionMatchesRange(range, version) {
+  if (!range || !range.trim()) return true;
+  const have = parseVersion(version);
+  if (!have) return true;
+  for (const token of range.trim().split(/\s+/)) {
+    let op = '=';
+    let ver = token;
+    if (token.startsWith('>=')) {
+      op = '>=';
+      ver = token.slice(2);
+    } else if (token.startsWith('<=')) {
+      op = '<=';
+      ver = token.slice(2);
+    } else if (token.startsWith('>')) {
+      op = '>';
+      ver = token.slice(1);
+    } else if (token.startsWith('<')) {
+      op = '<';
+      ver = token.slice(1);
+    } else if (token.startsWith('=')) {
+      op = '=';
+      ver = token.slice(1);
+    }
+    const cmp = compareVersion(have, parseVersion(ver) || [0, 0, 0]);
+    const ok =
+      (op === '>=' && cmp >= 0) ||
+      (op === '<=' && cmp <= 0) ||
+      (op === '>' && cmp > 0) ||
+      (op === '<' && cmp < 0) ||
+      (op === '=' && cmp === 0);
+    if (!ok) return false;
   }
   return true;
+}
+
+/**
+ * Select the single expectation that applies to the candidate version + engine.
+ * Exactly one must match (design §5.3): zero means the rule test does not cover
+ * this version; more than one means overlapping ranges. Both fail.
+ */
+function selectExpectation(spec, version, isCalcite, failures) {
+  const expectations = spec.expectations || [];
+  const matches = expectations.filter((exp) => {
+    if (!versionMatchesRange(exp.version, version)) return false;
+    if (exp.engine === 'calcite' && isCalcite !== true) return false;
+    return true;
+  });
+  if (matches.length === 1) {
+    return matches[0];
+  }
+  const label = version || 'unknown';
+  if (matches.length === 0) {
+    failures.push(`[${spec.ruleId}] no version expectation matches backend version ${label}.`);
+  } else {
+    failures.push(
+      `[${spec.ruleId}] ${matches.length} expectations match backend version ${label} (exactly one required).`
+    );
+  }
+  return undefined;
 }
 
 /**
@@ -198,7 +330,9 @@ function checkWiring(spec, catalog, getDetector, failures) {
   ];
   for (const [name, expected, actual] of checks) {
     if (expected !== undefined && expected !== actual) {
-      failures.push(`[${ruleId}] wiring.${name} expected ${JSON.stringify(expected)} but catalog has ${JSON.stringify(actual)}.`);
+      failures.push(
+        `[${ruleId}] wiring.${name} expected ${JSON.stringify(expected)} but catalog has ${JSON.stringify(actual)}.`
+      );
     }
   }
 
@@ -206,12 +340,14 @@ function checkWiring(spec, catalog, getDetector, failures) {
     const a = entry.appliesTo || {};
     for (const key of ['minVersion', 'maxVersion', 'engine']) {
       if (wiring.appliesTo[key] !== undefined && wiring.appliesTo[key] !== a[key]) {
-        failures.push(`[${ruleId}] wiring.appliesTo.${key} expected ${JSON.stringify(wiring.appliesTo[key])} but catalog has ${JSON.stringify(a[key])}.`);
+        failures.push(
+          `[${ruleId}] wiring.appliesTo.${key} expected ${JSON.stringify(wiring.appliesTo[key])} but catalog has ${JSON.stringify(a[key])}.`
+        );
       }
     }
   }
 
-  if (wiring.detector && typeof getDetector(wiring.detector) !== 'function') {
+  if (wiring.detector && typeof getDetector === 'function' && typeof getDetector(wiring.detector) !== 'function') {
     failures.push(`[${ruleId}] has no registered detector "${wiring.detector}".`);
   }
 
@@ -219,16 +355,21 @@ function checkWiring(spec, catalog, getDetector, failures) {
 }
 
 /**
- * Build the per-case lint context. Derives `fields`/`typeMap` from the
- * `deriveFromMapping` block (a single source shared with the backend seeding),
- * and sets an enable override for default-off rules that declare `forceEnable`.
+ * Build the per-contract lint context passed to `lintQueryWithBundle`. Derives
+ * `fields`/`typeMap` from the `deriveFromMapping` block (a single source shared
+ * with the backend seeding), pins `dataSourceVersion`/`knownVersion` to the
+ * candidate backend version so version filtering matches the backend, and sets
+ * an enable override for default-off rules that declare `forceEnable`.
  */
-function buildContext(spec, sqlVersion) {
+function buildContext(spec, engineVersion) {
   const fc = spec.frontendContext || {};
   const context = {
     isCalcite: fc.isCalcite !== false,
-    dataSourceVersion: sqlVersion,
-    grammarSurface: spec.grammarSurface === 'runtime-bundle' ? 'runtime-bundle' : 'compiled-simplified',
+    dataSourceVersion: engineVersion || undefined,
+    // Pin the "latest verified engine" to the candidate version rather than the
+    // hardcoded OSD_KNOWN_VERSION ('3.7.0'), which can mis-filter rules near a
+    // version boundary (design §4.3, D-version).
+    knownVersion: engineVersion || undefined,
   };
 
   const mapping = fc.deriveFromMapping;
@@ -257,99 +398,36 @@ function buildContext(spec, sqlVersion) {
   return context;
 }
 
-/** Count diagnostics for this rule via the compiled-simplified analyzer. */
-function lintCompiled(analyzer, query, context, ruleId) {
-  const result = analyzer.lint(query, context);
-  return result.diagnostics.filter((d) => d.ruleId === ruleId);
-}
-
-/**
- * Count diagnostics for a runtime-only rule by parsing with the exported runtime
- * grammar and running the detector registry directly. This exercises OSD-main's
- * runtime grammar, NOT the cluster-versioned bundle production fetches, so it is
- * a wiring/coverage check rather than a true cluster-grammar fidelity check.
- * Returns undefined when the runtime grammar can't reach the rule on this OSD
- * checkout (the rule's parser rules are absent) so the caller can skip cleanly.
- */
-function lintRuntime(osd, spec, query, context, ruleId) {
-  const { grammar, runLint, ruleIndex } = osd;
-  if (!grammar || !grammar.OpenSearchPPLParser || !grammar.OpenSearchPPLLexer) {
-    return undefined;
-  }
-  const antlr = requireAntlr(osd.osdRoot);
-  if (!antlr) {
-    return undefined;
-  }
-  const { OpenSearchPPLLexer, OpenSearchPPLParser } = grammar;
-
-  const runtimeMap = new Map();
-  const names = OpenSearchPPLParser.ruleNames || [];
-  for (let i = 0; i < names.length; i++) {
-    runtimeMap.set(names[i], i);
-  }
-
-  // The exported runtime grammar on this OSD checkout may predate the command a
-  // runtime-only rule keys off (union/multisearch/replace are absent on the
-  // legacy `opensearch_ppl` grammar). Detecting the absence here lets the caller
-  // record a clean skip — the wiring assertion already ran — instead of a false
-  // "0 diagnostics" failure.
-  const required = spec.requiredParserRules || [];
-  for (const name of required) {
-    if (!runtimeMap.has(name)) {
-      return undefined;
-    }
-  }
-
-  const input = antlr.CharStream.fromString(query);
-  const lexer = new OpenSearchPPLLexer(input);
-  const tokenStream = new antlr.CommonTokenStream(lexer);
-  const parser = new OpenSearchPPLParser(tokenStream);
-  parser.removeErrorListeners();
-  const tree = parser.root ? parser.root() : parser.pplStatement && parser.pplStatement();
-  if (!tree) {
-    return undefined;
-  }
-
-  const ruleNameToIndex = ruleIndex.createRuntimeRuleNameToIndex(runtimeMap);
-
-  const diagnostics = runLint(tree, {
-    ruleNameToIndex,
-    dataSourceVersion: context.dataSourceVersion,
-    context: { ...context, grammarSurface: 'runtime-bundle' },
-  });
-  return diagnostics.filter((d) => d.ruleId === ruleId);
-}
-
-let cachedAntlr;
-function requireAntlr(osdRoot) {
-  if (cachedAntlr !== undefined) {
-    return cachedAntlr || undefined;
-  }
-  try {
-    const require = createRequire(path.join(osdRoot, 'noop.js'));
-    cachedAntlr = require('antlr4ng');
-  } catch {
-    cachedAntlr = null;
-  }
-  return cachedAntlr || undefined;
-}
-
 function main() {
   const schedule = process.env.PPL_LINT_SCHEDULE || 'pr';
-  const sqlVersion = process.env.PPL_SQL_VERSION;
   const reportPath = process.env.PPL_LINT_REPORT;
 
   const osd = loadOsd();
-  const { PPLLanguageAnalyzer, getBundledCatalog, getDetector, osdRoot } = osd;
+  const { getBundledCatalog, getDetector, lintQueryWithBundle, osdRoot } = osd;
   const catalog = getBundledCatalog();
-  const analyzer = new PPLLanguageAnalyzer();
+
+  const grammar = loadCandidateGrammar(osd);
+  const target = loadTarget();
+  const engineVersion = target.engineVersion || process.env.PPL_SQL_VERSION || '';
+  const backendReport = loadBackendReport();
 
   const contracts = loadContracts();
   const failures = [];
-  const report = { osdRoot, schedule, sqlVersion, results: [] };
+  const report = {
+    osdRoot,
+    schedule,
+    engineVersion,
+    grammarHash: target.grammarHash || '',
+    differential: !!backendReport,
+    results: [],
+  };
 
   log(`OSD root: ${osdRoot}`);
-  log(`schedule=${schedule} PPL_SQL_VERSION=${sqlVersion || '(unset)'} contracts=${contracts.length}`);
+  log(
+    `schedule=${schedule} engineVersion=${engineVersion || '(unset)'} ` +
+      `grammarHash=${target.grammarHash || '(unset)'} differential=${!!backendReport} ` +
+      `contracts=${contracts.length}`
+  );
 
   for (const { file, spec } of contracts) {
     const ruleId = spec.ruleId;
@@ -367,66 +445,100 @@ function main() {
       continue;
     }
 
-    const context = buildContext(spec, sqlVersion);
-    const isRuntime = context.grammarSurface === 'runtime-bundle';
+    const context = buildContext(spec, engineVersion);
+    const expectation = selectExpectation(spec, engineVersion, context.isCalcite, failures);
+    if (!expectation) {
+      continue;
+    }
 
-    for (const testCase of spec.cases || []) {
-      const query = testCase.query.split('{{index}}').join(index);
-      const fe = testCase.frontend || {};
-      const expected = fe.diagnosticCount;
-
-      // Per-case version/engine gate mirrors the backend so both halves skip
-      // identically instead of disagreeing on a self-suppressed rule.
-      if (testCase.minVersionRequired && !versionGte(sqlVersion, testCase.minVersionRequired)) {
-        log(`SKIP ${ruleId}/${testCase.id} (needs >= ${testCase.minVersionRequired}, have ${sqlVersion || 'unknown'})`);
+    const queries = spec.queries || {};
+    const expectedQueries = expectation.queries || {};
+    for (const queryName of Object.keys(expectedQueries)) {
+      const queryDef = queries[queryName];
+      if (!queryDef) {
+        failures.push(`[${ruleId}] expectation references unknown query "${queryName}".`);
         continue;
       }
-      if (testCase.engineRequired === 'calcite' && context.isCalcite !== true) {
-        log(`SKIP ${ruleId}/${testCase.id} (needs calcite engine)`);
-        continue;
-      }
+      const role = queryDef.role || 'trigger';
+      const query = queryDef.query.split('{{index}}').join(index);
+      const expected = expectedQueries[queryName];
+      const expectedCount = expected.detectorCount;
 
-      let matches;
-      if (testCase.explainFixture) {
-        matches = lintExplain(osd, spec, testCase, context, ruleId);
-        if (matches === undefined) {
-          log(`SKIP ${ruleId}/${testCase.id} (explain lint unavailable on this OSD checkout)`);
-          continue;
-        }
-      } else if (isRuntime) {
-        matches = lintRuntime(osd, spec, query, context, ruleId);
-        if (matches === undefined) {
-          // Runtime grammar can't reach this rule on this OSD checkout: the
-          // wiring assertion above still ran, so record a skip (not a failure).
-          log(`SKIP ${ruleId}/${testCase.id} (runtime grammar rule absent on this OSD checkout; wiring asserted)`);
-          report.results.push({ ruleId, caseId: testCase.id, query, expected, actual: null, skipped: 'runtime-grammar-absent' });
-          continue;
-        }
-      } else {
-        matches = lintCompiled(analyzer, query, context, ruleId);
-      }
-
+      const result = lintQueryWithBundle(query, grammar, context);
+      const matches = (result.diagnostics || []).filter((d) => d.ruleId === ruleId);
       const actual = matches.length;
-      const ok = actual === expected;
+      const ok = actual === expectedCount;
 
-      log(`  ${ok ? 'PASS' : 'FAIL'} ${ruleId}/${testCase.id}: expected ${expected}, got ${actual} — ${query}`);
+      log(
+        `  ${ok ? 'PASS' : 'FAIL'} ${ruleId}/${queryName} (${role}): ` +
+          `expected ${expectedCount}, got ${actual} — ${query}`
+      );
 
       const severityOk =
-        !fe.severity || actual === 0 || matches.every((m) => m.severity === fe.severity);
+        !expected.severity || actual === 0 || matches.every((m) => m.severity === expected.severity);
       const messageOk =
-        !fe.matchMessage || matches.some((m) => (m.message || '').includes(fe.matchMessage));
+        !expected.matchMessage || matches.some((m) => (m.message || '').includes(expected.matchMessage));
 
-      report.results.push({ ruleId, caseId: testCase.id, query, expected, actual, severities: matches.map((m) => m.severity) });
+      const resultEntry = {
+        ruleId,
+        queryName,
+        role,
+        query,
+        expected: expectedCount,
+        actual,
+        severities: matches.map((m) => m.severity),
+      };
 
       if (!ok) {
-        failures.push(`[${ruleId}/${testCase.id}] expected ${expected} "${ruleId}" diagnostic(s), got ${actual} for: ${query}`);
+        failures.push(
+          `[${ruleId}/${queryName}] expected ${expectedCount} "${ruleId}" diagnostic(s), got ${actual} for: ${query}`
+        );
       }
       if (!severityOk) {
-        failures.push(`[${ruleId}/${testCase.id}] expected severity "${fe.severity}" for: ${query}`);
+        failures.push(`[${ruleId}/${queryName}] expected severity "${expected.severity}" for: ${query}`);
       }
       if (!messageOk) {
-        failures.push(`[${ruleId}/${testCase.id}] expected message to contain "${fe.matchMessage}" for: ${query}`);
+        failures.push(`[${ruleId}/${queryName}] expected message to contain "${expected.matchMessage}" for: ${query}`);
       }
+
+      // Differential: the observed backend behavior must agree with the observed
+      // detector output through the shared contract (design §3.2, §4.3). A
+      // rejection-kind query the backend rejected must be one the detector flags;
+      // a success/advisory query the backend accepted must be one the detector
+      // passes. This catches drift the two halves would otherwise hide by both
+      // pinning to the same JSON.
+      if (backendReport) {
+        const backendKind = expected.backend && expected.backend.kind;
+        const expectRejected = backendKind === 'rejection';
+        const be = backendReport.get(`${ruleId}::${queryName}`);
+        if (!be) {
+          failures.push(`[${ruleId}/${queryName}] no backend report entry (backend did not run this query).`);
+        } else {
+          resultEntry.backendRejected = !!be.rejected;
+          if (!!be.rejected !== expectRejected) {
+            failures.push(
+              `[${ruleId}/${queryName}] differential: backend ${be.rejected ? 'rejected' : 'accepted'} ` +
+                `but the contract's backend.kind="${backendKind}" expects ${expectRejected ? 'rejection' : 'acceptance'} for: ${query}`
+            );
+          }
+          // Trigger/control cross-check against the detector's own verdict.
+          const detectorFlagged = actual > 0;
+          if (role === 'trigger' && detectorFlagged !== !!be.rejected) {
+            failures.push(
+              `[${ruleId}/${queryName}] differential: trigger detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
+                `but backend ${be.rejected ? 'rejected' : 'accepted'} for: ${query}`
+            );
+          }
+          if (role === 'control' && (detectorFlagged || be.rejected)) {
+            failures.push(
+              `[${ruleId}/${queryName}] differential: control must pass on both sides but detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
+                `and backend ${be.rejected ? 'rejected' : 'accepted'} for: ${query}`
+            );
+          }
+        }
+      }
+
+      report.results.push(resultEntry);
     }
   }
 
@@ -452,39 +564,13 @@ function main() {
 
   if (failures.length > 0) {
     // eslint-disable-next-line no-console
-    console.error(`[ppl-lint-frontend-contract] FAIL: ${failures.length} problem(s):\n- ${failures.join('\n- ')}`);
+    console.error(
+      `[ppl-lint-detector-contract] FAIL: ${failures.length} problem(s):\n- ${failures.join('\n- ')}`
+    );
     process.exit(1);
   }
 
-  log(`PASS: all contracts agreed with the OSD analyzer (schedule=${schedule}).`);
-}
-
-/**
- * Explain-case handling. Loads the captured plan fixture and runs the OSD explain
- * lint over it. Returns undefined when the explain rule class is not present on
- * this OSD checkout (feature-detected via the optional module).
- */
-function lintExplain(osd, spec, testCase, context, ruleId) {
-  if (!osd.explain || typeof osd.explain.runExplainLint !== 'function') {
-    return undefined;
-  }
-  const dir = process.env.PPL_LINT_CONTRACT_DIR;
-  if (!dir) {
-    return undefined;
-  }
-  const fixturePath = path.join(dir, testCase.explainFixture);
-  if (!fs.existsSync(fixturePath)) {
-    return undefined;
-  }
-  const plan = JSON.parse(fs.readFileSync(fixturePath, 'utf8'));
-  const query = testCase.query.split('{{index}}').join(spec.index);
-  const diagnostics = osd.explain.runExplainLint(plan, {
-    query,
-    overrides: context.overrides,
-    dataSourceVersion: context.dataSourceVersion,
-    isCalcite: context.isCalcite,
-  });
-  return (diagnostics || []).filter((d) => d.ruleId === ruleId);
+  log(`PASS: all contracts agreed with the OSD detectors on the candidate bundle (schedule=${schedule}).`);
 }
 
 main();

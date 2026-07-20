@@ -63,7 +63,10 @@ http-client.env.json
 memory-bank
 
 # PPL lint rule validation contract run artifacts (uploaded in CI, not committed)
-frontend-report.json
 backend-report.json
 backend-report-nightly.json
-frontend-contract.log
+detector-report.json
+detector-contract.log
+ppl-grammar-bundle.json
+target.json
+run-manifest.json

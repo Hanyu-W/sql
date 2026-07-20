@@ -1,7 +1,6 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "ruleId": "unsupported-window-function-in-eventstats",
-  "oracleClass": "rejection",
   "grammarSurface": "compiled-simplified",
   "schedule": "pr",
   "wiring": {
@@ -21,29 +20,37 @@
     "isCalcite": true
   },
   "index": "opensearch-sql_test_index_account",
-  "cases": [
+  "queries": {
+    "eventstats-rank": {
+      "role": "trigger",
+      "query": "source={{index}} | eventstats rank() as rank_value"
+    },
+    "eventstats-avg-control": {
+      "role": "control",
+      "query": "source={{index}} | eventstats avg(age) as avg_age"
+    }
+  },
+  "expectations": [
     {
-      "id": "eventstats-rank",
-      "query": "source={{index}} | eventstats rank() as rank_value",
-      "minVersionRequired": "3.4.0",
-      "engineRequired": "calcite",
-      "frontend": { "diagnosticCount": 1, "severity": "error" },
-      "backend": {
-        "kind": "rejection",
-        "httpStatus": 400,
-        "body": {
-          "status": 400,
-          "error": { "type": "CalciteUnsupportedException", "reason": "Unexpected window function: rank" }
+      "version": ">=3.4.0",
+      "queries": {
+        "eventstats-rank": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": { "type": "CalciteUnsupportedException", "reason": "Unexpected window function: rank" }
+            }
+          }
+        },
+        "eventstats-avg-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
         }
       }
-    },
-    {
-      "id": "eventstats-avg-control",
-      "query": "source={{index}} | eventstats avg(age) as avg_age",
-      "minVersionRequired": "3.4.0",
-      "engineRequired": "calcite",
-      "frontend": { "diagnosticCount": 0 },
-      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
     }
   ]
 }

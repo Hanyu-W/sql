@@ -1,6 +1,6 @@
 {
-  "schemaVersion": 2,
-  "description": "Index of PPL lint rule validation contracts. Each entry pins one OSD analyzer rule to live SQL /_plugins/_ppl behavior. The frontend adapter (scripts/ppl-lint/run-frontend-contract.mjs) and backend IT (PplLintRuleValidationIT) both read these files.",
+  "schemaVersion": 3,
+  "description": "Index of PPL lint rule validation contracts. Each entry pins one OSD analyzer rule to live SQL /_plugins/_ppl behavior. The detector runner (scripts/ppl-lint/run-frontend-contract.mjs) and backend IT (PplLintRuleValidationIT) both read these files. `contracts` is the full corpus; `enforced` is the phase-one, reviewed, error-severity subset with a stable backend rejection oracle that blocks a PR (design §5.1, §5.2). Everything not in `enforced` runs non-blocking (nightly / advisory) until it has an equally stable oracle and owner review.",
   "contracts": [
     "unsupported-window-function-in-eventstats.spec.json",
     "division-by-zero.spec.json",
@@ -11,5 +11,25 @@
     "multisearch-min-subsearch.spec.json",
     "union-min-datasets.spec.json",
     "replace-wildcard-asymmetry.spec.json"
-  ]
+  ],
+  "enforced": [
+    "unsupported-window-function-in-eventstats.spec.json",
+    "multisearch-min-subsearch.spec.json",
+    "union-min-datasets.spec.json",
+    "replace-wildcard-asymmetry.spec.json"
+  ],
+  "pendingReview": [
+    "field-validation.spec.json"
+  ],
+  "nonEnforcing": [
+    "division-by-zero.spec.json",
+    "head-without-sort.spec.json",
+    "disabled-join-type.spec.json",
+    "dedup-consecutive-unsupported.spec.json"
+  ],
+  "notes": {
+    "enforced": "Reviewed error rules with a deterministic backend rejection and a valid negative control. These block the required validation-result check.",
+    "pendingReview": "Error rules awaiting Peng/Chen usefulness + false-positive review (design §5.2) before joining `enforced`. field-validation self-suppresses without field context and is a semantic rule rather than a clean HTTP-400 grammar rejection.",
+    "nonEnforcing": "Warning / info / advisory / result-shape rules. They lack a stable backend rejection oracle and never block a PR; they run for coverage on the nightly schedule."
+  }
 }

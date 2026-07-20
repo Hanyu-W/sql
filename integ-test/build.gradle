@@ -169,13 +169,17 @@ tasks.withType(licenseHeaders.class) {
 }
 
 // Forward the PPL lint rule validation contract knobs to every integ test JVM
-// (PplLintRuleValidationIT reads them): which schedule to run (pr|nightly) and
-// an optional path to write the observed-vs-expected report. Applied globally so
-// every RestIntegTestTask that runs the class picks it up without per-task edits.
+// (PplLintRuleValidationIT reads them): which schedule to run (pr|nightly), an
+// optional path to write the observed backend report, and — while the cluster is
+// alive — optional paths to export the candidate runtime grammar bundle and its
+// target manifest for the detector-validation job. Applied globally so every
+// RestIntegTestTask that runs the class picks it up without per-task edits.
 tasks.withType(Test).configureEach {
     systemProperty "ppl.lint.schedule", System.getProperty("ppl.lint.schedule", "pr")
-    if (System.getProperty("ppl.lint.report") != null) {
-        systemProperty "ppl.lint.report", System.getProperty("ppl.lint.report")
+    ["ppl.lint.report", "ppl.lint.grammar.bundle", "ppl.lint.target"].each { prop ->
+        if (System.getProperty(prop) != null) {
+            systemProperty prop, System.getProperty(prop)
+        }
     }
 }
 

@@ -1,9 +1,8 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "ruleId": "head-without-sort",
-  "oracleClass": "advisory",
   "grammarSurface": "compiled-simplified",
-  "schedule": "pr",
+  "schedule": "nightly",
   "wiring": {
     "detector": "head-without-sort",
     "enabled": true,
@@ -21,18 +20,30 @@
     "isCalcite": true
   },
   "index": "opensearch-sql_test_index_account",
-  "cases": [
-    {
-      "id": "head-without-sort",
-      "query": "source={{index}} | head 5",
-      "frontend": { "diagnosticCount": 1, "severity": "info" },
-      "backend": { "kind": "advisory", "httpStatus": 200, "expect": { "accepted": true } }
+  "queries": {
+    "head-without-sort": {
+      "role": "trigger",
+      "query": "source={{index}} | head 5"
     },
+    "head-with-sort-control": {
+      "role": "control",
+      "query": "source={{index}} | sort age | head 5"
+    }
+  },
+  "expectations": [
     {
-      "id": "head-with-sort-control",
-      "query": "source={{index}} | sort age | head 5",
-      "frontend": { "diagnosticCount": 0 },
-      "backend": { "kind": "advisory", "httpStatus": 200, "expect": { "accepted": true } }
+      "version": ">=0.0.0",
+      "queries": {
+        "head-without-sort": {
+          "detectorCount": 1,
+          "severity": "info",
+          "backend": { "kind": "advisory", "httpStatus": 200, "expect": { "accepted": true } }
+        },
+        "head-with-sort-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "advisory", "httpStatus": 200, "expect": { "accepted": true } }
+        }
+      }
     }
   ]
 }

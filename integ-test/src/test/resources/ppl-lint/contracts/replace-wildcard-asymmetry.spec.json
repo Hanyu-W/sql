@@ -1,9 +1,8 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "ruleId": "replace-wildcard-asymmetry",
-  "oracleClass": "rejection",
   "grammarSurface": "runtime-bundle",
-  "schedule": "nightly",
+  "schedule": "pr",
   "requiredParserRules": ["replacePair", "stringLiteral"],
   "wiring": {
     "detector": "replace-wildcard-asymmetry",
@@ -22,32 +21,41 @@
     "isCalcite": true
   },
   "index": "opensearch-sql_test_index_account",
-  "cases": [
+  "queries": {
+    "replace-wildcard-count-mismatch": {
+      "role": "trigger",
+      "query": "source={{index}} | replace \"*_a\" with \"b_*_*\" in firstname"
+    },
+    "replace-symmetric-control": {
+      "role": "control",
+      "query": "source={{index}} | replace \"*_a\" with \"b_*\" in firstname | head 1"
+    }
+  },
+  "expectations": [
     {
-      "id": "replace-wildcard-count-mismatch",
-      "query": "source={{index}} | replace \"*_a\" with \"b_*_*\" in firstname",
-      "minVersionRequired": "3.4.0",
-      "engineRequired": "calcite",
-      "frontend": { "diagnosticCount": 1, "severity": "error" },
-      "backend": {
-        "kind": "rejection",
-        "httpStatus": 400,
-        "body": {
-          "status": 400,
-          "error": {
-            "type": "IllegalArgumentException",
-            "reason": "Error in 'replace' command: Wildcard count mismatch - pattern has 1 wildcard(s), replacement has 2. Replacement must have same number of wildcards or none."
+      "version": ">=3.4.0",
+      "engine": "calcite",
+      "queries": {
+        "replace-wildcard-count-mismatch": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Error in 'replace' command: Wildcard count mismatch - pattern has 1 wildcard(s), replacement has 2. Replacement must have same number of wildcards or none."
+              }
+            }
           }
+        },
+        "replace-symmetric-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
         }
       }
-    },
-    {
-      "id": "replace-symmetric-control",
-      "query": "source={{index}} | replace \"*_a\" with \"b_*\" in firstname | head 1",
-      "minVersionRequired": "3.4.0",
-      "engineRequired": "calcite",
-      "frontend": { "diagnosticCount": 0 },
-      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
     }
   ]
 }

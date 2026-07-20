@@ -1,30 +1,40 @@
 name: PPL lint rule validation
 
-# Cross-repository check: the OpenSearch-Dashboards (OSD) PPL lint rules and the
-# SQL backend must agree. A shared, reviewed corpus of contract files pins each
-# rule's OSD analyzer diagnostic count to the live SQL engine's behavior, so
-# neither side can drift unilaterally without a red build.
+# Cross-repository check: the OpenSearch-Dashboards (OSD) PPL lint detectors and
+# the SQL backend must agree on the SAME candidate runtime grammar. A shared,
+# reviewed corpus of contract files pins each rule's OSD detector diagnostic
+# count to the live SQL engine's behavior, so neither side can drift unilaterally
+# without a red build.
 #
-# Frontend half (frontend job): a SQL-owned Node script loads the compiled OSD
-# analyzer from an OSD checkout and asserts each rule's diagnostic counts and
-# catalog wiring. This runs on a bare ubuntu-latest runner because OSD requires a
-# modern Node whose prebuilt binary needs a newer glibc than the OpenSearch CI
-# container (Amazon Linux 2) provides.
-# Backend half (backend job): a Gradle integration test sends the same queries to
-# the live `/_plugins/_ppl` endpoint of the SQL plugin built from this checkout.
-# This runs inside the OpenSearch CI container because the Gradle test cluster
-# needs it.
+# The workflow is a linear three-job pipeline (design §3.1):
 #
-# Both jobs are required; a failure on either side fails the SQL PR check.
+#   backend-validation ──(artifacts)──▶ detector-validation ──▶ validation-result
 #
-# Schedule: pull_request and workflow_dispatch run the fast, deterministic
-# `schedule:pr` subset. The nightly cron runs the full corpus — runtime-only
-# rules, advisory/soft-oracle rules, and a coverage assertion that every enabled
-# OSD catalog rule has a contract file.
+# 1. backend-validation (Amazon Linux CI container): builds the SQL PR, starts the
+#    Gradle test cluster, runs the contract trigger/control queries against the
+#    live /_plugins/_ppl endpoint, and — while the cluster is alive — exports the
+#    candidate runtime grammar bundle (GET /_plugins/_ppl/_grammar) plus a target
+#    manifest and the observed backend report. Those three files are the ONLY
+#    bridge to the next job; the test cluster is never passed between jobs.
+# 2. detector-validation (ubuntu-latest): checks out and bootstraps OSD as a Node
+#    code dependency (no OSD server, no Monaco, no browser), deserializes the
+#    candidate bundle through OSD's production headless lint API, runs the real
+#    detectors against the same queries, and asserts the detector-vs-backend
+#    differential. OSD needs a newer Node/glibc than the CI container provides,
+#    hence a separate Ubuntu job.
+# 3. validation-result: the single stable required check. Fails unless BOTH
+#    validation jobs succeeded (an always() result job so a skipped detector
+#    cannot mask a backend failure), writes the compact per-rule PR summary, and
+#    uploads the run manifest recording the exact SQL SHA, OSD SHA, mode, backend
+#    version, and grammar hash.
 #
-# The OSD detector is loaded from `main` by default, so a removed or changed
-# detector is caught. `workflow_dispatch` can target a specific OSD ref to
-# reproduce a run or pre-validate an unmerged OSD branch.
+# Modes (design §3.4, §4.1.1):
+#  - pull_request: SQL PR validation against OSD `main`. The ONLY enforcing mode;
+#    this is what branch protection pins to. Runs the fast schedule:pr subset.
+#  - workflow_dispatch (osd_ref): pre-merge evidence for an unmerged OSD branch.
+#    Records the resolved immutable OSD commit SHA but CANNOT satisfy branch
+#    protection — only the pull_request run does.
+#  - schedule (nightly): the full corpus + a coverage assertion.
 
 on:
   pull_request:
@@ -33,7 +43,7 @@ on:
   workflow_dispatch:
     inputs:
       osd_ref:
-        description: OSD commit or branch to test instead of main
+        description: OSD commit or branch to validate instead of main (pre-merge evidence only)
         required: false
         type: string
       schedule:
@@ -43,117 +53,13 @@ on:
         type: string
 
 jobs:
-  frontend:
-    name: Frontend contract (OSD analyzer)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout SQL pull request
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Resolve OSD ref
-        id: osd-ref
-        env:
-          REQUESTED_REF: ${{ inputs.osd_ref }}
-        run: echo "ref=${REQUESTED_REF:-main}" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve contract schedule
-        id: schedule
-        env:
-          REQUESTED_SCHEDULE: ${{ inputs.schedule }}
-          EVENT_NAME: ${{ github.event_name }}
-        run: |
-          if [ -n "$REQUESTED_SCHEDULE" ]; then
-            value="$REQUESTED_SCHEDULE"
-          elif [ "$EVENT_NAME" = "schedule" ]; then
-            value="nightly"
-          else
-            value="pr"
-          fi
-          echo "value=$value" >> "$GITHUB_OUTPUT"
-          echo "Contract schedule: \`$value\`" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Checkout OpenSearch-Dashboards
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          repository: opensearch-project/OpenSearch-Dashboards
-          ref: ${{ steps.osd-ref.outputs.ref }}
-          path: .ci/OpenSearch-Dashboards
-
-      - name: Record OSD revision
-        run: |
-          sha=$(git -C .ci/OpenSearch-Dashboards rev-parse HEAD)
-          echo "OSD revision: \`$sha\` (ref: ${{ steps.osd-ref.outputs.ref }})" >> "$GITHUB_STEP_SUMMARY"
-
-      # Read the Node/Yarn toolchain from the OSD checkout rather than hardcoding
-      # it, so an OSD toolchain bump does not silently drift this job.
-      - name: Set up Node from OSD .nvmrc
-        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4
-        with:
-          node-version-file: .ci/OpenSearch-Dashboards/.nvmrc
-
-      - name: Pin Yarn from OSD engines
-        working-directory: .ci/OpenSearch-Dashboards
-        run: |
-          yarn_range=$(node -e "process.stdout.write(require('./package.json').engines.yarn)")
-          # Take the lower bound of the engines.yarn range (e.g. "^1.22.10" -> "1.22.10").
-          yarn_version=$(echo "$yarn_range" | sed -E 's/[^0-9.]//g')
-          npm install -g "yarn@${yarn_version}"
-
-      - name: Cache OSD Yarn dependencies
-        uses: actions/cache@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4
-        with:
-          path: |
-            ~/.cache/yarn
-          key: ${{ runner.os }}-osd-yarn-${{ hashFiles('.ci/OpenSearch-Dashboards/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-osd-yarn-
-
-      - name: Bootstrap OpenSearch-Dashboards
-        working-directory: .ci/OpenSearch-Dashboards
-        run: yarn osd bootstrap
-
-      # The Gradle test cluster runs the version from build.gradle's
-      # `opensearch.version` default (e.g. 3.8.0-SNAPSHOT). Export the release
-      # portion (3.8.0) as PPL_SQL_VERSION so the frontend applies the same
-      # version filtering the backend does, without maintaining a second string.
-      - name: Resolve OpenSearch version
-        id: os-version
-        run: |
-          raw=$(grep -oE '"opensearch.version", "[^"]+"' build.gradle | head -1 | sed -E 's/.*"opensearch.version", "([^"]+)"/\1/')
-          version="${raw%%-*}"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "OpenSearch version: \`$version\` (from \`$raw\`)" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Run frontend contract
-        working-directory: .ci/OpenSearch-Dashboards
-        env:
-          PPL_LINT_CONTRACT_DIR: ${{ github.workspace }}/integ-test/src/test/resources/ppl-lint/contracts
-          PPL_LINT_SCHEDULE: ${{ steps.schedule.outputs.value }}
-          PPL_SQL_VERSION: ${{ steps.os-version.outputs.version }}
-          PPL_LINT_REPORT: ${{ github.workspace }}/frontend-report.json
-        run: |
-          node -r ./src/setup_node_env \
-            "$GITHUB_WORKSPACE/scripts/ppl-lint/run-frontend-contract.mjs" \
-            | tee "$GITHUB_WORKSPACE/frontend-contract.log"
-
-      - name: Upload frontend report and corpus
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        continue-on-error: true
-        with:
-          name: ppl-lint-frontend-report
-          path: |
-            frontend-contract.log
-            frontend-report.json
-            integ-test/src/test/resources/ppl-lint/contracts
-
   Get-CI-Image-Tag:
     uses: opensearch-project/opensearch-build/.github/workflows/get-ci-image-tag.yml@761e093b8c1349cc07f21c1d681d3b30bf9e1999 # main
     with:
       product: opensearch
 
-  backend:
-    name: Backend integration test (live /_plugins/_ppl)
+  backend-validation:
+    name: Backend validation (live /_plugins/_ppl + grammar export)
     needs: Get-CI-Image-Tag
     runs-on: ubuntu-latest
     container:
@@ -188,27 +94,213 @@ jobs:
           distribution: 'temurin'
           java-version: 21
 
-      # OpenSearch refuses to start as root, so run Gradle as a non-root user.
-      - name: Run backend integration test
+      # OpenSearch refuses to start as root, so run Gradle as a non-root user. The
+      # IT exports the candidate grammar bundle + target manifest while the cluster
+      # is alive; those become the artifacts the detector job lints against.
+      - name: Run backend integration test and export candidate grammar
         run: |
           chown -R 1000:1000 "$(pwd)"
-          su "$(id -un 1000)" -c "./gradlew :integ-test:integTest --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT -Dppl.lint.schedule=${{ steps.schedule.outputs.value }} -Dppl.lint.report=$(pwd)/backend-report.json"
+          su "$(id -un 1000)" -c "./gradlew :integ-test:integTest \
+            --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT \
+            -Dppl.lint.schedule=${{ steps.schedule.outputs.value }} \
+            -Dppl.lint.report=$(pwd)/backend-report.json \
+            -Dppl.lint.grammar.bundle=$(pwd)/ppl-grammar-bundle.json \
+            -Dppl.lint.target=$(pwd)/target.json"
 
-      - name: Upload backend report
+      - name: Upload backend artifacts (bundle + target + report)
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         continue-on-error: true
         with:
-          name: ppl-lint-backend-report
+          name: ppl-lint-backend
           path: |
             backend-report.json
+            ppl-grammar-bundle.json
+            target.json
 
-      - name: Upload failure artifacts
+      - name: Upload backend failure logs
         if: ${{ failure() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         continue-on-error: true
         with:
-          name: ppl-lint-backend-artifacts
+          name: ppl-lint-backend-logs
           path: |
             integ-test/build/reports/**
             integ-test/build/testclusters/*/logs/*
+
+  detector-validation:
+    name: Detector validation (OSD headless lint on candidate bundle)
+    needs: backend-validation
+    runs-on: ubuntu-latest
+    outputs:
+      osd_ref: ${{ steps.osd-ref.outputs.ref }}
+      osd_sha: ${{ steps.osd-rev.outputs.sha }}
+      schedule: ${{ steps.schedule.outputs.value }}
+    steps:
+      - name: Checkout SQL pull request
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      # The required pull_request run always validates against OSD `main`; only a
+      # manual workflow_dispatch may target an unmerged OSD ref, and that run is
+      # pre-merge evidence, not a branch-protection result (design §4.1.1).
+      - name: Resolve OSD ref
+        id: osd-ref
+        env:
+          REQUESTED_REF: ${{ inputs.osd_ref }}
+        run: echo "ref=${REQUESTED_REF:-main}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve contract schedule
+        id: schedule
+        env:
+          REQUESTED_SCHEDULE: ${{ inputs.schedule }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ -n "$REQUESTED_SCHEDULE" ]; then
+            value="$REQUESTED_SCHEDULE"
+          elif [ "$EVENT_NAME" = "schedule" ]; then
+            value="nightly"
+          else
+            value="pr"
+          fi
+          echo "value=$value" >> "$GITHUB_OUTPUT"
+
+      - name: Download backend artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: ppl-lint-backend
+          path: artifacts
+
+      - name: Checkout OpenSearch-Dashboards
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: opensearch-project/OpenSearch-Dashboards
+          ref: ${{ steps.osd-ref.outputs.ref }}
+          path: .ci/OpenSearch-Dashboards
+
+      # Resolve the (possibly mutable) ref to the immutable commit SHA actually
+      # tested, so the run manifest pins exactly what ran (design §4.1.1, T11).
+      - name: Record OSD revision
+        id: osd-rev
+        run: |
+          sha=$(git -C .ci/OpenSearch-Dashboards rev-parse HEAD)
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "OSD revision: \`$sha\` (ref: ${{ steps.osd-ref.outputs.ref }})" >> "$GITHUB_STEP_SUMMARY"
+
+      # Read the Node/Yarn toolchain from the OSD checkout rather than hardcoding
+      # it, so an OSD toolchain bump does not silently drift this job.
+      - name: Set up Node from OSD .nvmrc
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4
+        with:
+          node-version-file: .ci/OpenSearch-Dashboards/.nvmrc
+
+      - name: Pin Yarn from OSD engines
+        working-directory: .ci/OpenSearch-Dashboards
+        run: |
+          yarn_range=$(node -e "process.stdout.write(require('./package.json').engines.yarn)")
+          # Take the lower bound of the engines.yarn range (e.g. "^1.22.10" -> "1.22.10").
+          yarn_version=$(echo "$yarn_range" | sed -E 's/[^0-9.]//g')
+          npm install -g "yarn@${yarn_version}"
+
+      - name: Cache OSD Yarn dependencies
+        uses: actions/cache@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4
+        with:
+          path: |
+            ~/.cache/yarn
+          key: ${{ runner.os }}-osd-yarn-${{ hashFiles('.ci/OpenSearch-Dashboards/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-osd-yarn-
+
+      - name: Bootstrap OpenSearch-Dashboards
+        working-directory: .ci/OpenSearch-Dashboards
+        run: yarn osd bootstrap
+
+      - name: Run detector validation against the candidate bundle
+        working-directory: .ci/OpenSearch-Dashboards
+        env:
+          PPL_LINT_CONTRACT_DIR: ${{ github.workspace }}/integ-test/src/test/resources/ppl-lint/contracts
+          PPL_LINT_SCHEDULE: ${{ steps.schedule.outputs.value }}
+          PPL_LINT_GRAMMAR_BUNDLE: ${{ github.workspace }}/artifacts/ppl-grammar-bundle.json
+          PPL_LINT_TARGET_MANIFEST: ${{ github.workspace }}/artifacts/target.json
+          PPL_LINT_BACKEND_REPORT: ${{ github.workspace }}/artifacts/backend-report.json
+          PPL_LINT_REPORT: ${{ github.workspace }}/detector-report.json
+        run: |
+          node -r ./src/setup_node_env \
+            "$GITHUB_WORKSPACE/scripts/ppl-lint/run-frontend-contract.mjs" \
+            | tee "$GITHUB_WORKSPACE/detector-contract.log"
+
+      - name: Upload detector report and corpus
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        continue-on-error: true
+        with:
+          name: ppl-lint-detector
+          path: |
+            detector-contract.log
+            detector-report.json
+            integ-test/src/test/resources/ppl-lint/contracts
+
+  validation-result:
+    name: validation-result
+    if: ${{ always() }}
+    needs:
+      - backend-validation
+      - detector-validation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout SQL pull request
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download backend artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        continue-on-error: true
+        with:
+          name: ppl-lint-backend
+          path: artifacts
+
+      - name: Download detector artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        continue-on-error: true
+        with:
+          name: ppl-lint-detector
+          path: artifacts
+
+      # Assemble the run manifest and the compact per-rule PR summary from the
+      # reports both jobs uploaded. The manifest records the immutable SQL + OSD
+      # SHAs so any run is exactly reproducible (design §3.3, §4.4).
+      - name: Assemble run manifest and summary
+        env:
+          SQL_SHA: ${{ github.sha }}
+          OSD_REF: ${{ needs.detector-validation.outputs.osd_ref }}
+          OSD_SHA: ${{ needs.detector-validation.outputs.osd_sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ needs.detector-validation.outputs.schedule }}
+          BACKEND_RESULT: ${{ needs.backend-validation.result }}
+          DETECTOR_RESULT: ${{ needs.detector-validation.result }}
+        run: node "$GITHUB_WORKSPACE/scripts/ppl-lint/assemble-run-manifest.mjs"
+
+      - name: Upload run manifest
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        continue-on-error: true
+        with:
+          name: ppl-lint-run-manifest
+          path: |
+            run-manifest.json
+
+      # The sole branch-protection check: red unless BOTH validation jobs
+      # succeeded. Because this job runs with always(), a skipped detector job
+      # (e.g. backend failed first) still reds the result instead of appearing
+      # green (design §4.4). A workflow_dispatch run is pre-merge evidence and is
+      # intentionally not what repo admins pin to branch protection.
+      - name: Require both validation jobs to have succeeded
+        env:
+          BACKEND_RESULT: ${{ needs.backend-validation.result }}
+          DETECTOR_RESULT: ${{ needs.detector-validation.result }}
+        run: |
+          echo "backend-validation: $BACKEND_RESULT"
+          echo "detector-validation: $DETECTOR_RESULT"
+          if [ "$BACKEND_RESULT" != "success" ] || [ "$DETECTOR_RESULT" != "success" ]; then
+            echo "::error::PPL lint rule validation failed (backend=$BACKEND_RESULT detector=$DETECTOR_RESULT)."
+            exit 1
+          fi
+          echo "PPL lint rule validation passed: backend and detector agree on the candidate grammar."
