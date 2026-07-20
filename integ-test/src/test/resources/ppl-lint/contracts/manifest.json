@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 2,
+  "description": "Index of PPL lint rule validation contracts. Each entry pins one OSD analyzer rule to live SQL /_plugins/_ppl behavior. The frontend adapter (scripts/ppl-lint/run-frontend-contract.mjs) and backend IT (PplLintRuleValidationIT) both read these files.",
+  "contracts": [
+    "unsupported-window-function-in-eventstats.spec.json",
+    "division-by-zero.spec.json",
+    "head-without-sort.spec.json",
+    "disabled-join-type.spec.json",
+    "field-validation.spec.json",
+    "dedup-consecutive-unsupported.spec.json",
+    "multisearch-min-subsearch.spec.json",
+    "union-min-datasets.spec.json",
+    "replace-wildcard-asymmetry.spec.json"
+  ]
+}

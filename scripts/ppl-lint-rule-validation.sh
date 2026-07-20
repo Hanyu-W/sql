@@ -24,6 +24,9 @@
 #   # Skip one half
 #   SKIP_BACKEND=1 ./scripts/ppl-lint-rule-validation.sh
 #   SKIP_FRONTEND=1 ./scripts/ppl-lint-rule-validation.sh
+#
+#   # Run the full nightly corpus (runtime-only + advisory rules + coverage)
+#   PPL_LINT_SCHEDULE=nightly ./scripts/ppl-lint-rule-validation.sh
 
 set -euo pipefail
 
@@ -33,9 +36,11 @@ cd "$SQL_ROOT"
 OSD_REPO_URL="${OSD_REPO_URL:-https://github.com/opensearch-project/OpenSearch-Dashboards.git}"
 OSD_REF="${OSD_REF:-main}"
 DEFAULT_OSD_CHECKOUT="$SQL_ROOT/.ci/OpenSearch-Dashboards"
-CONTRACT_FILE="$SQL_ROOT/integ-test/src/test/resources/ppl-lint/unsupported-window-function-in-eventstats.spec.json"
+CONTRACT_DIR="$SQL_ROOT/integ-test/src/test/resources/ppl-lint/contracts"
 FRONTEND_SCRIPT="$SQL_ROOT/scripts/ppl-lint/run-frontend-contract.mjs"
 IT_CLASS="org.opensearch.sql.calcite.remote.PplLintRuleValidationIT"
+# pr (fast, blocking subset) or nightly (full corpus + coverage assertion).
+PPL_LINT_SCHEDULE="${PPL_LINT_SCHEDULE:-pr}"
 
 log() { echo "[ppl-lint-rule-validation] $*"; }
 
@@ -58,11 +63,13 @@ run_frontend() {
 
   local os_version
   os_version="$(resolve_opensearch_version)"
-  log "Running frontend contract against OSD analyzer (PPL_SQL_VERSION=$os_version)..."
+  log "Running frontend contract against OSD analyzer (PPL_SQL_VERSION=$os_version, schedule=$PPL_LINT_SCHEDULE)..."
   (
     cd "$osd_checkout"
-    PPL_LINT_CONTRACT_FILE="$CONTRACT_FILE" \
+    PPL_LINT_CONTRACT_DIR="$CONTRACT_DIR" \
+      PPL_LINT_SCHEDULE="$PPL_LINT_SCHEDULE" \
       PPL_SQL_VERSION="$os_version" \
+      PPL_LINT_REPORT="$SQL_ROOT/frontend-report.json" \
       node -r ./src/setup_node_env "$FRONTEND_SCRIPT"
   )
 }
@@ -95,8 +102,10 @@ else
 fi
 
 if [[ "${SKIP_BACKEND:-0}" != "1" ]]; then
-  log "Running backend integration test: $IT_CLASS"
-  ./gradlew :integ-test:integTest --tests "$IT_CLASS"
+  log "Running backend integration test: $IT_CLASS (schedule=$PPL_LINT_SCHEDULE)"
+  ./gradlew :integ-test:integTest --tests "$IT_CLASS" \
+    -Dppl.lint.schedule="$PPL_LINT_SCHEDULE" \
+    -Dppl.lint.report="$SQL_ROOT/backend-report.json"
   log "Backend integration test passed."
 else
   log "SKIP_BACKEND=1 — skipping the SQL backend integration test."

@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 2,
+  "ruleId": "division-by-zero",
+  "oracleClass": "result-shape",
+  "grammarSurface": "compiled-simplified",
+  "schedule": "pr",
+  "wiring": {
+    "detector": "division-by-zero",
+    "enabled": true,
+    "severity": "warning",
+    "runtimeOnly": false,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": {}
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false }
+  },
+  "frontendContext": {
+    "isCalcite": true
+  },
+  "index": "opensearch-sql_test_index_account",
+  "cases": [
+    {
+      "id": "divide-by-zero-literal",
+      "query": "source={{index}} | eval ratio = balance / 0 | fields ratio | head 1",
+      "frontend": { "diagnosticCount": 1, "severity": "warning" },
+      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "ratio" } }
+    },
+    {
+      "id": "divide-by-nonzero-control",
+      "query": "source={{index}} | eval ratio = balance / 2 | fields ratio | head 1",
+      "frontend": { "diagnosticCount": 0 },
+      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+    },
+    {
+      "id": "modulo-by-zero-flagged",
+      "query": "source={{index}} | eval m = balance % 0 | fields m | head 1",
+      "frontend": { "diagnosticCount": 1, "severity": "warning" },
+      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "m" } }
+    }
+  ]
+}

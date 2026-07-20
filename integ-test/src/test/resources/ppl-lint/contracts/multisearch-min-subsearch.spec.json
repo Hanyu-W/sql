@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 2,
+  "ruleId": "multisearch-min-subsearch",
+  "oracleClass": "rejection",
+  "grammarSurface": "runtime-bundle",
+  "schedule": "nightly",
+  "requiredParserRules": ["multisearchCommand", "subSearch"],
+  "wiring": {
+    "detector": "multisearch-min-subsearch",
+    "enabled": true,
+    "severity": "error",
+    "runtimeOnly": true,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": { "minVersion": "3.4.0" }
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false }
+  },
+  "frontendContext": {
+    "isCalcite": true
+  },
+  "index": "opensearch-sql_test_index_account",
+  "cases": [
+    {
+      "id": "multisearch-single-subsearch",
+      "query": "| multisearch [ search source={{index}} ]",
+      "minVersionRequired": "3.4.0",
+      "engineRequired": "calcite",
+      "frontend": { "diagnosticCount": 1, "severity": "error" },
+      "backend": {
+        "kind": "rejection",
+        "httpStatus": 400,
+        "body": { "status": 400, "error": { "type": "SyntaxCheckException", "reason": "Invalid Query" } }
+      }
+    },
+    {
+      "id": "multisearch-two-subsearches-control",
+      "query": "| multisearch [ search source={{index}} ] [ search source={{index}} ]",
+      "minVersionRequired": "3.4.0",
+      "engineRequired": "calcite",
+      "frontend": { "diagnosticCount": 0 },
+      "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+    }
+  ]
+}
