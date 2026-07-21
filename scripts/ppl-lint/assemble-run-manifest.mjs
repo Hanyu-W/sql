@@ -43,12 +43,14 @@ function main() {
 
   const eventName = process.env.EVENT_NAME || '';
   const osdRef = process.env.OSD_REF || 'main';
+  const osdRepo = process.env.OSD_REPO || 'opensearch-project/OpenSearch-Dashboards';
+  const isUpstreamMain = osdRepo === 'opensearch-project/OpenSearch-Dashboards' && osdRef === 'main';
   const mode =
     eventName === 'pull_request'
       ? 'sql-pr-validation'
       : eventName === 'schedule'
         ? 'nightly'
-        : osdRef && osdRef !== 'main'
+        : !isUpstreamMain
           ? 'osd-branch-evidence'
           : 'manual';
 
@@ -70,6 +72,7 @@ function main() {
     event: eventName,
     schedule: process.env.SCHEDULE || detector.schedule || 'pr',
     sqlSha: process.env.SQL_SHA || '',
+    osdRepo,
     osdRef,
     osdSha: process.env.OSD_SHA || '',
     engineVersion: target.engineVersion || detector.engineVersion || '',
@@ -107,7 +110,7 @@ function writeSummary(manifest, detector, backend) {
   lines.push('');
   lines.push(`- Mode: \`${manifest.mode}\`${manifest.requiredCheck ? ' (required)' : ' (non-enforcing)'}`);
   lines.push(`- SQL: \`${manifest.sqlSha || '—'}\``);
-  lines.push(`- OSD: \`${manifest.osdSha || '—'}\` (ref \`${manifest.osdRef}\`)`);
+  lines.push(`- OSD: \`${manifest.osdSha || '—'}\` (${manifest.osdRepo} @ \`${manifest.osdRef}\`)`);
   lines.push(`- Backend version: \`${manifest.engineVersion || '—'}\``);
   lines.push(`- Grammar: \`${shortHash(manifest.grammarHash)}\``);
   lines.push(
