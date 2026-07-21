@@ -31,9 +31,10 @@ name: PPL lint rule validation
 # Modes (design §3.4, §4.1.1):
 #  - pull_request: SQL PR validation against OSD `main`. The ONLY enforcing mode;
 #    this is what branch protection pins to. Runs the fast schedule:pr subset.
-#  - workflow_dispatch (osd_ref): pre-merge evidence for an unmerged OSD branch.
-#    Records the resolved immutable OSD commit SHA but CANNOT satisfy branch
-#    protection — only the pull_request run does.
+#  - workflow_dispatch (osd_repo + osd_ref): pre-merge evidence for an unmerged
+#    OSD branch, optionally on a fork (osd_repo). Records the resolved immutable
+#    OSD commit SHA but CANNOT satisfy branch protection — only the pull_request
+#    run does.
 #  - schedule (nightly): the full corpus + a coverage assertion.
 
 on:
@@ -42,6 +43,10 @@ on:
     - cron: '0 10 * * *'
   workflow_dispatch:
     inputs:
+      osd_repo:
+        description: OSD repository to check out (a fork, for pre-merge evidence). Defaults to opensearch-project/OpenSearch-Dashboards.
+        required: false
+        type: string
       osd_ref:
         description: OSD commit or branch to validate instead of main (pre-merge evidence only)
         required: false
@@ -133,6 +138,7 @@ jobs:
     needs: backend-validation
     runs-on: ubuntu-latest
     outputs:
+      osd_repo: ${{ steps.osd-ref.outputs.repo }}
       osd_ref: ${{ steps.osd-ref.outputs.ref }}
       osd_sha: ${{ steps.osd-rev.outputs.sha }}
       schedule: ${{ steps.schedule.outputs.value }}
@@ -140,14 +146,18 @@ jobs:
       - name: Checkout SQL pull request
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # The required pull_request run always validates against OSD `main`; only a
-      # manual workflow_dispatch may target an unmerged OSD ref, and that run is
-      # pre-merge evidence, not a branch-protection result (design §4.1.1).
+      # The required pull_request run always validates against OSD `main` on the
+      # canonical repo; only a manual workflow_dispatch may target an unmerged OSD
+      # ref (and optionally a fork), and that run is pre-merge evidence, not a
+      # branch-protection result (design §4.1.1).
       - name: Resolve OSD ref
         id: osd-ref
         env:
           REQUESTED_REF: ${{ inputs.osd_ref }}
-        run: echo "ref=${REQUESTED_REF:-main}" >> "$GITHUB_OUTPUT"
+          REQUESTED_REPO: ${{ inputs.osd_repo }}
+        run: |
+          echo "ref=${REQUESTED_REF:-main}" >> "$GITHUB_OUTPUT"
+          echo "repo=${REQUESTED_REPO:-opensearch-project/OpenSearch-Dashboards}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve contract schedule
         id: schedule
@@ -173,7 +183,7 @@ jobs:
       - name: Checkout OpenSearch-Dashboards
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          repository: opensearch-project/OpenSearch-Dashboards
+          repository: ${{ steps.osd-ref.outputs.repo }}
           ref: ${{ steps.osd-ref.outputs.ref }}
           path: .ci/OpenSearch-Dashboards
 
@@ -184,7 +194,7 @@ jobs:
         run: |
           sha=$(git -C .ci/OpenSearch-Dashboards rev-parse HEAD)
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "OSD revision: \`$sha\` (ref: ${{ steps.osd-ref.outputs.ref }})" >> "$GITHUB_STEP_SUMMARY"
+          echo "OSD revision: \`$sha\` (repo: ${{ steps.osd-ref.outputs.repo }}, ref: ${{ steps.osd-ref.outputs.ref }})" >> "$GITHUB_STEP_SUMMARY"
 
       # Read the Node/Yarn toolchain from the OSD checkout rather than hardcoding
       # it, so an OSD toolchain bump does not silently drift this job.
@@ -274,6 +284,7 @@ jobs:
       - name: Assemble run manifest and summary
         env:
           SQL_SHA: ${{ github.sha }}
+          OSD_REPO: ${{ needs.detector-validation.outputs.osd_repo }}
           OSD_REF: ${{ needs.detector-validation.outputs.osd_ref }}
           OSD_SHA: ${{ needs.detector-validation.outputs.osd_sha }}
           EVENT_NAME: ${{ github.event_name }}

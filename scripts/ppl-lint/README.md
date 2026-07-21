@@ -51,11 +51,18 @@ backend-validation ──(target.json, ppl-grammar-bundle.json, backend-report.j
 
 `workflow_dispatch` inputs:
 
+- `osd_repo` — the OSD repository to check out, for validating an unmerged change
+  that lives on a fork. Defaults to `opensearch-project/OpenSearch-Dashboards`.
+  The `osd_ref` must exist in this repo (a purely local commit cannot be fetched).
 - `osd_ref` — an OSD commit or branch to validate instead of `main`. Resolved to
   an immutable commit SHA and recorded in the run manifest. A manual run **cannot**
   satisfy branch protection; merge the OSD change first, then rerun the required
   `pull_request` check against OSD `main`.
 - `schedule` — `pr` (fast blocking subset) or `nightly` (full corpus).
+
+To validate an OSD change that is not yet merged, push it to a branch on your OSD
+fork and dispatch with `osd_repo=<you>/OpenSearch-Dashboards` and
+`osd_ref=<branch-or-sha>`.
 
 ## Local reproduction
 
