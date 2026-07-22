@@ -29,8 +29,14 @@ name: PPL lint rule validation
 #    version, and grammar hash.
 #
 # Modes (design §3.4, §4.1.1):
-#  - pull_request: SQL PR validation against OSD `main`. The ONLY enforcing mode;
-#    this is what branch protection pins to. Runs the fast schedule:pr subset.
+#  - pull_request: SQL PR validation against the resolved OSD target. The ONLY
+#    enforcing mode; this is what branch protection pins to. Runs the fast
+#    schedule:pr subset. The committed default is `main` on the canonical repo;
+#    it can be overridden by the OSD_REPO/OSD_REF repo variables — see the
+#    "Resolve OSD ref" step. TEMPORARY: those repo variables are currently set to
+#    the unmerged paired OSD branch that ships the headless lint API this job
+#    needs; deleting them reverts to opensearch-project/...@main once that OSD PR
+#    merges.
 #  - workflow_dispatch (osd_repo + osd_ref): pre-merge evidence for an unmerged
 #    OSD branch, optionally on a fork (osd_repo). Records the resolved immutable
 #    OSD commit SHA but CANNOT satisfy branch protection — only the pull_request
@@ -146,18 +152,33 @@ jobs:
       - name: Checkout SQL pull request
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      # The required pull_request run always validates against OSD `main` on the
-      # canonical repo; only a manual workflow_dispatch may target an unmerged OSD
-      # ref (and optionally a fork), and that run is pre-merge evidence, not a
-      # branch-protection result (design §4.1.1).
+      # Resolve which OSD checkout the detectors run against, in precedence order:
+      #   1. workflow_dispatch input  (osd_repo / osd_ref) — explicit manual run
+      #   2. repo variable            (vars.OSD_REPO / vars.OSD_REF) — the override
+      #      point; set/cleared in repo settings with no workflow edit
+      #   3. canonical default        opensearch-project/OpenSearch-Dashboards@main
+      #
+      # The committed default is intentionally the canonical repo + `main`, so the
+      # file always declares that the required check validates against upstream.
+      # TEMPORARY OVERRIDE: the headless lint API this job imports
+      # (src/plugins/data/public/antlr/opensearch_ppl/headless_ppl_lint) is not yet
+      # on OSD `main`; it lives on the paired branch
+      # Hanyu-W/OpenSearch-Dashboards@ppl-lint-headless-api. Until that OSD PR
+      # merges, the OSD_REPO/OSD_REF repo variables are set to that branch so the
+      # required check validates against the OSD ref that actually ships the API.
+      # Deleting those two repo variables (no code change) reverts to `main`.
       - name: Resolve OSD ref
         id: osd-ref
         env:
           REQUESTED_REF: ${{ inputs.osd_ref }}
           REQUESTED_REPO: ${{ inputs.osd_repo }}
+          VAR_REF: ${{ vars.OSD_REF }}
+          VAR_REPO: ${{ vars.OSD_REPO }}
         run: |
-          echo "ref=${REQUESTED_REF:-main}" >> "$GITHUB_OUTPUT"
-          echo "repo=${REQUESTED_REPO:-opensearch-project/OpenSearch-Dashboards}" >> "$GITHUB_OUTPUT"
+          ref="${REQUESTED_REF:-${VAR_REF:-main}}"
+          repo="${REQUESTED_REPO:-${VAR_REPO:-opensearch-project/OpenSearch-Dashboards}}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
 
       - name: Resolve contract schedule
         id: schedule
