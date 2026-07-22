@@ -42,6 +42,25 @@ name: PPL lint rule validation
 #    OSD commit SHA but CANNOT satisfy branch protection — only the pull_request
 #    run does.
 #  - schedule (nightly): the full corpus + a coverage assertion.
+#
+# Workflow shape deliberately mirrors the sibling SQL Java workflows so a
+# maintainer sees one pattern, not a bespoke one:
+#   - sql-test-and-build-workflow.yml : the Get-CI-Image-Tag reusable workflow,
+#     the OpenSearch CI container + ci-image-start-command, and the
+#     `chown 1000:1000` + `su` non-root Gradle invocation (backend-validation).
+#   - integ-tests-with-security.yml   : the report-upload-on-always() shape.
+# Action SHAs are pinned to the same versions those siblings use, so dependabot
+# bumps one set, not two drifting ones.
+#
+# CI cost (measured 2026-07-22, ~13 min wall clock): backend-validation ~5 min
+# (container init ~2 min + backend IT/export ~2m50s); detector-validation ~3 min,
+# of which OSD `yarn osd bootstrap` is ~2m13s and the actual lint is ~2s. The
+# bootstrap dominates and is CPU-bound (it was ~2m13s even with a warm yarn
+# cache), so it is NOT sharded into a per-contract matrix (that would multiply
+# the 2m13s, not the 2s). Overlapping bootstrap with the backend job is a tracked
+# follow-up, not done here: it would require transferring the bootstrapped OSD
+# tree (multi-GB, 30+ workspace symlinks, plus built target/) between runners,
+# which OSD's own CI deliberately avoids. See ~/ppl-lint-ci-fixes-impl-plan.md.
 
 on:
   pull_request:
@@ -73,6 +92,7 @@ jobs:
     name: Backend validation (live /_plugins/_ppl + grammar export)
     needs: Get-CI-Image-Tag
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     container:
       image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
       options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
@@ -143,6 +163,7 @@ jobs:
     name: Detector validation (OSD headless lint on candidate bundle)
     needs: backend-validation
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       osd_repo: ${{ steps.osd-ref.outputs.repo }}
       osd_ref: ${{ steps.osd-ref.outputs.ref }}
@@ -195,12 +216,6 @@ jobs:
           fi
           echo "value=$value" >> "$GITHUB_OUTPUT"
 
-      - name: Download backend artifacts
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
-        with:
-          name: ppl-lint-backend
-          path: artifacts
-
       - name: Checkout OpenSearch-Dashboards
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -243,7 +258,24 @@ jobs:
 
       - name: Bootstrap OpenSearch-Dashboards
         working-directory: .ci/OpenSearch-Dashboards
-        run: yarn osd bootstrap
+        # Retry-with-backoff mirrors the OSD build workflow's bootstrap step;
+        # `yarn osd bootstrap` occasionally fails on a transient registry hiccup.
+        run: |
+          for i in 1 2 3; do
+            yarn osd bootstrap && exit 0
+            echo "Bootstrap attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+          exit 1
+
+      # Downloaded after bootstrap (not before): the ~2m13s bootstrap does not
+      # need the backend artifact — only the lint step below does — so a flaky
+      # artifact download cannot waste a completed bootstrap.
+      - name: Download backend artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          name: ppl-lint-backend
+          path: artifacts
 
       - name: Run detector validation against the candidate bundle
         working-directory: .ci/OpenSearch-Dashboards
