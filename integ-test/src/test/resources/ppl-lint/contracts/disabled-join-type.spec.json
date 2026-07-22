@@ -1,0 +1,66 @@
+{
+  "schemaVersion": 3,
+  "ruleId": "disabled-join-type",
+  "grammarSurface": "compiled-simplified",
+  "schedule": "nightly",
+  "wiring": {
+    "detector": "disabled-join-type",
+    "enabled": true,
+    "severity": "warning",
+    "runtimeOnly": false,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": {}
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false, "allJoinTypesAllowed": false }
+  },
+  "frontendContext": {
+    "isCalcite": true
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "right-join-disabled": {
+      "role": "trigger",
+      "query": "source={{index}} | right join left=l right=r on l.account_number=r.account_number {{index}}"
+    },
+    "cross-join-disabled": {
+      "role": "trigger",
+      "query": "source={{index}} | cross join left=l right=r on l.account_number=r.account_number {{index}}"
+    },
+    "inner-join-control": {
+      "role": "control",
+      "query": "source={{index}} | join left=l right=r on l.account_number=r.account_number {{index}} | head 1"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=0.0.0",
+      "queries": {
+        "right-join-disabled": {
+          "detectorCount": 1,
+          "severity": "warning",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": { "status": 400, "error": { "type": "SemanticCheckException", "reason": "Invalid Query" } }
+          }
+        },
+        "cross-join-disabled": {
+          "detectorCount": 1,
+          "severity": "warning",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": { "status": 400, "error": { "type": "SemanticCheckException", "reason": "Invalid Query" } }
+          }
+        },
+        "inner-join-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+        }
+      }
+    }
+  ]
+}

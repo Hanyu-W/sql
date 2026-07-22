@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 3,
+  "ruleId": "multisearch-min-subsearch",
+  "grammarSurface": "runtime-bundle",
+  "schedule": "pr",
+  "requiredParserRules": ["multisearchCommand", "subSearch"],
+  "notes": "Query-initial (no leading pipe) on purpose — see the note on union-min-datasets. OSD's runtime lint prepends a synthetic 'source=t ' prefix to pipe-first queries, which would change the effective parse relative to what the backend receives. A query-initial 'multisearch [...]' is sent byte-identically to both halves.",
+  "wiring": {
+    "detector": "multisearch-min-subsearch",
+    "enabled": true,
+    "severity": "error",
+    "runtimeOnly": true,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": { "minVersion": "3.4.0" }
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false }
+  },
+  "frontendContext": {
+    "isCalcite": true
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "multisearch-single-subsearch": {
+      "role": "trigger",
+      "query": "multisearch [ search source={{index}} ]"
+    },
+    "multisearch-two-subsearches-control": {
+      "role": "control",
+      "query": "multisearch [ search source={{index}} ] [ search source={{index}} ]"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=3.4.0",
+      "queries": {
+        "multisearch-single-subsearch": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": { "status": 400, "error": { "type": "SyntaxCheckException", "reason": "Invalid Query" } }
+          }
+        },
+        "multisearch-two-subsearches-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+        }
+      }
+    }
+  ]
+}

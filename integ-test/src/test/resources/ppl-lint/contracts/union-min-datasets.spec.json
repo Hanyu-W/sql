@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 3,
+  "ruleId": "union-min-datasets",
+  "grammarSurface": "runtime-bundle",
+  "schedule": "pr",
+  "requiredParserRules": ["unionCommand", "unionDataset", "pplCommands"],
+  "notes": "Query-initial (no leading pipe) on purpose. OSD's runtime lint prepends a synthetic 'source=t ' prefix to pipe-first queries, so linting '| union [...]' actually parses 'source=t | union [...]' — a valid MID-pipeline union (implicit upstream dataset) that the detector deliberately does not flag. The backend, receiving the raw pipe-first query, would still reject it, so a pipe-first trigger makes the two halves test different effective queries (violating the design's 'same queries' rule). A query-initial 'union [...]' is sent byte-identically to both sides and keeps the differential sound.",
+  "wiring": {
+    "detector": "union-min-datasets",
+    "enabled": true,
+    "severity": "error",
+    "runtimeOnly": true,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": { "minVersion": "3.7.0", "engine": "calcite" }
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false }
+  },
+  "frontendContext": {
+    "isCalcite": true
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "union-single-dataset": {
+      "role": "trigger",
+      "query": "union [ source={{index}} ]"
+    },
+    "union-two-datasets-control": {
+      "role": "control",
+      "query": "union [ source={{index}} ] [ source={{index}} ]"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=3.7.0",
+      "engine": "calcite",
+      "queries": {
+        "union-single-dataset": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Union command requires at least two datasets. Provided: 1" } }
+          }
+        },
+        "union-two-datasets-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+        }
+      }
+    }
+  ]
+}

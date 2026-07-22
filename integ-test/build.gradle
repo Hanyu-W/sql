@@ -168,6 +168,21 @@ tasks.withType(licenseHeaders.class) {
     additionalLicense 'AL   ', 'Apache', 'Licensed under the Apache License, Version 2.0 (the "License")'
 }
 
+// Forward the PPL lint rule validation contract knobs to every integ test JVM
+// (PplLintRuleValidationIT reads them): which schedule to run (pr|nightly), an
+// optional path to write the observed backend report, and — while the cluster is
+// alive — optional paths to export the candidate runtime grammar bundle and its
+// target manifest for the detector-validation job. Applied globally so every
+// RestIntegTestTask that runs the class picks it up without per-task edits.
+tasks.withType(Test).configureEach {
+    systemProperty "ppl.lint.schedule", System.getProperty("ppl.lint.schedule", "pr")
+    ["ppl.lint.report", "ppl.lint.grammar.bundle", "ppl.lint.target"].each { prop ->
+        if (System.getProperty(prop) != null) {
+            systemProperty prop, System.getProperty(prop)
+        }
+    }
+}
+
 validateNebulaPom.enabled = false
 loggerUsageCheck.enabled = false
 

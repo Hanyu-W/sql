@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 3,
+  "ruleId": "field-validation",
+  "grammarSurface": "compiled-simplified",
+  "schedule": "nightly",
+  "wiring": {
+    "detector": "field-validation",
+    "enabled": true,
+    "severity": "error",
+    "runtimeOnly": false,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": {}
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false }
+  },
+  "frontendContext": {
+    "isCalcite": true,
+    "visibleIndices": ["{{index}}"],
+    "deriveFromMapping": {
+      "account_number": "long",
+      "balance": "long",
+      "age": "long",
+      "firstname": "text",
+      "lastname": "text",
+      "gender": "text",
+      "address": "text",
+      "employer": "text",
+      "email": "text",
+      "city": "text",
+      "state": "text"
+    }
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "unknown-field-existence": {
+      "role": "trigger",
+      "query": "source={{index}} | where nonexistent_field > 3"
+    },
+    "grok-field-slot-shape-typo": {
+      "role": "trigger",
+      "query": "source={{index}} | grok field=firstname \"%{WORD:w}\""
+    },
+    "known-field-control": {
+      "role": "control",
+      "query": "source={{index}} | where age > 30 | head 1"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=3.4.0",
+      "queries": {
+        "unknown-field-existence": {
+          "detectorCount": 1,
+          "severity": "error",
+          "matchMessage": "nonexistent_field",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Field [nonexistent_field] not found." } }
+          }
+        },
+        "grok-field-slot-shape-typo": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Field [field] not found." } }
+          }
+        },
+        "known-field-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+        }
+      }
+    }
+  ]
+}

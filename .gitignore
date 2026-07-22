@@ -60,3 +60,11 @@ http-client.env.json
 .claude/settings.local.json
 .clinerules
 memory-bank
+# PPL lint rule validation contract run artifacts (uploaded in CI, not committed)
+backend-report.json
+backend-report-nightly.json
+detector-report.json
+detector-contract.log
+ppl-grammar-bundle.json
+target.json
+run-manifest.json

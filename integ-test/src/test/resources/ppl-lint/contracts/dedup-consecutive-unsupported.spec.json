@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 3,
+  "ruleId": "dedup-consecutive-unsupported",
+  "grammarSurface": "compiled-simplified",
+  "schedule": "nightly",
+  "wiring": {
+    "detector": "dedup-consecutive-unsupported",
+    "enabled": true,
+    "severity": "warning",
+    "runtimeOnly": false,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": { "minVersion": "3.3.0", "engine": "calcite" }
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": true }
+  },
+  "frontendContext": {
+    "isCalcite": true
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "dedup-consecutive-true": {
+      "role": "trigger",
+      "query": "source={{index}} | dedup firstname consecutive=true"
+    },
+    "dedup-plain-control": {
+      "role": "control",
+      "query": "source={{index}} | dedup firstname"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=3.3.0",
+      "engine": "calcite",
+      "queries": {
+        "dedup-consecutive-true": {
+          "detectorCount": 1,
+          "severity": "warning",
+          "backend": { "kind": "advisory", "httpStatus": 200, "expect": { "accepted": true } }
+        },
+        "dedup-plain-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "advisory", "httpStatus": 200, "expect": { "accepted": true } }
+        }
+      }
+    }
+  ]
+}

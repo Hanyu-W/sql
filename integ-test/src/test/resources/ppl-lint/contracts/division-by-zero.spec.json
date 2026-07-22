@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 3,
+  "ruleId": "division-by-zero",
+  "grammarSurface": "compiled-simplified",
+  "schedule": "nightly",
+  "wiring": {
+    "detector": "division-by-zero",
+    "enabled": true,
+    "severity": "warning",
+    "runtimeOnly": false,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": {}
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false }
+  },
+  "frontendContext": {
+    "isCalcite": true
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "divide-by-zero-literal": {
+      "role": "trigger",
+      "query": "source={{index}} | eval ratio = balance / 0 | fields ratio | head 1"
+    },
+    "divide-by-nonzero-control": {
+      "role": "control",
+      "query": "source={{index}} | eval ratio = balance / 2 | fields ratio | head 1"
+    },
+    "modulo-by-zero-flagged": {
+      "role": "trigger",
+      "query": "source={{index}} | eval m = balance % 0 | fields m | head 1"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=0.0.0",
+      "queries": {
+        "divide-by-zero-literal": {
+          "detectorCount": 1,
+          "severity": "warning",
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "ratio" } }
+        },
+        "divide-by-nonzero-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+        },
+        "modulo-by-zero-flagged": {
+          "detectorCount": 1,
+          "severity": "warning",
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "m" } }
+        }
+      }
+    }
+  ]
+}
