@@ -327,6 +327,34 @@ export function classifyDrift(input) {
         },
       };
     }
+    // Out of scope but the detector fired anyway. `appliesTo` is applied by OSD's
+    // version filter, which runs a rule when the cluster version is UNKNOWN — so a
+    // user whose version could not be resolved sees a diagnostic the catalog says
+    // does not apply to them. If the engine accepts the query, that is a false
+    // positive reaching exactly the users the version window was meant to protect.
+    if (detectorFlagged) {
+      return {
+        ...base,
+        driftClass: DRIFT_CLASSES.DETECTOR_NOISY,
+        evidence:
+          `${where}: the rule's appliesTo (${JSON.stringify((wiring && wiring.appliesTo) || {})}) ` +
+          `excludes ${version}, yet the detector emitted ${observed.detectorCount} diagnostic(s) ` +
+          `(${describeObservation(observed)}).`,
+        remediation: {
+          action: REMEDIATIONS.UPDATE_DETECTOR,
+          target: detectorFile(ruleId, detectorPath),
+          detail:
+            `A rule out of scope for ${version} must stay silent there. Check that the detector honors ` +
+            `the version context rather than deciding on its own, and remember OSD's version filter runs ` +
+            `a rule when the cluster version is unknown — so this also fires for users whose version ` +
+            `could not be resolved.` +
+            (backendRejected === true
+              ? ` The engine does reject this query, so widening appliesTo in ${OSD_PATHS.catalog} may be` +
+                ` the right fix instead.`
+              : ''),
+        },
+      };
+    }
     // Out of scope and the engine agrees it is a non-issue: nothing to report.
     return null;
   }
@@ -397,11 +425,19 @@ export function classifyDrift(input) {
   }
 
   // --- 4. Same verdict, different wording ------------------------------------
-  // The engine still rejects, but the error type/reason moved. The detector is
-  // still right; the pinned body — and any detector text that quotes the engine
-  // wording — is stale. Worth flagging because linter messages and quick-fix
-  // copy are written against these strings.
-  if (backendRejected === true && expectRejection && expectedBackend) {
+  // The engine still rejects, but the error type/reason moved. The pinned body —
+  // and any detector text that quotes the engine wording — is stale. Worth
+  // flagging because linter messages and quick-fix copy are written against these
+  // strings.
+  //
+  // Requires the detector to still agree with the expectation (`detectorMatches`).
+  // Without that condition a reworded message would MASK a detector that went
+  // silent at the same time: the report would say "the detector's verdict is
+  // unaffected, no rule change required", the engineer would re-pin the string,
+  // and the check would go green over a rule that no longer fires. When both moved
+  // at once, the silent detector is the more serious story and step 5 tells it.
+  const detectorMatches = (observed.detectorCount || 0) === (expected.detectorCount || 0);
+  if (backendRejected === true && expectRejection && expectedBackend && detectorMatches) {
     const expectedError = (expectedBackend.body && expectedBackend.body.error) || {};
     const typeChanged =
       expectedError.type !== undefined &&

@@ -240,14 +240,26 @@ renamed or removed — the finding names the closest current rule names),
 (the engine rejects but the rule is scoped away from that version, so users see no
 diagnostic), and `severity-mismatch`.
 
-Two guards keep the check from passing vacuously:
+Four guards keep the check from passing vacuously. Each exists because "we could
+not check" must never render as "it is fine":
 
 - A rule that is default-error in OSD's catalog but has no contract file fails the
   run. The detector runner records the catalog's default-error census in
   `detector-report.json`, and the aggregate step compares it against
   `manifest.defaultError` — so a new error rule cannot land unvalidated.
 - A leg whose artifacts are missing is a hard failure, never a silently dropped
-  version.
+  version. The aggregate step also checks that every version the plan asked for
+  produced a report, so a dead observe job cannot shrink the matrix into a green
+  "agrees with all N versions".
+- A case with no engine verdict (a transport failure, recorded by the IT as
+  `outcome: "error"`) is **not** read as acceptance. Coercing it would report a
+  timeout as an engine that now accepts the query — and advise disabling a
+  perfectly good rule. Likewise, a contract whose fixture index failed to seed is
+  reported as unusable rather than as a stream of `IndexNotFoundException`
+  verdicts.
+- A rule whose every case was uncomparable is reported `inconclusive` and **fails**
+  — it proved nothing. Inconclusive findings say "check that leg's logs and re-run",
+  never "edit the rule", because the linter is not what went wrong.
 
 A rule that is out of scope on an engine (`appliesTo` excludes it) and that the
 engine also accepts is reported as `n/a (out of scope)`, not as drift — that is

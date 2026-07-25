@@ -228,6 +228,58 @@ test('a reworded rejection is update-contract and points at quoted copy', () => 
   assert.match(drift.remediation.detail, /quotes the old engine wording/);
 });
 
+test('a reworded rejection does not mask a detector that stopped firing', () => {
+  // Regression: this branch used to return before the detector-silent check, so a
+  // simultaneous rewording + detector regression reported "the detector's verdict
+  // is unaffected, no rule change is required". Re-pinning the string would have
+  // turned the check green over a rule that no longer fires at all.
+  const drift = classifyDrift(
+    agreeingTrigger({
+      observed: {
+        detectorCount: 0,
+        severities: [],
+        backendRejected: true,
+        backendType: 'IllegalArgumentException',
+        backendReason: 'union requires >= 2 datasets, got 1',
+      },
+      expectedBackend: {
+        body: {
+          error: {
+            type: 'IllegalArgumentException',
+            reason: 'Union command requires at least two datasets. Provided: 1',
+          },
+        },
+      },
+    })
+  );
+  assert.equal(drift.driftClass, DRIFT_CLASSES.DETECTOR_SILENT);
+  assert.equal(drift.remediation.action, REMEDIATIONS.UPDATE_DETECTOR);
+});
+
+test('a detector firing where appliesTo excludes the version is a false positive', () => {
+  const drift = classifyDrift(
+    agreeingTrigger({
+      version: '3.6.0', // below the rule's 3.7 minVersion
+      observed: { detectorCount: 1, severities: ['error'], backendRejected: false },
+    })
+  );
+  assert.equal(drift.driftClass, DRIFT_CLASSES.DETECTOR_NOISY);
+  assert.equal(drift.remediation.action, REMEDIATIONS.UPDATE_DETECTOR);
+  // The version filter's unknown-version behavior is why this reaches users.
+  assert.match(drift.remediation.detail, /version is unknown/);
+});
+
+test('an unobserved engine verdict is never treated as acceptance', () => {
+  // backendRejected: undefined means "we never got an answer". It must not select
+  // the engine-relaxed branch, which would advise disabling a healthy rule.
+  const drift = classifyDrift(
+    agreeingTrigger({
+      observed: { detectorCount: 1, severities: ['error'], backendRejected: undefined },
+    })
+  );
+  assert.equal(drift, null);
+});
+
 test('a changed exception type is reported even when the reason is unchanged', () => {
   const drift = classifyDrift(
     agreeingTrigger({

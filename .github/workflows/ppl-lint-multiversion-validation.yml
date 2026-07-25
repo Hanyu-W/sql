@@ -397,17 +397,37 @@ jobs:
       # contracts, then print the remediation report.
       - name: Aggregate drift across engine versions
         id: aggregate
+        env:
+          RELEASED: ${{ needs.plan.outputs.released }}
         run: |
           set -euo pipefail
           shopt -s nullglob
           args=()
+          present=()
           for leg in "$GITHUB_WORKSPACE"/legs/ppl-lint-leg-*; do
             [ -f "$leg/detector-report.json" ] || continue
             version=$(basename "$leg" | sed 's/^ppl-lint-leg-//')
             args+=(--leg "$version=$leg")
+            present+=("$version")
           done
           if [ ${#args[@]} -eq 0 ]; then
             echo "::error::no complete legs to aggregate."
+            exit 1
+          fi
+          # Every version the plan asked for must have produced a leg. Aggregating
+          # only the survivors would report "PASS: agrees with all N versions" over
+          # a matrix that silently lost one — the exact vacuous pass this workflow
+          # exists to prevent. A dead leg is a failure, not a smaller matrix.
+          missing=()
+          for want in $(echo "$RELEASED" | python3 -c "import json,sys;print(' '.join(json.load(sys.stdin)))") pr-build; do
+            found=no
+            for have in "${present[@]}"; do
+              [ "$have" = "$want" ] && found=yes && break
+            done
+            [ "$found" = yes ] || missing+=("$want")
+          done
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::planned engine leg(s) produced no report: ${missing[*]}. Check those observe jobs; the matrix is incomplete so its result would be misleading."
             exit 1
           fi
           node "$GITHUB_WORKSPACE/scripts/ppl-lint/aggregate-versions.mjs" \
