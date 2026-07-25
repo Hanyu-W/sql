@@ -2,6 +2,7 @@
   "schemaVersion": 3,
   "description": "Index of PPL lint rule validation contracts. Each entry pins one OSD analyzer rule to live SQL /_plugins/_ppl behavior. The detector runner (scripts/ppl-lint/run-frontend-contract.mjs) and backend IT (PplLintRuleValidationIT) both read these files. `contracts` is the full corpus; `enforced` is the phase-one, reviewed, error-severity subset with a stable backend rejection oracle that blocks a PR (design §5.1, §5.2). Everything not in `enforced` runs non-blocking (nightly / advisory) until it has an equally stable oracle and owner review.",
   "contracts": [
+    "invalid-capture-group-name.spec.json",
     "unsupported-window-function-in-eventstats.spec.json",
     "division-by-zero.spec.json",
     "head-without-sort.spec.json",
@@ -13,6 +14,7 @@
     "replace-wildcard-asymmetry.spec.json"
   ],
   "enforced": [
+    "invalid-capture-group-name.spec.json",
     "unsupported-window-function-in-eventstats.spec.json",
     "multisearch-min-subsearch.spec.json",
     "union-min-datasets.spec.json",
