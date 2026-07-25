@@ -73,6 +73,24 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
   /** Which contracts to run this session; PR is the fast blocking subset. */
   private final String schedule = System.getProperty("ppl.lint.schedule", "pr");
 
+  /**
+   * Observe-only mode, used by the multi-version workflow ({@code
+   * .github/workflows/ppl-lint-multiversion-validation.yml}).
+   *
+   * <p>The default mode asserts each case against the expectation pinned for the cluster's version,
+   * which is right when the cluster IS the build under test. The multi-version matrix instead
+   * points this suite at OLDER released engines, where a disagreement is the very signal being
+   * collected — a 3.6 engine that accepts what the contract pins as rejected is a finding for the
+   * drift classifier, not a broken test run.
+   *
+   * <p>So in observe-only mode the suite still runs every query and records the true observed
+   * behavior in the report, but does not fail on an expectation mismatch, and does not require an
+   * expectation to exist for this version at all. Failures that mean the RUN itself is broken (no
+   * grammar bundle, an unreachable cluster, a malformed contract) still fail, because those would
+   * otherwise produce an empty report that reads as agreement.
+   */
+  private final boolean observeOnly = Boolean.getBoolean("ppl.lint.observe.only");
+
   private int[] clusterVersion;
   private String engineVersionRaw;
 
@@ -82,7 +100,20 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
     enableCalcite();
     // Seed the union of every index every scheduled contract needs, once.
     for (String indexEnum : requiredIndexEnums()) {
-      loadIndex(Index.valueOf(indexEnum));
+      try {
+        loadIndex(Index.valueOf(indexEnum));
+      } catch (Exception e) {
+        if (!observeOnly) {
+          throw e;
+        }
+        // In the multi-version matrix an older engine may not support a field type
+        // a fixture uses (a mapping that only exists in a later release). Losing
+        // that one index must not abort the whole leg — the contracts that need it
+        // will surface as their own observations, while every other rule is still
+        // validated against this engine.
+        System.err.println(
+            "[ppl-lint] could not seed index " + indexEnum + " on this engine: " + e.getMessage());
+      }
     }
     clusterVersion = fetchClusterVersion();
   }
@@ -127,7 +158,14 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
     try {
       JSONObject selected = selectExpectation(ruleId, expectations, calciteOn, failures);
       if (selected == null) {
-        return; // no/ambiguous version expectation — failure already recorded.
+        if (!observeOnly) {
+          return; // no/ambiguous version expectation — failure already recorded.
+        }
+        // Observe-only: an engine the corpus does not pin is exactly what the
+        // multi-version matrix wants to learn about, so record the raw behavior of
+        // every query and let the aggregator decide whether the gap matters.
+        observeAllQueries(ruleId, index, queries, report);
+        return;
       }
       JSONObject expectedQueries = selected.getJSONObject("queries");
       for (String queryName : expectedQueries.keySet()) {
@@ -153,14 +191,51 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
           entry.put("outcome", "pass");
           log(ruleId, queryName, "PASS (" + kind + ", " + role + ")");
         } catch (AssertionError | RuntimeException e) {
-          entry.put("outcome", "fail").put("error", String.valueOf(e.getMessage()));
-          failures.add("[" + ruleId + "/" + queryName + "] " + e.getMessage());
-          log(ruleId, queryName, "FAIL (" + kind + "): " + e.getMessage());
+          entry.put("outcome", observeOnly ? "observed-mismatch" : "fail");
+          entry.put("error", String.valueOf(e.getMessage()));
+          if (observeOnly) {
+            // Not a failure here: the observation is the deliverable, and the
+            // drift classifier turns it into a remediation.
+            log(ruleId, queryName, "OBSERVED MISMATCH (" + kind + "): " + e.getMessage());
+          } else {
+            failures.add("[" + ruleId + "/" + queryName + "] " + e.getMessage());
+            log(ruleId, queryName, "FAIL (" + kind + "): " + e.getMessage());
+          }
         }
         report.put(entry);
       }
     } finally {
       resetClusterSettings(applied);
+    }
+  }
+
+  /**
+   * Observe-only helper: run every query a contract declares and record what the engine actually
+   * did, without comparing against any expectation. Used when this engine version has no matching
+   * {@code expectations[]} entry, so the multi-version report still shows real behavior instead of
+   * a blank row that would read as agreement.
+   */
+  private void observeAllQueries(
+      String ruleId, String index, JSONObject queries, JSONArray report) {
+    for (String queryName : queries.keySet()) {
+      JSONObject queryDef = queries.getJSONObject(queryName);
+      String role = queryDef.optString("role", "trigger");
+      String query = queryDef.getString("query").replace("{{index}}", index);
+      JSONObject entry = reportEntry(ruleId, queryName, role, query, "observe-only");
+      try {
+        BackendObservation obs = observeBackend(query);
+        entry
+            .put("rejected", obs.rejected)
+            .put("observed", obs.toJson())
+            .put("outcome", "observed");
+        log(ruleId, queryName, "OBSERVED (" + (obs.rejected ? "rejected" : "accepted") + ")");
+      } catch (IOException | RuntimeException e) {
+        // A transport-level problem is a broken run, not an engine verdict; mark it
+        // so the aggregator does not read the absence of a rejection as acceptance.
+        entry.put("outcome", "error").put("error", String.valueOf(e.getMessage()));
+        log(ruleId, queryName, "ERROR: " + e.getMessage());
+      }
+      report.put(entry);
     }
   }
 

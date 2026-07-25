@@ -8,6 +8,7 @@
     "head-without-sort.spec.json",
     "disabled-join-type.spec.json",
     "field-validation.spec.json",
+    "flat-object-subfield.spec.json",
     "dedup-consecutive-unsupported.spec.json",
     "multisearch-min-subsearch.spec.json",
     "union-min-datasets.spec.json",
@@ -20,9 +21,16 @@
     "union-min-datasets.spec.json",
     "replace-wildcard-asymmetry.spec.json"
   ],
-  "pendingReview": [
-    "field-validation.spec.json"
+  "defaultError": [
+    "invalid-capture-group-name.spec.json",
+    "unsupported-window-function-in-eventstats.spec.json",
+    "multisearch-min-subsearch.spec.json",
+    "union-min-datasets.spec.json",
+    "replace-wildcard-asymmetry.spec.json",
+    "field-validation.spec.json",
+    "flat-object-subfield.spec.json"
   ],
+  "pendingReview": [],
   "nonEnforcing": [
     "division-by-zero.spec.json",
     "head-without-sort.spec.json",
@@ -30,8 +38,9 @@
     "dedup-consecutive-unsupported.spec.json"
   ],
   "notes": {
-    "enforced": "Reviewed error rules with a deterministic backend rejection and a valid negative control. These block the required validation-result check.",
-    "pendingReview": "Error rules awaiting Peng/Chen usefulness + false-positive review (design §5.2) before joining `enforced`. field-validation self-suppresses without field context and is a semantic rule rather than a clean HTTP-400 grammar rejection.",
+    "enforced": "Reviewed error rules with a deterministic backend rejection and a valid negative control. These block the required single-version validation-result check.",
+    "defaultError": "Every rule that ships enabled at ERROR severity in the OSD catalog — the set the MULTI-VERSION check enforces (scripts/ppl-lint/aggregate-versions.mjs). A default-error rule is what users cannot opt out of and what blocks a query in the editor, so it is exactly the set that must agree with every supported engine version. Kept in sync with the catalog by the coverage assertion in the aggregate step: a rules_catalog.json entry with enabled:true + severity:error and no contract file here fails the check.",
+    "pendingReview": "Error rules awaiting Peng/Chen usefulness + false-positive review (design §5.2) before joining `enforced`. Empty now that field-validation and flat-object-subfield are pinned across versions by the multi-version check; they remain outside single-version `enforced` because their backend oracle is a semantic 'Field [...] not found.' rejection shared with each other rather than a rule-unique grammar rejection.",
     "nonEnforcing": "Warning / info / advisory / result-shape rules. They lack a stable backend rejection oracle and never block a PR; they run for coverage on the nightly schedule."
   }
 }

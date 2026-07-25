@@ -1,6 +1,7 @@
 {
   "schemaVersion": 3,
   "ruleId": "unsupported-window-function-in-eventstats",
+  "detectorPath": "packages/osd-monaco/src/ppl/lint/rules/unsupported_window_function.ts",
   "grammarSurface": "compiled-simplified",
   "schedule": "pr",
   "wiring": {

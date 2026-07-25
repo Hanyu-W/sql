@@ -1,0 +1,6 @@
+{"index":{"_id":"1"}}
+{"name":"alpha","status":200,"attributes":{"service":"checkout","region":"us-east-1"}}
+{"index":{"_id":"2"}}
+{"name":"beta","status":500,"attributes":{"service":"search","region":"us-west-2"}}
+{"index":{"_id":"3"}}
+{"name":"gamma","status":200,"attributes":{"service":"checkout","region":"eu-west-1"}}

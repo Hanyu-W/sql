@@ -170,13 +170,119 @@ rule cannot be validated end to end.
 `manifest.json` partitions the corpus:
 
 - `enforced` — reviewed error rules with a deterministic backend rejection and a
-  valid negative control. These block `validation-result`. Phase one:
+  valid negative control. These block `validation-result` on the single-version
+  check: `invalid-capture-group-name`,
   `unsupported-window-function-in-eventstats`, `multisearch-min-subsearch`,
   `union-min-datasets`, `replace-wildcard-asymmetry`.
+- `defaultError` — every rule that ships **enabled at error severity** in OSD's
+  `rules_catalog.json`. This is the set the **multi-version** check enforces (see
+  below). It is a superset of `enforced`, adding `field-validation` and
+  `flat-object-subfield`.
 - `pendingReview` — error rules awaiting Peng/Chen usefulness review before
-  joining `enforced` (currently `field-validation`).
+  joining `enforced`. Empty: `field-validation` and `flat-object-subfield` are now
+  pinned across versions by the multi-version check, but stay out of the
+  single-version `enforced` set because their backend oracle is a semantic
+  `Field [...] not found.` rejection they share with each other rather than a
+  rule-unique grammar rejection.
 - `nonEnforcing` — warning/info/advisory/result-shape rules. They run on the
   nightly schedule for coverage and never block a PR.
+
+## Multi-version validation
+
+The check above validates **one** engine: the build from the PR. But a lint rule
+ships to every user, and each user's cluster is on whatever version they run. A
+rule that is correct on `main` can be a false positive on 3.6 or a false negative
+on 3.7, and the single-version check cannot see it.
+
+[`ppl-lint-multiversion-validation.yml`](../../.github/workflows/ppl-lint-multiversion-validation.yml)
+validates every `defaultError` rule against several engine versions at once, and
+reports **what to change in the linter** when one disagrees.
+
+```
+observe (matrix: 3.6.0, 3.7.0 released images  +  pr-build)
+    └── each leg exports the same 4 artifacts as the single-version check
+detect (one OSD bootstrap, one detector pass per leg's grammar)
+    └── aggregate-versions.mjs → drift-report.json + remediation report
+```
+
+Released legs run the official `opensearchproject/opensearch:<version>` image,
+which bundles the matching `opensearch-sql` plugin, so no old branch is built. The
+`pr-build` leg is the same Gradle test cluster the single-version check uses. Both
+run the **same** contract oracle (`PplLintRuleValidationIT`) with
+`-Dppl.lint.observe.only=true`, which records real behavior instead of asserting
+against expectations — on an older engine a mismatch is the signal being
+collected, not a broken run.
+
+**Engine floor: 3.6.0.** `GET /_plugins/_ppl/_grammar` landed in #5162, which is
+an ancestor of 3.6 but not 3.5, so a 3.5 leg could not export a grammar bundle for
+the detectors to lint against.
+
+This workflow is **non-enforcing for now**: it reports and uploads, while the
+required check stays the single-version `validation-result`. Promoting it needs a
+green baseline across the whole matrix first, so a rule that has already drifted
+on 3.6 does not block every unrelated PR on day one.
+
+### What a drift report tells you
+
+Every finding names a drift class, the evidence, and one remediation action:
+
+| Action | When | What you change |
+| --- | --- | --- |
+| `version-scope-rule` | the engine relaxed (or never had) the behavior on some versions | `appliesTo.minVersion` / `maxVersion` in `rules_catalog.json` — or `enabled: false` if no supported engine rejects it any more |
+| `update-detector` | the detector regressed, went too broad, or its grammar anchor was renamed | the rule's detector `.ts` (named in the finding) |
+| `update-contract` | the linter is right and only the pinned expectation is stale | the `expectations[]` entry for that version |
+
+Drift classes: `grammar-rule-missing` (a parser rule the detector walks was
+renamed or removed — the finding names the closest current rule names),
+`engine-relaxed` / `engine-tightened` (the engine's verdict flipped),
+`engine-message-changed` (same verdict, reworded error), `detector-silent` /
+`detector-noisy` (false negative / false positive), `version-scope-too-narrow`
+(the engine rejects but the rule is scoped away from that version, so users see no
+diagnostic), and `severity-mismatch`.
+
+Two guards keep the check from passing vacuously:
+
+- A rule that is default-error in OSD's catalog but has no contract file fails the
+  run. The detector runner records the catalog's default-error census in
+  `detector-report.json`, and the aggregate step compares it against
+  `manifest.defaultError` — so a new error rule cannot land unvalidated.
+- A leg whose artifacts are missing is a hard failure, never a silently dropped
+  version.
+
+A rule that is out of scope on an engine (`appliesTo` excludes it) and that the
+engine also accepts is reported as `n/a (out of scope)`, not as drift — that is
+the version window working. But if the engine *rejects* the trigger there, it is
+`version-scope-too-narrow`.
+
+### Running the multi-version check locally
+
+Each leg needs a reachable cluster. Point the observe step at any running engine:
+
+```bash
+# Observe one engine (repeat per version into its own leg dir).
+mkdir -p legs/3.7.0
+./gradlew :integ-test:integTestRemote \
+  --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT \
+  -Dtests.rest.cluster=localhost:9200 \
+  -Dppl.lint.schedule=nightly -Dppl.lint.observe.only=true \
+  -Dppl.lint.report=$PWD/legs/3.7.0/backend-report.json \
+  -Dppl.lint.grammar.bundle=$PWD/legs/3.7.0/ppl-grammar-bundle.json \
+  -Dppl.lint.target=$PWD/legs/3.7.0/target.json
+
+# Lint each leg's grammar from an OSD checkout (writes detector-report.json),
+# then compare every version at once:
+node scripts/ppl-lint/aggregate-versions.mjs \
+  --contracts integ-test/src/test/resources/ppl-lint/contracts \
+  --leg 3.6.0=legs/3.6.0 --leg 3.7.0=legs/3.7.0 \
+  --out drift-report.json
+```
+
+The classifier is pure and has no cluster or OSD dependency, so its tests run
+anywhere:
+
+```bash
+node --test "scripts/ppl-lint/__tests__/*.test.mjs"
+```
 
 ## Interpreting a failure
 
