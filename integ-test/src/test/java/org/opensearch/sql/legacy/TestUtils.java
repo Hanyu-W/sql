@@ -523,6 +523,11 @@ public class TestUtils {
     return getMappingFile(mappingFile);
   }
 
+  public static String getFlatObjectIndexMapping() {
+    String mappingFile = "flat_object_index_mapping.json";
+    return getMappingFile(mappingFile);
+  }
+
   public static String getPhraseIndexMapping() {
     String mappingFile = "phrase_index_mapping.json";
     return getMappingFile(mappingFile);

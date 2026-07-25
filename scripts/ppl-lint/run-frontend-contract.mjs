@@ -419,6 +419,16 @@ function main() {
     engineVersion,
     grammarHash: target.grammarHash || '',
     differential: !!backendReport,
+    // Census of the rules that ship enabled at ERROR severity, read from the OSD
+    // catalog this run linted with. The multi-version aggregator enforces its
+    // `defaultError` manifest set against this list, so a rule that becomes
+    // default-error in OSD without a contract file cannot slip through
+    // unvalidated — and the aggregator does not need its own OSD checkout to
+    // notice (design: default-error is the set users cannot opt out of).
+    defaultErrorRules: catalog
+      .filter((rule) => rule.enabled && rule.severity === 'error')
+      .map((rule) => rule.id)
+      .sort(),
     results: [],
   };
 

@@ -869,6 +869,14 @@ public abstract class SQLIntegTestCase extends OpenSearchSQLRestTestCase {
         "flattened_value",
         null,
         "src/test/resources/flattened_value.json"),
+    // An index with a `flat_object` field, which PPL cannot reference at all —
+    // neither the root nor a dotted subfield. Backs the flat-object-subfield lint
+    // contract; see ppl-lint/contracts/flat-object-subfield.spec.json.
+    FLAT_OBJECT(
+        TestsConstants.TEST_INDEX_FLAT_OBJECT,
+        "flat_object",
+        getFlatObjectIndexMapping(),
+        "src/test/resources/flat_object.json"),
     DUPLICATION_NULLABLE(
         TestsConstants.TEST_INDEX_DUPLICATION_NULLABLE,
         "duplication_nullable",

@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 3,
+  "ruleId": "flat-object-subfield",
+  "grammarSurface": "runtime-bundle",
+  "schedule": "pr",
+  "requiredParserRules": ["qualifiedName", "wcQualifiedName"],
+  "notes": "Live-verified on OpenSearch 3.8 with Calcite on: a flat_object field cannot be referenced by PPL at all. BOTH a dotted subfield (`fields attributes.service`) AND the bare root (`fields attributes`) fail with IllegalArgumentException 'Field [...] not found.', and the same holds in a where clause. NOTE the rejection reason is byte-identical to the one field-validation produces for a genuinely absent field, so the backend reason alone cannot attribute a diagnostic to a rule — attribution comes from the detector's ruleId, which is why every case here pins detectorCount for THIS ruleId only. The detector self-suppresses without a typeMap, hence the deriveFromMapping block below (needsContext: true).",
+  "wiring": {
+    "detector": "flat-object-subfield",
+    "enabled": true,
+    "severity": "error",
+    "runtimeOnly": false,
+    "needsContext": true,
+    "needsExplain": false,
+    "appliesTo": {}
+  },
+  "backendFixture": {
+    "indices": ["FLAT_OBJECT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false }
+  },
+  "frontendContext": {
+    "isCalcite": true,
+    "deriveFromMapping": {
+      "name": "keyword",
+      "status": "integer",
+      "attributes": "flat_object"
+    }
+  },
+  "index": "opensearch-sql_test_index_flat_object",
+  "queries": {
+    "flat-object-dotted-subfield": {
+      "role": "trigger",
+      "query": "source={{index}} | fields attributes.service"
+    },
+    "flat-object-bare-root": {
+      "role": "trigger",
+      "query": "source={{index}} | fields attributes"
+    },
+    "flat-object-in-where": {
+      "role": "trigger",
+      "query": "source={{index}} | where attributes.service = 'checkout'"
+    },
+    "non-flat-field-control": {
+      "role": "control",
+      "query": "source={{index}} | fields name, status | head 1"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=3.4.0",
+      "engine": "calcite",
+      "queries": {
+        "flat-object-dotted-subfield": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Field [attributes.service] not found."
+              }
+            }
+          }
+        },
+        "flat-object-bare-root": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Field [attributes] not found."
+              }
+            }
+          }
+        },
+        "flat-object-in-where": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Field [attributes.service] not found."
+              }
+            }
+          }
+        },
+        "non-flat-field-control": {
+          "detectorCount": 0,
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": { "datarowsNonEmpty": true }
+          }
+        }
+      }
+    }
+  ]
+}
