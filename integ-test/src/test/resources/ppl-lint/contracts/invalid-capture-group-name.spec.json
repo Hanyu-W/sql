@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 3,
+  "ruleId": "invalid-capture-group-name",
+  "grammarSurface": "runtime-bundle",
+  "schedule": "pr",
+  "requiredParserRules": ["rexCommand", "stringLiteral"],
+  "wiring": {
+    "detector": "invalid-capture-group-name",
+    "enabled": true,
+    "severity": "error",
+    "runtimeOnly": false,
+    "needsContext": false,
+    "needsExplain": false,
+    "appliesTo": {}
+  },
+  "backendFixture": {
+    "indices": ["ACCOUNT"],
+    "clusterSettings": { "calcite": true, "calciteFallback": false }
+  },
+  "frontendContext": {
+    "isCalcite": true,
+    "deriveFromMapping": { "email": "text" }
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "rex-capture-name-underscore": {
+      "role": "trigger",
+      "query": "source={{index}} | rex field=email \"(?<user_name>[^@]+)@(?<domain>.+)\" | fields email"
+    },
+    "rex-capture-name-alphanumeric-control": {
+      "role": "control",
+      "query": "source={{index}} | rex field=email \"(?<username>[^@]+)@(?<domain>.+)\" | fields email, username, domain | head 1"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=3.4.0",
+      "engine": "calcite",
+      "queries": {
+        "rex-capture-name-underscore": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Invalid capture group name 'user_name'."
+              }
+            }
+          }
+        },
+        "rex-capture-name-alphanumeric-control": {
+          "detectorCount": 0,
+          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+        }
+      }
+    }
+  ]
+}
