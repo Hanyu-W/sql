@@ -94,6 +94,13 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
   private int[] clusterVersion;
   private String engineVersionRaw;
 
+  /**
+   * Index fixtures that could not be created on this engine (observe-only mode only). Contracts
+   * that need one are reported as {@code outcome: "error"} instead of as engine behavior, because
+   * an IndexNotFoundException from a missing fixture is not a verdict about the query.
+   */
+  private final Set<String> unseededIndices = new LinkedHashSet<>();
+
   @Override
   public void init() throws Exception {
     super.init();
@@ -108,9 +115,16 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
         }
         // In the multi-version matrix an older engine may not support a field type
         // a fixture uses (a mapping that only exists in a later release). Losing
-        // that one index must not abort the whole leg — the contracts that need it
-        // will surface as their own observations, while every other rule is still
+        // that one index must not abort the whole leg — every other rule is still
         // validated against this engine.
+        //
+        // But it must not be silent either: without the index, every query against
+        // it fails with IndexNotFoundException, which looks exactly like a real
+        // engine verdict. Left unmarked, the drift report would advise pinning the
+        // contract to IndexNotFoundException, or "extending the detector" for a
+        // control the engine only rejected because its data was missing. Record the
+        // failure so those cases are reported as unusable rather than as behavior.
+        unseededIndices.add(indexEnum);
         System.err.println(
             "[ppl-lint] could not seed index " + indexEnum + " on this engine: " + e.getMessage());
       }
@@ -153,6 +167,16 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
     JSONArray expectations = contract.getJSONArray("expectations");
     JSONObject fixture = contract.optJSONObject("backendFixture");
     boolean calciteOn = fixtureCalciteEnabled(fixture);
+
+    // A contract whose fixture index never got created cannot produce a meaningful
+    // observation: every query would fail with IndexNotFoundException regardless of
+    // the rule. Report each case as an error so the aggregator counts it as
+    // inconclusive rather than as the engine's verdict.
+    String missingIndex = missingFixtureIndex(fixture);
+    if (missingIndex != null) {
+      recordUnusableContract(ruleId, index, queries, report, missingIndex);
+      return;
+    }
 
     List<String> applied = applyClusterSettings(fixture);
     try {
@@ -206,6 +230,49 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       }
     } finally {
       resetClusterSettings(applied);
+    }
+  }
+
+  /**
+   * The first index fixture this contract needs that failed to seed, or null when every index it
+   * declares is present. Only ever non-null in observe-only mode, where a seeding failure is
+   * tolerated instead of aborting the leg.
+   */
+  private String missingFixtureIndex(JSONObject fixture) {
+    if (unseededIndices.isEmpty() || fixture == null) {
+      return null;
+    }
+    JSONArray declared = fixture.optJSONArray("indices");
+    if (declared == null) {
+      return unseededIndices.contains("ACCOUNT") ? "ACCOUNT" : null;
+    }
+    for (int i = 0; i < declared.length(); i++) {
+      String name = declared.getString(i);
+      if (unseededIndices.contains(name)) {
+        return name;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Record every case of a contract whose fixture index is missing as {@code outcome: "error"}, so
+   * the multi-version aggregator treats them as inconclusive. Writing nothing at all would be
+   * worse: absent rows are indistinguishable from a detector that never ran.
+   */
+  private void recordUnusableContract(
+      String ruleId, String index, JSONObject queries, JSONArray report, String missingIndex) {
+    for (String queryName : queries.keySet()) {
+      JSONObject queryDef = queries.getJSONObject(queryName);
+      String role = queryDef.optString("role", "trigger");
+      String query = queryDef.getString("query").replace("{{index}}", index);
+      report.put(
+          reportEntry(ruleId, queryName, role, query, "observe-only")
+              .put("outcome", "error")
+              .put(
+                  "error",
+                  "fixture index " + missingIndex + " could not be created on this engine"));
+      log(ruleId, queryName, "SKIPPED (fixture index " + missingIndex + " unavailable)");
     }
   }
 

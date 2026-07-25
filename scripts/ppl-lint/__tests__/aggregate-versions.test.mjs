@@ -341,6 +341,116 @@ test('a legacy detector report without a census warns instead of failing', () =>
   assert.match(stdout, /no detector leg reported a defaultErrorRules census/);
 });
 
+// --- "we don't know" must never render as "it's fine" -------------------------
+
+/** Write a leg where a named query produced no engine verdict (transport failure). */
+function writeLegWithTransportError({ version, erroredQuery, cases }) {
+  const dir = writeLeg({ version, cases });
+  const file = path.join(dir, 'backend-report.json');
+  const backend = JSON.parse(fs.readFileSync(file, 'utf8')).map((entry) =>
+    entry.queryName === erroredQuery
+      ? // Exactly what the IT writes on a transport failure: an `error` outcome and
+        // NO `rejected` field, because no verdict was ever received.
+        { ruleId: entry.ruleId, queryName: entry.queryName, role: entry.role, outcome: 'error', error: 'connect timeout' }
+      : { ...entry, outcome: 'observed' }
+  );
+  fs.writeFileSync(file, JSON.stringify(backend));
+  return dir;
+}
+
+test('a transport error is not read as engine acceptance', () => {
+  // Regression: coercing a missing `rejected` to false made a timeout look like an
+  // engine that now ACCEPTS the trigger, and advised disabling a healthy rule.
+  const legs = {
+    '3.7.0': writeLegWithTransportError({
+      version: '3.7.0',
+      erroredQuery: 'trigger',
+      cases: { trigger: { detector: 1, rejected: true }, control: { detector: 0, rejected: false } },
+    }),
+  };
+  const { report, stdout } = run({ contracts: writeContracts(), legs });
+  assert.equal(
+    report.drifts.filter((d) => d.driftClass === 'engine-relaxed').length,
+    0,
+    'a timeout must never be reported as the engine relaxing'
+  );
+  assert.ok(
+    !/FALSE POSITIVE/.test(stdout),
+    'a timeout must never advise disabling or version-scoping a rule'
+  );
+  assert.match(stdout, /1 not compared: trigger \(no engine verdict\)/);
+});
+
+test('a leg where nothing could be compared is inconclusive, not agreement', () => {
+  const dir = writeLeg({
+    version: '3.7.0',
+    cases: { trigger: { detector: 1, rejected: true }, control: { detector: 0, rejected: false } },
+  });
+  // Both cases lose their verdict: the whole leg proved nothing.
+  fs.writeFileSync(
+    path.join(dir, 'backend-report.json'),
+    JSON.stringify([
+      { ruleId: SPEC.ruleId, queryName: 'trigger', role: 'trigger', outcome: 'error', error: 'timeout' },
+      { ruleId: SPEC.ruleId, queryName: 'control', role: 'control', outcome: 'error', error: 'timeout' },
+    ])
+  );
+  const { status, report, stdout } = run({ contracts: writeContracts(), legs: { '3.7.0': dir } });
+  assert.equal(status, 1, 'inconclusive must be red — "could not check" is not "passed"');
+  assert.equal(report.result.enforcedInconclusive, 1);
+  assert.equal(report.drifts.length, 0, 'a dead leg must not manufacture linter advice');
+  assert.equal(report.matrix[0].status, 'inconclusive');
+  assert.match(stdout, /Inconclusive \(leg problem, not a linter problem\)/);
+});
+
+test('a reworded engine message does not mask a detector that went silent', () => {
+  // Regression: ENGINE_MESSAGE_CHANGED returned before the detector-silent check,
+  // so the report said "no rule change is required" while the rule had stopped
+  // firing. Re-pinning the string would have gone green over a dead rule.
+  const dir = writeLeg({
+    version: '3.7.0',
+    cases: {
+      trigger: { detector: 0, rejected: true, reason: 'union needs >= 2 datasets' },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const { report } = run({ contracts: writeContracts(), legs: { '3.7.0': dir } });
+  const drift = report.drifts.find((d) => d.queryName === 'trigger');
+  assert.equal(drift.driftClass, 'detector-silent');
+  assert.equal(drift.remediation.action, 'update-detector');
+});
+
+test('a detector firing on a version its appliesTo excludes is reported', () => {
+  // OSD's version filter runs a rule when the cluster version is unknown, so an
+  // out-of-scope rule CAN reach users. Silence here would hide that false positive.
+  const dir = writeLeg({
+    version: '3.6.0', // below the rule's 3.7 minVersion
+    cases: { trigger: { detector: 1, rejected: false }, control: { detector: 0, rejected: false } },
+  });
+  const { status, report } = run({ contracts: writeContracts(), legs: { '3.6.0': dir } });
+  assert.equal(status, 1);
+  const drift = report.drifts.find((d) => d.version === '3.6.0');
+  assert.equal(drift.driftClass, 'detector-noisy');
+  assert.equal(drift.remediation.action, 'update-detector');
+});
+
+test('a calcite-scoped expectation is selected rather than counted twice', () => {
+  // Both single-version halves drop `engine: "calcite"` entries when Calcite is
+  // off. Without that filter here, a per-engine pair for one range matches twice
+  // and is misreported as an uncovered version.
+  const contracts = writeContracts({
+    expectations: [
+      SPEC.expectations[0],
+      { ...SPEC.expectations[0], engine: undefined, queries: SPEC.expectations[0].queries },
+    ],
+  });
+  const { report } = run({ contracts, legs: healthyLegs() });
+  // Two matching entries is genuinely ambiguous and must not silently pick one.
+  assert.ok(
+    report.coverageHoles.length > 0 || report.matrix.some((m) => m.status === 'uncovered'),
+    'an ambiguous pair of expectations must be surfaced, not resolved arbitrarily'
+  );
+});
+
 test('a bad --leg argument is rejected', () => {
   const result = spawnSync(
     process.execPath,

@@ -195,6 +195,43 @@ function auditDefaultErrorCensus(legs, specs, enforcedRules) {
 }
 
 /**
+ * Read one backend report entry into an observation, distinguishing "the engine
+ * accepted this" from "we never got an answer".
+ *
+ * This distinction is load-bearing. The IT marks a transport-level failure
+ * `outcome: "error"` and, having never received a verdict, writes no `rejected`
+ * field. Coercing that absence to `false` would report a timeout as an engine
+ * that now ACCEPTS a query it used to reject — which reads as an engine
+ * relaxation and would advise disabling a perfectly good rule. Anything that is
+ * not a real observed verdict becomes `undefined`, which the classifier treats as
+ * "not observed" rather than as acceptance.
+ *
+ * Returns `{ observed, usable }`: `usable` is false when this case produced no
+ * comparable engine verdict, so the caller can refuse to call it agreement.
+ */
+function readBackendObservation(backendEntry, detectorResult) {
+  const observedBackend = (backendEntry && backendEntry.observed) || undefined;
+  const outcome = backendEntry && backendEntry.outcome;
+  // `observed`/`error` are the observe-only outcomes; `pass`/`fail` come from the
+  // asserting mode. Only those carry a real verdict.
+  const hasVerdict =
+    !!backendEntry &&
+    outcome !== 'error' &&
+    (typeof backendEntry.rejected === 'boolean' || !!observedBackend);
+
+  return {
+    usable: hasVerdict && !!detectorResult,
+    observed: {
+      detectorCount: detectorResult ? detectorResult.actual : 0,
+      severities: detectorResult ? detectorResult.severities || [] : [],
+      backendRejected: hasVerdict ? !!backendEntry.rejected : undefined,
+      backendType: observedBackend ? observedBackend.type : undefined,
+      backendReason: observedBackend ? observedBackend.reason : undefined,
+    },
+  };
+}
+
+/**
  * Check an out-of-scope rule for the one drift that still matters there: the
  * engine rejects a trigger query, but the rule's `appliesTo` excludes this
  * version, so users on it see no diagnostic for a real error. Everything else
@@ -244,9 +281,23 @@ function classifyOutOfScope({ spec, ruleId, leg, classify }) {
  * "exactly one must match" rule as the two single-version halves. Returns
  * undefined when the corpus does not cover this version — reported separately as
  * a coverage hole, not as behavioral drift.
+ *
+ * The `engine` filter matters as much as the version range: both single-version
+ * halves (`PplLintRuleValidationIT.selectExpectation` and
+ * `run-frontend-contract.mjs`) drop `engine: "calcite"` entries when Calcite is
+ * off. Omitting it here would make a contract that pins one range per engine match
+ * TWICE and be misreported as an uncovered version. Every leg in this workflow
+ * runs with Calcite enabled (the observation legs do not disable it), so a
+ * calcite-scoped expectation is in play; a contract's `frontendContext.isCalcite:
+ * false` opts out.
  */
 function selectExpectation(spec, version, versionMatchesRange) {
-  const matches = (spec.expectations || []).filter((exp) => versionMatchesRange(exp.version, version));
+  const isCalcite = !((spec.frontendContext || {}).isCalcite === false);
+  const matches = (spec.expectations || []).filter((exp) => {
+    if (!versionMatchesRange(exp.version, version)) return false;
+    if (exp.engine === 'calcite' && !isCalcite) return false;
+    return true;
+  });
   return matches.length === 1 ? matches[0] : undefined;
 }
 
@@ -303,6 +354,10 @@ function main() {
 
   const drifts = [];
   const coverageHoles = [];
+  // Rule/version pairs where no case could actually be compared (a leg that lost
+  // its engine verdicts or its detector rows). Tracked separately from drift
+  // because the answer is "re-run / fix the leg", not "edit the linter".
+  const inconclusive = [];
   const matrix = []; // one row per rule × version, for the summary table
 
   // A rule that ships enabled at error severity but has no contract file is
@@ -372,9 +427,17 @@ function main() {
       }
 
       let ruleDrifts = 0;
+      let compared = 0;
+      const unusable = [];
       for (const [queryName, expected] of Object.entries(expectation.queries || {})) {
         const queryDef = (spec.queries || {})[queryName];
-        if (!queryDef) continue; // the single-version halves already fail on this
+        if (!queryDef) {
+          // The contract references a query it does not define. The single-version
+          // halves fail on this, but skipping it silently here would shrink the
+          // compared set without saying so.
+          unusable.push(`${queryName} (not defined in the contract's queries map)`);
+          continue;
+        }
         const query = queryDef.query.split('{{index}}').join(spec.index);
         const role = queryDef.role || 'trigger';
 
@@ -382,7 +445,19 @@ function main() {
           (r) => r.ruleId === ruleId && r.queryName === queryName
         );
         const backendEntry = leg.backend.get(`${ruleId}::${queryName}`);
-        const observedBackend = backendEntry && backendEntry.observed;
+        const { observed, usable } = readBackendObservation(backendEntry, detectorResult);
+        if (!usable) {
+          // No comparable pair, so there is nothing to classify. Attempting it
+          // anyway would turn a dead leg into linter advice: a case with no engine
+          // verdict and no detector row looks exactly like "the detector went
+          // silent", and the report would tell the engineer to go fix a detector
+          // that is fine. Record it as not compared and move on.
+          unusable.push(
+            `${queryName} (${!detectorResult ? 'no detector result' : 'no engine verdict'})`
+          );
+          continue;
+        }
+        compared++;
 
         const drift = classifyDrift({
           ruleId,
@@ -395,13 +470,7 @@ function main() {
             severity: expected.severity,
             backendKind: expected.backend && expected.backend.kind,
           },
-          observed: {
-            detectorCount: detectorResult ? detectorResult.actual : 0,
-            severities: detectorResult ? detectorResult.severities || [] : [],
-            backendRejected: backendEntry ? !!backendEntry.rejected : undefined,
-            backendType: observedBackend ? observedBackend.type : undefined,
-            backendReason: observedBackend ? observedBackend.reason : undefined,
-          },
+          observed,
           wiring: spec.wiring,
           detectorPath: spec.detectorPath,
           parserRuleNames: leg.parserRuleNames,
@@ -414,17 +483,39 @@ function main() {
           ruleDrifts++;
         }
       }
-      matrix.push({
-        ruleId,
-        version: leg.version,
-        status: ruleDrifts === 0 ? 'agree' : 'drift',
-        drifts: ruleDrifts,
-      });
+      // "agree" has to mean "we compared something and it matched". A rule whose
+      // every case lost its engine verdict (a timed-out leg) or its detector row
+      // (a runner that died mid-corpus) has proven nothing, and calling that
+      // agreement is exactly the vacuous pass this check exists to prevent.
+      if (compared === 0) {
+        inconclusive.push({
+          ruleId,
+          file,
+          version: leg.version,
+          enforced: isEnforced,
+          reasons: unusable,
+        });
+        matrix.push({ ruleId, version: leg.version, status: 'inconclusive', drifts: ruleDrifts });
+      } else {
+        if (unusable.length > 0) {
+          log(
+            `WARN: ${ruleId} @ ${leg.version} compared ${compared} case(s); ` +
+              `${unusable.length} not compared: ${unusable.join(', ')}`
+          );
+        }
+        matrix.push({
+          ruleId,
+          version: leg.version,
+          status: ruleDrifts === 0 ? 'agree' : 'drift',
+          drifts: ruleDrifts,
+        });
+      }
     }
   }
 
   const enforcedDrifts = drifts.filter((d) => d.enforced);
   const enforcedHoles = coverageHoles.filter((h) => h.enforced);
+  const enforcedInconclusive = inconclusive.filter((i) => i.enforced);
 
   const report = {
     schemaVersion: 1,
@@ -439,15 +530,20 @@ function main() {
     matrix,
     drifts,
     coverageHoles,
+    inconclusive,
     result: {
       driftCount: drifts.length,
       enforcedDriftCount: enforcedDrifts.length,
       enforcedCoverageHoles: enforcedHoles.length,
       missingContractCount: missingContracts.length,
+      enforcedInconclusive: enforcedInconclusive.length,
+      // An inconclusive default-error rule fails too: "we could not check" must
+      // never render as "it is fine".
       passed:
         enforcedDrifts.length === 0 &&
         enforcedHoles.length === 0 &&
-        missingContracts.length === 0,
+        missingContracts.length === 0 &&
+        enforcedInconclusive.length === 0,
     },
   };
 
@@ -469,8 +565,8 @@ function main() {
     // eslint-disable-next-line no-console
     console.error(
       `[ppl-lint-multiversion] FAIL: ${enforcedDrifts.length} drift(s), ` +
-        `${enforcedHoles.length} coverage hole(s) and ${missingContracts.length} unvalidated ` +
-        `default-error rule(s).`
+        `${enforcedHoles.length} coverage hole(s), ${missingContracts.length} unvalidated ` +
+        `default-error rule(s) and ${enforcedInconclusive.length} inconclusive rule/version pair(s).`
     );
     process.exit(1);
   }
@@ -513,6 +609,21 @@ function renderMarkdown(report, drifts, coverageHoles, legs) {
     lines.push(`| \`${ruleId}\` | ${cells.join(' | ')} |`);
   }
   lines.push('');
+
+  if ((report.inconclusive || []).length > 0) {
+    lines.push('### Inconclusive (leg problem, not a linter problem)');
+    lines.push('');
+    for (const entry of report.inconclusive) {
+      lines.push(
+        `- \`${entry.ruleId}\` on engine \`${entry.version}\`: no case could be compared — ` +
+          `${entry.reasons.join('; ')}. This is NOT a lint finding: the engine or the detector run ` +
+          `did not answer, so nothing was validated. Check that leg's job logs (an unreachable ` +
+          `cluster, an index that failed to seed, or a detector runner that died mid-corpus) and ` +
+          `re-run. Do not edit the rule or the contract on the strength of this.`
+      );
+    }
+    lines.push('');
+  }
 
   if ((report.missingContracts || []).length > 0) {
     lines.push('### Unvalidated default-error rules');
