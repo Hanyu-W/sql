@@ -244,24 +244,42 @@ function readBackendObservation(backendEntry, detectorResult) {
 function classifyOutOfScope({ spec, ruleId, leg, classify }) {
   const found = [];
 
-  // Did this rule's CONTROL query — a valid use of the same command — also get
-  // rejected on this engine? If so the command itself is unsupported here, and a
-  // rejected trigger says nothing about the rule's specific condition. Computed
-  // once, since it is a property of the rule on this engine.
-  const controlAlsoRejected = Object.entries(spec.queries || {}).some(([name, def]) => {
-    if ((def.role || 'trigger') !== 'control') return false;
-    const entry = leg.backend.get(`${ruleId}::${name}`);
-    return !!(entry && entry.rejected);
-  });
+  // What did this rule's CONTROL queries — valid uses of the same command — do on
+  // this engine? THREE states, not two, and the difference decides whether a
+  // rejected trigger means anything:
+  //   rejected  the command itself is unsupported here, so the trigger's rejection
+  //             says nothing about the rule's specific condition -> suppress
+  //   accepted  the command works, so a rejected trigger really is the rule's
+  //             condition going unreported on this version -> report it
+  //   unknown   no control verdict arrived (errored/absent). We cannot tell the two
+  //             apart, so we must not emit confident advice either way.
+  // Collapsing this to a boolean is what let the suppression fail open: an errored
+  // control read as "not rejected" and produced the exact "widen appliesTo" advice
+  // this check exists to prevent.
+  const controlVerdicts = Object.entries(spec.queries || {})
+    .filter(([, def]) => (def.role || 'trigger') === 'control')
+    .map(([name]) => {
+      const entry = leg.backend.get(`${ruleId}::${name}`);
+      const { observed } = readBackendObservation(entry, { actual: 0, severities: [] });
+      return observed.backendRejected;
+    });
+  const controlAlsoRejected = controlVerdicts.some((v) => v === true);
+  // A rule with controls, none of which produced a verdict, cannot be judged here.
+  const controlUnknown =
+    controlVerdicts.length > 0 && !controlVerdicts.some((v) => typeof v === 'boolean');
 
   for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
     if ((queryDef.role || 'trigger') !== 'trigger') continue;
     const backendEntry = leg.backend.get(`${ruleId}::${queryName}`);
     if (!backendEntry) continue; // this leg never ran the query
-    const observedBackend = backendEntry.observed || {};
     const detectorResult = (leg.detector.results || []).find(
       (r) => r.ruleId === ruleId && r.queryName === queryName
     );
+    // Same reason as above: an errored observation must not read as "the engine
+    // accepted this". On this path that coercion would turn a genuinely
+    // mis-scoped rule into a silent `out-of-scope` PASS, because the
+    // version-scope-too-narrow check requires backendRejected === true.
+    const { observed: outOfScopeObserved } = readBackendObservation(backendEntry, detectorResult);
     const drift = classify({
       ruleId,
       version: leg.version,
@@ -270,16 +288,13 @@ function classifyOutOfScope({ spec, ruleId, leg, classify }) {
       query: queryDef.query.split('{{index}}').join(spec.index),
       // Out of scope means the rule is expected to stay silent here.
       expected: { detectorCount: 0 },
-      observed: {
-        detectorCount: detectorResult ? detectorResult.actual : 0,
-        severities: detectorResult ? detectorResult.severities || [] : [],
-        backendRejected: !!backendEntry.rejected,
-        backendType: observedBackend.type,
-        backendReason: observedBackend.reason,
-      },
+      observed: outOfScopeObserved,
       wiring: spec.wiring,
       detectorPath: spec.detectorPath,
-      controlAlsoRejected,
+      // An unknown control verdict is treated the same as a rejected one: both
+      // mean "we cannot claim this engine supports the command", and staying quiet
+      // is the only honest option.
+      controlAlsoRejected: controlAlsoRejected || controlUnknown,
       // Deliberately no parser-rule check here: a grammar that lacks the rule is
       // expected on an engine the command predates.
     });
@@ -440,6 +455,14 @@ function main() {
 
       let ruleDrifts = 0;
       let compared = 0;
+      // Triggers are counted separately from controls. A trigger is the rule's
+      // entire behavioral claim ("this query is flagged"); a control only says the
+      // rule stays quiet nearby. So a rule that lost every trigger but kept one
+      // control has proven nothing about itself, even though `compared` is
+      // non-zero — flat-object-subfield has 3 triggers and 1 control, and would
+      // otherwise render `agree` off the control alone.
+      let triggersExpected = 0;
+      let triggersCompared = 0;
       const unusable = [];
       for (const [queryName, expected] of Object.entries(expectation.queries || {})) {
         const queryDef = (spec.queries || {})[queryName];
@@ -452,6 +475,9 @@ function main() {
         }
         const query = queryDef.query.split('{{index}}').join(spec.index);
         const role = queryDef.role || 'trigger';
+        if (role === 'trigger') {
+          triggersExpected++;
+        }
 
         const detectorResult = (leg.detector.results || []).find(
           (r) => r.ruleId === ruleId && r.queryName === queryName
@@ -470,6 +496,9 @@ function main() {
           continue;
         }
         compared++;
+        if (role === 'trigger') {
+          triggersCompared++;
+        }
 
         const drift = classifyDrift({
           ruleId,
@@ -495,11 +524,13 @@ function main() {
           ruleDrifts++;
         }
       }
-      // "agree" has to mean "we compared something and it matched". A rule whose
-      // every case lost its engine verdict (a timed-out leg) or its detector row
-      // (a runner that died mid-corpus) has proven nothing, and calling that
-      // agreement is exactly the vacuous pass this check exists to prevent.
-      if (compared === 0) {
+      // "agree" has to mean "we compared the rule's claim and it held". A rule
+      // whose every case lost its engine verdict (a timed-out leg) or its detector
+      // row (a runner that died mid-corpus) has proven nothing — and so has one
+      // that lost every TRIGGER while keeping a control, since the triggers are
+      // where the rule's behavior actually lives. Calling either agreement is the
+      // vacuous pass this check exists to prevent.
+      if (compared === 0 || (triggersExpected > 0 && triggersCompared === 0)) {
         inconclusive.push({
           ruleId,
           file,
