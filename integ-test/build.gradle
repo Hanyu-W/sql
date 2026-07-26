@@ -169,18 +169,25 @@ tasks.withType(licenseHeaders.class) {
 }
 
 // Forward the PPL lint rule validation contract knobs to every integ test JVM
-// (PplLintRuleValidationIT reads them): which schedule to run (pr|nightly), an
-// optional path to write the observed backend report, and — while the cluster is
-// alive — optional paths to export the candidate runtime grammar bundle and its
-// target manifest for the detector-validation job. Applied globally so every
+// (PplLintRuleValidationIT reads them): which schedule to run (pr|nightly),
+// whether to observe rather than assert (the multi-version matrix), an optional
+// path to write the observed backend report, and — while the cluster is alive —
+// optional paths to export the candidate runtime grammar bundle and its target
+// manifest for the detector-validation job. Applied globally so every
 // RestIntegTestTask that runs the class picks it up without per-task edits.
+//
+// Forwarded by PREFIX rather than by an explicit list. A hand-maintained list is
+// a silent trap: a property the IT reads but the list omits simply never reaches
+// the test JVM, with no error anywhere. That already cost one CI run —
+// `ppl.lint.observe.only` was added to the IT and the workflow but not to the
+// list, so a multi-version leg asserted expectations pinned for a DIFFERENT
+// engine version and failed instead of observing. Forwarding every `ppl.lint.*`
+// property the invoker set means adding a knob to the IT is enough.
 tasks.withType(Test).configureEach {
     systemProperty "ppl.lint.schedule", System.getProperty("ppl.lint.schedule", "pr")
-    ["ppl.lint.report", "ppl.lint.grammar.bundle", "ppl.lint.target"].each { prop ->
-        if (System.getProperty(prop) != null) {
-            systemProperty prop, System.getProperty(prop)
-        }
-    }
+    System.properties.stringPropertyNames()
+            .findAll { it.startsWith("ppl.lint.") && it != "ppl.lint.schedule" }
+            .each { prop -> systemProperty prop, System.getProperty(prop) }
 }
 
 validateNebulaPom.enabled = false
