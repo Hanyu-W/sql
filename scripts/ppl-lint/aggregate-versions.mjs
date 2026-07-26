@@ -582,11 +582,23 @@ function renderMarkdown(report, drifts, coverageHoles, legs) {
   const lines = [];
   lines.push('## PPL lint multi-version validation');
   lines.push('');
+  // Every reason the run can be red belongs in the headline. Reporting only
+  // drifts and holes made a FAIL caused solely by inconclusive rules read as
+  // "0 drifts, 0 holes — FAIL", which looks like a reporting bug rather than the
+  // real cause.
+  const reasons = [
+    `${report.result.enforcedDriftCount} enforced drift(s)`,
+    `${report.result.enforcedCoverageHoles} coverage hole(s)`,
+  ];
+  if (report.result.enforcedInconclusive) {
+    reasons.push(`${report.result.enforcedInconclusive} inconclusive`);
+  }
+  if (report.result.missingContractCount) {
+    reasons.push(`${report.result.missingContractCount} unvalidated rule(s)`);
+  }
   lines.push(
     `Engine versions: ${legs.map((l) => `\`${l.version}\``).join(', ')} — ` +
-      `**${report.result.passed ? 'PASS' : 'FAIL'}** ` +
-      `(${report.result.enforcedDriftCount} enforced drift(s), ` +
-      `${report.result.enforcedCoverageHoles} coverage hole(s))`
+      `**${report.result.passed ? 'PASS' : 'FAIL'}** (${reasons.join(', ')})`
   );
   lines.push('');
 
@@ -599,12 +611,17 @@ function renderMarkdown(report, drifts, coverageHoles, legs) {
     drift: 'DRIFT',
     uncovered: 'not covered',
     'out-of-scope': 'n/a (out of scope)',
+    inconclusive: '**inconclusive**',
   };
   for (const ruleId of rules) {
     const cells = versions.map((version) => {
       const row = report.matrix.find((m) => m.ruleId === ruleId && m.version === version);
       if (!row) return '—';
-      return row.status === 'drift' ? `**DRIFT** (${row.drifts})` : cell[row.status];
+      if (row.status === 'drift') return `**DRIFT** (${row.drifts})`;
+      // An unmapped status must still render as something visible. A blank cell
+      // reads as "nothing to see here", which is the opposite of what an
+      // unrecognized state means.
+      return cell[row.status] || `**${row.status}**`;
     });
     lines.push(`| \`${ruleId}\` | ${cells.join(' | ')} |`);
   }
