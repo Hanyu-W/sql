@@ -13,12 +13,19 @@
     "appliesTo": {}
   },
   "backendFixture": {
-    "indices": ["ACCOUNT"],
-    "clusterSettings": { "calcite": true, "calciteFallback": false }
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
   },
   "frontendContext": {
     "isCalcite": true,
-    "visibleIndices": ["{{index}}"],
+    "visibleIndices": [
+      "{{index}}"
+    ],
     "deriveFromMapping": {
       "account_number": "long",
       "balance": "long",
@@ -50,16 +57,21 @@
   },
   "expectations": [
     {
-      "version": ">=3.4.0",
+      "version": ">=3.4.0 <3.7.0",
       "queries": {
         "unknown-field-existence": {
           "detectorCount": 1,
           "severity": "error",
-          "matchMessage": "nonexistent_field",
           "backend": {
             "kind": "rejection",
             "httpStatus": 400,
-            "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Field [nonexistent_field] not found." } }
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Invalid Query"
+              }
+            }
           }
         },
         "grok-field-slot-shape-typo": {
@@ -68,12 +80,70 @@
           "backend": {
             "kind": "rejection",
             "httpStatus": 400,
-            "body": { "status": 400, "error": { "type": "IllegalArgumentException", "reason": "Field [field] not found." } }
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Invalid Query"
+              }
+            }
           }
         },
         "known-field-control": {
           "detectorCount": 0,
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "datarowsNonEmpty": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "version": ">=3.7.0",
+      "queries": {
+        "unknown-field-existence": {
+          "detectorCount": 1,
+          "severity": "error",
+          "matchMessage": "nonexistent_field",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Field [nonexistent_field] not found."
+              }
+            }
+          }
+        },
+        "grok-field-slot-shape-typo": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Field [field] not found."
+              }
+            }
+          }
+        },
+        "known-field-control": {
+          "detectorCount": 0,
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "datarowsNonEmpty": true
+            }
+          }
         }
       }
     }

@@ -3,7 +3,10 @@
   "ruleId": "replace-wildcard-asymmetry",
   "grammarSurface": "runtime-bundle",
   "schedule": "pr",
-  "requiredParserRules": ["replacePair", "stringLiteral"],
+  "requiredParserRules": [
+    "replacePair",
+    "stringLiteral"
+  ],
   "wiring": {
     "detector": "replace-wildcard-asymmetry",
     "enabled": true,
@@ -11,11 +14,19 @@
     "runtimeOnly": true,
     "needsContext": false,
     "needsExplain": false,
-    "appliesTo": { "minVersion": "3.4.0", "engine": "calcite" }
+    "appliesTo": {
+      "minVersion": "3.4.0",
+      "engine": "calcite"
+    }
   },
   "backendFixture": {
-    "indices": ["ACCOUNT"],
-    "clusterSettings": { "calcite": true, "calciteFallback": false }
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
   },
   "frontendContext": {
     "isCalcite": true
@@ -33,7 +44,38 @@
   },
   "expectations": [
     {
-      "version": ">=3.4.0",
+      "version": ">=3.4.0 <3.7.0",
+      "engine": "calcite",
+      "queries": {
+        "replace-wildcard-count-mismatch": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Invalid Query"
+              }
+            }
+          }
+        },
+        "replace-symmetric-control": {
+          "detectorCount": 0,
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "datarowsNonEmpty": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "version": ">=3.7.0",
       "engine": "calcite",
       "queries": {
         "replace-wildcard-count-mismatch": {
@@ -53,7 +95,13 @@
         },
         "replace-symmetric-control": {
           "detectorCount": 0,
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "datarowsNonEmpty": true
+            }
+          }
         }
       }
     }
