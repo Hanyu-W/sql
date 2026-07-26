@@ -243,6 +243,17 @@ function readBackendObservation(backendEntry, detectorResult) {
  */
 function classifyOutOfScope({ spec, ruleId, leg, classify }) {
   const found = [];
+
+  // Did this rule's CONTROL query — a valid use of the same command — also get
+  // rejected on this engine? If so the command itself is unsupported here, and a
+  // rejected trigger says nothing about the rule's specific condition. Computed
+  // once, since it is a property of the rule on this engine.
+  const controlAlsoRejected = Object.entries(spec.queries || {}).some(([name, def]) => {
+    if ((def.role || 'trigger') !== 'control') return false;
+    const entry = leg.backend.get(`${ruleId}::${name}`);
+    return !!(entry && entry.rejected);
+  });
+
   for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
     if ((queryDef.role || 'trigger') !== 'trigger') continue;
     const backendEntry = leg.backend.get(`${ruleId}::${queryName}`);
@@ -268,6 +279,7 @@ function classifyOutOfScope({ spec, ruleId, leg, classify }) {
       },
       wiring: spec.wiring,
       detectorPath: spec.detectorPath,
+      controlAlsoRejected,
       // Deliberately no parser-rule check here: a grammar that lacks the rule is
       // expected on an engine the command predates.
     });

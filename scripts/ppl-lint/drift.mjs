@@ -261,6 +261,8 @@ export function classifyGrammarDrift({
  * @param {string[]} [input.parserRuleNames] candidate grammar's parser rule names
  * @param {string[]} [input.requiredParserRules] grammar rules the detector walks
  * @param {object} [input.expectedBackend]  contract's pinned rejection body
+ * @param {boolean} [input.controlAlsoRejected] true when this rule's control query was
+ *   ALSO rejected on this engine, i.e. the command itself is unsupported here
  */
 export function classifyDrift(input) {
   const {
@@ -276,6 +278,7 @@ export function classifyDrift(input) {
     requiredParserRules,
     expectedBackend,
     detectorPath,
+    controlAlsoRejected,
   } = input;
 
   const detectorFlagged = (observed.detectorCount || 0) > 0;
@@ -310,7 +313,14 @@ export function classifyDrift(input) {
   // this version get no diagnostic.
   const inScope = versionInAppliesTo(wiring && wiring.appliesTo, version);
   if (!inScope) {
-    if (role === 'trigger' && backendRejected === true) {
+    // A trigger the engine rejects normally means the version window is too
+    // narrow. But if the rule's CONTROL — a valid query using the same command —
+    // is rejected too, the command itself does not exist on this engine yet, and
+    // the rejection says nothing about the rule's specific condition. Widening
+    // appliesTo there would ship a diagnostic that claims a precise cause for
+    // what is really "unsupported command", so that case is correctly silent:
+    // the version window is doing its job.
+    if (role === 'trigger' && backendRejected === true && controlAlsoRejected !== true) {
       return {
         ...base,
         driftClass: DRIFT_CLASSES.VERSION_SCOPE_TOO_NARROW,
