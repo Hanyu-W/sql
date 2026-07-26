@@ -368,6 +368,28 @@ test('a downgraded severity is caught even when the count is right', () => {
 
 // --- version scoping --------------------------------------------------------
 
+test('an unsupported command is not mistaken for a too-narrow version window', () => {
+  // Real case from CI: on 3.6 the `union` command does not exist, so BOTH the
+  // trigger and the control fail with SyntaxCheckException. Judging the trigger
+  // alone said "widen appliesTo to 3.6" — which would ship a diagnostic claiming a
+  // precise cause ("requires at least two datasets") for what is really
+  // "unsupported command". A rejected control means the version window is right.
+  const drift = classifyDrift(
+    agreeingTrigger({
+      version: '3.6.0',
+      observed: {
+        detectorCount: 0,
+        severities: [],
+        backendRejected: true,
+        backendType: 'SyntaxCheckException',
+        backendReason: 'Invalid Query',
+      },
+      controlAlsoRejected: true,
+    })
+  );
+  assert.equal(drift, null);
+});
+
 test('an out-of-scope rule on an engine that rejects is scoped too narrowly', () => {
   const drift = classifyDrift(
     agreeingTrigger({
