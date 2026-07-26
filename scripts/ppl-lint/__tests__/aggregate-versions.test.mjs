@@ -368,7 +368,7 @@ test('a transport error is not read as engine acceptance', () => {
       cases: { trigger: { detector: 1, rejected: true }, control: { detector: 0, rejected: false } },
     }),
   };
-  const { report, stdout } = run({ contracts: writeContracts(), legs });
+  const { status, report, stdout } = run({ contracts: writeContracts(), legs });
   assert.equal(
     report.drifts.filter((d) => d.driftClass === 'engine-relaxed').length,
     0,
@@ -378,7 +378,39 @@ test('a transport error is not read as engine acceptance', () => {
     !/FALSE POSITIVE/.test(stdout),
     'a timeout must never advise disabling or version-scoping a rule'
   );
-  assert.match(stdout, /1 not compared: trigger \(no engine verdict\)/);
+  // This spec has a single trigger, so losing it means the rule's behavioral
+  // claim went unchecked: inconclusive and red, not a passing WARN.
+  assert.equal(status, 1);
+  assert.equal(report.result.enforcedInconclusive, 1);
+  assert.match(stdout, /trigger \(no engine verdict\)/);
+});
+
+test('losing every trigger is inconclusive even when a control still compares', () => {
+  // flat-object-subfield's real shape: several triggers plus one control. The
+  // triggers ARE the rule's claim, so a leg that kept only the control has proven
+  // nothing — but `compared > 0`, so a naive count would have rendered `agree`.
+  const dir = writeLeg({
+    version: '3.7.0',
+    cases: { trigger: { detector: 1, rejected: true }, control: { detector: 0, rejected: false } },
+  });
+  fs.writeFileSync(
+    path.join(dir, 'backend-report.json'),
+    JSON.stringify([
+      { ruleId: SPEC.ruleId, queryName: 'trigger', role: 'trigger', outcome: 'error', error: 'timeout' },
+      {
+        ruleId: SPEC.ruleId,
+        queryName: 'control',
+        role: 'control',
+        rejected: false,
+        outcome: 'observed',
+        observed: { httpStatus: 200, rejected: false },
+      },
+    ])
+  );
+  const { status, report } = run({ contracts: writeContracts(), legs: { '3.7.0': dir } });
+  assert.equal(status, 1, 'a rule whose triggers all went unobserved must not read as agreement');
+  assert.equal(report.matrix[0].status, 'inconclusive');
+  assert.equal(report.result.enforcedInconclusive, 1);
 });
 
 test('a leg where nothing could be compared is inconclusive, not agreement', () => {
@@ -449,6 +481,67 @@ test('a calcite-scoped expectation is selected rather than counted twice', () =>
     report.coverageHoles.length > 0 || report.matrix.some((m) => m.status === 'uncovered'),
     'an ambiguous pair of expectations must be surfaced, not resolved arbitrarily'
   );
+});
+
+test('an errored trigger on an out-of-scope rule does not silently pass', () => {
+  // The out-of-scope path used to read `entry.rejected` directly. An errored
+  // observation has no such field, so it coerced to false, the
+  // version-scope-too-narrow check (which needs `=== true`) never fired, and a
+  // genuinely mis-scoped rule rendered as `out-of-scope` with exit 0.
+  const dir = writeLeg({
+    version: '3.6.0', // below the rule's 3.7 minVersion => out of scope
+    cases: { trigger: { detector: 0, rejected: true }, control: { detector: 0, rejected: false } },
+  });
+  fs.writeFileSync(
+    path.join(dir, 'backend-report.json'),
+    JSON.stringify([
+      { ruleId: SPEC.ruleId, queryName: 'trigger', role: 'trigger', outcome: 'error', error: 'timeout' },
+      {
+        ruleId: SPEC.ruleId,
+        queryName: 'control',
+        role: 'control',
+        rejected: false,
+        outcome: 'observed',
+        observed: { httpStatus: 200, rejected: false },
+      },
+    ])
+  );
+  const { report } = run({ contracts: writeContracts(), legs: { '3.6.0': dir } });
+  // The point is that an unobserved trigger yields no CLAIM either way: it must
+  // not be reported as a confident out-of-scope agreement...
+  assert.equal(
+    report.drifts.filter((d) => d.driftClass === 'version-scope-too-narrow').length,
+    0,
+    'an unobserved trigger cannot support a version-scope finding'
+  );
+  // ...nor may it invent linter advice from a verdict that never arrived.
+  assert.equal(report.drifts.length, 0);
+});
+
+test('an errored control cannot fail open into "widen appliesTo" advice', () => {
+  // controlAlsoRejected suppresses the version-scope finding when the command
+  // itself is unsupported. Reading `entry.rejected` raw made that suppression fail
+  // OPEN on an errored control: the run would then advise lowering minVersion,
+  // shipping a precise-cause diagnostic for an unknown-command failure.
+  const dir = writeLeg({
+    version: '3.6.0',
+    cases: { trigger: { detector: 0, rejected: true }, control: { detector: 0, rejected: true } },
+  });
+  const backend = JSON.parse(fs.readFileSync(path.join(dir, 'backend-report.json'), 'utf8')).map(
+    (e) =>
+      e.role === 'control'
+        ? { ruleId: e.ruleId, queryName: e.queryName, role: e.role, outcome: 'error', error: 'timeout' }
+        : { ...e, outcome: 'observed' }
+  );
+  fs.writeFileSync(path.join(dir, 'backend-report.json'), JSON.stringify(backend));
+  const { report, stdout } = run({ contracts: writeContracts(), legs: { '3.6.0': dir } });
+  const scoped = report.drifts.filter((d) => d.driftClass === 'version-scope-too-narrow');
+  assert.equal(
+    scoped.length,
+    0,
+    'with the control unobserved there is no evidence the command is supported, so no widening advice'
+  );
+  assert.ok(!/Widen "/.test(stdout));
 });
 
 test('a bad --leg argument is rejected', () => {
