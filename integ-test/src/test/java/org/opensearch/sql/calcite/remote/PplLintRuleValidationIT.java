@@ -180,14 +180,20 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
 
     List<String> applied = applyClusterSettings(fixture);
     try {
-      JSONObject selected = selectExpectation(ruleId, expectations, calciteOn, failures);
+      // In observe-only mode, "no expectation matches this version" is information,
+      // not a failure — a rule the corpus does not pin for THIS engine is exactly
+      // what the multi-version matrix is here to learn. selectExpectation records
+      // into whatever list it is handed, so hand it a scratch list we discard;
+      // otherwise the leg both records the observation AND fails, which is what
+      // kept union-min-datasets (a >=3.7 rule) failing the 3.6 leg.
+      List<String> selectionFailures = observeOnly ? new ArrayList<>() : failures;
+      JSONObject selected = selectExpectation(ruleId, expectations, calciteOn, selectionFailures);
       if (selected == null) {
         if (!observeOnly) {
           return; // no/ambiguous version expectation — failure already recorded.
         }
-        // Observe-only: an engine the corpus does not pin is exactly what the
-        // multi-version matrix wants to learn about, so record the raw behavior of
-        // every query and let the aggregator decide whether the gap matters.
+        // Record the raw behavior of every query and let the aggregator decide
+        // whether the gap matters (out-of-scope rule vs a real coverage hole).
         observeAllQueries(ruleId, index, queries, report);
         return;
       }
