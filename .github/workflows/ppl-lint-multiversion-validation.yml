@@ -393,12 +393,6 @@ jobs:
               echo "::warning::SLOW/FAIL $(($(date +%s) - start))s  ${path}  $(cat /tmp/probe.err)"
             fi
           done
-          # The requests above all succeed over HTTP/1.1 (curl's default) yet the
-          # test client still times out on the same endpoint. The remaining
-          # difference is protocol negotiation: RestClientBuilder builds an
-          # HttpAsyncClient with no version policy, which in HttpClient 5.x means
-          # h2-with-upgrade. Probe an explicit h2 upgrade to see whether this engine
-          # completes it.
           start=$(date +%s)
           if curl -sS --http2 --max-time 30 -o /dev/null -w '%{http_version}' \
                "http://localhost:9200/_nodes/plugins" > /tmp/h2.out 2>/tmp/h2.err; then
@@ -406,12 +400,38 @@ jobs:
           else
             echo "::warning::h2 probe FAILED after $(($(date +%s) - start))s: $(cat /tmp/h2.err)"
           fi
+          # Response SIZE is the last untested difference. curl streams the body and
+          # does not care; the test framework calls entityAsMap on it, and
+          # _nodes/plugins on an engine with many bundled plugins is large. Record the
+          # sizes so a size-dependent hang is visible rather than inferred.
+          for path in "_nodes/plugins" "_nodes" "_cat/plugins"; do
+            bytes=$(curl -sS --max-time 30 "http://localhost:9200/${path}" | wc -c)
+            echo "size probe: ${path} -> ${bytes} bytes"
+          done
 
       - name: Set up JDK 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
           distribution: 'temurin'
           java-version: 21
+
+      # The curl probes above reach this engine instantly, yet the contract IT's own
+      # client times out on the same endpoint before any test body runs. Everything
+      # curl can tell us has been exhausted, so run the probe from a JVM: raw TCP,
+      # then HttpURLConnection, then the real OpenSearch RestClient per endpoint.
+      # Whichever layer stops working is the answer.
+      #
+      # `continue-on-error` because this is a diagnostic: its findings must not be
+      # what decides the leg, and the contract step below is still the real check.
+      - name: Probe REST client connectivity from a JVM
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          ./gradlew :integ-test:integTestRemote \
+            --tests 'org.opensearch.sql.calcite.remote.RestClientConnectivityProbeIT' \
+            -Dtests.rest.cluster=localhost:9200 \
+            -Dtests.cluster=localhost:9200 \
+            -Dtests.clustername=docker-cluster 2>&1 | grep -E 'rest-connectivity-probe|FAILED|BUILD' || true
 
       - name: Run contract observation against engine ${{ matrix.version }}
         run: |
