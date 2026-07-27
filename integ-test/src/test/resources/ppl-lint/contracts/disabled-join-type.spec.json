@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "ruleId": "disabled-join-type",
   "grammarSurface": "both",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "detector": "disabled-join-type",
     "enabled": true,
@@ -13,8 +13,14 @@
     "appliesTo": {}
   },
   "backendFixture": {
-    "indices": ["ACCOUNT"],
-    "clusterSettings": { "calcite": true, "calciteFallback": false, "allJoinTypesAllowed": false }
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false,
+      "allJoinTypesAllowed": false
+    }
   },
   "frontendContext": {
     "isCalcite": true
@@ -44,7 +50,13 @@
           "backend": {
             "kind": "rejection",
             "httpStatus": 400,
-            "body": { "status": 400, "error": { "type": "SemanticCheckException", "reason": "Invalid Query" } }
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "SemanticCheckException",
+                "reason": "Invalid Query"
+              }
+            }
           }
         },
         "cross-join-disabled": {
@@ -53,12 +65,24 @@
           "backend": {
             "kind": "rejection",
             "httpStatus": 400,
-            "body": { "status": 400, "error": { "type": "SemanticCheckException", "reason": "Invalid Query" } }
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "SemanticCheckException",
+                "reason": "Invalid Query"
+              }
+            }
           }
         },
         "inner-join-control": {
           "detectorCount": 0,
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "datarowsNonEmpty": true
+            }
+          }
         }
       }
     }

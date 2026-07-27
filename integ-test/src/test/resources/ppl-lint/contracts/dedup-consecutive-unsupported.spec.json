@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "ruleId": "dedup-consecutive-unsupported",
   "grammarSurface": "both",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "detector": "dedup-consecutive-unsupported",
     "enabled": true,
