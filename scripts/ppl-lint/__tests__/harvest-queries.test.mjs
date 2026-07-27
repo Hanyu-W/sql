@@ -20,6 +20,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 
 import {
+  harvestContext,
   harvestFile,
   referencedIdentifiers,
   remapIndex,
@@ -160,6 +161,106 @@ test('the bare `search <index>` form is remapped', () => {
 
 test('remapping is a no-op without a target index', () => {
   assert.equal(remapIndex('source=logs | fields a', ''), 'source=logs | fields a');
+});
+
+test('a WILDCARD source is left alone', () => {
+  // Found by running the pipeline: rewriting `source=`nope-*`` to a concrete index
+  // destroyed the only thing `wildcard-source-zero-match` detects, so its single
+  // harvested query became a control and the rule reported zero triggers.
+  assert.equal(remapIndex('source=`nope-*`', 'acct'), 'source=`nope-*`');
+  assert.equal(remapIndex('source=logs-* | fields a', 'acct'), 'source=logs-* | fields a');
+  assert.equal(remapIndex('index=a* | head 1', 'acct'), 'index=a* | head 1');
+});
+
+test('a non-wildcard source is still remapped when a wildcard appears elsewhere', () => {
+  // The guard must key on a wildcard in the SOURCE, not anywhere in the query — a
+  // regex or a field list containing `*` is unrelated to index resolution.
+  assert.equal(
+    remapIndex('source=logs | rex field=m "(?<a>.*)"', 'acct'),
+    'source=acct | rex field=m "(?<a>.*)"'
+  );
+});
+
+// --- context harvesting ------------------------------------------------------
+
+test('a typeMap declaration is harvested', () => {
+  // Seven of nineteen rules are needsContext and self-suppress without this. The
+  // context is taken from the test file because its author wrote it to make exactly
+  // these queries fire; a hand-written substitute would be a guess.
+  const source = `
+    const typeMap = new Map<string, string>([
+      ['age', 'long'],
+      ['firstname', 'text'],
+      ['attributes', 'flat_object'],
+    ]);
+  `;
+  assert.deepEqual(harvestContext(source).typeMap, {
+    age: 'long',
+    firstname: 'text',
+    attributes: 'flat_object',
+  });
+});
+
+test('disabledObjectFields is harvested', () => {
+  const source = "const ctx = { typeMap, disabledObjectFields: new Set(['raw', 'blob']) };";
+  assert.deepEqual(harvestContext(source).disabledObjectFields, ['raw', 'blob']);
+});
+
+test('a file with no context declaration yields an empty context', () => {
+  const out = harvestContext("describe('x', () => { lint('source=a | head 1'); });");
+  assert.deepEqual(out.typeMap, {});
+  assert.deepEqual(out.disabledObjectFields, []);
+});
+
+test('generated specs carry the harvested context as frontendContext', () => {
+  const corpus = {
+    index: 'acct',
+    queries: [
+      {
+        ruleId: 'flat-object-subfield',
+        name: 'd0',
+        query: 'source=acct | where attributes.x = 1',
+        context: { typeMap: { attributes: 'flat_object' }, disabledObjectFields: ['raw'] },
+      },
+    ],
+  };
+  const spec = toRunnerSpecs(corpus)[0].spec;
+  assert.deepEqual(spec.frontendContext.deriveFromMapping, { attributes: 'flat_object' });
+  assert.deepEqual(spec.frontendContext.disabledObjectFields, ['raw']);
+  // Two rules ship `enabled: false` and only run when the host overrides them.
+  assert.equal(spec.frontendContext.forceEnable, true);
+});
+
+test('visibleIndices is supplied even with no typeMap', () => {
+  // `wildcard-source-zero-match` reads ONLY visibleIndices and self-suppresses on an
+  // empty list; its test file declares no typeMap, so keying this off the mapping
+  // left the rule permanently inert.
+  const spec = toRunnerSpecs({
+    index: 'acct',
+    queries: [
+      { ruleId: 'wildcard-source-zero-match', name: 'd0', query: 'source=`nope-*`', context: {} },
+    ],
+  })[0].spec;
+  assert.deepEqual(spec.frontendContext.visibleIndices, ['{{index}}']);
+});
+
+test('one rule tested under two different contexts yields two specs', () => {
+  // Merging them would hand a query field types its own test never used, so the
+  // verdict would describe a scenario nobody wrote.
+  const corpus = {
+    index: 'acct',
+    queries: [
+      { ruleId: 'rex-scan-cost', name: 'd0', query: 'source=acct | rex field=a ""', context: { typeMap: { a: 'text' } } },
+      { ruleId: 'rex-scan-cost', name: 'd1', query: 'source=acct | rex field=b ""', context: { typeMap: { b: 'keyword' } } },
+    ],
+  };
+  const specs = toRunnerSpecs(corpus);
+  assert.equal(specs.length, 2);
+  // Suffixed only when a rule actually has more than one context.
+  assert.deepEqual(specs.map((s) => s.fileName).sort(), [
+    'rex-scan-cost.1.discovery.spec.json',
+    'rex-scan-cost.2.discovery.spec.json',
+  ]);
 });
 
 test('the original query is kept alongside the remapped one', () => {

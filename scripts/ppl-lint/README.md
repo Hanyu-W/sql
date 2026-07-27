@@ -432,6 +432,20 @@ harvest-queries.mjs ──▶ discovery-corpus.json ──┬──▶ run-front
    are unescaped so the query matches what the test actually linted. Against OSD
    `main` today this yields **~109 queries across 12 rules** versus 27 across 11 in
    the enforced corpus.
+
+   Each file's **lint context** is harvested alongside its queries. Seven of the
+   nineteen rules are `needsContext: true` and self-suppress without a `typeMap`, so
+   harvesting queries alone produced 26 `rex-scan-cost` queries and zero triggers —
+   the detector never ran, which in the report is indistinguishable from a rule that
+   fired on nothing. The context is taken from the test file (its `typeMap`,
+   `disabledObjectFields`) because its author wrote it to make exactly those queries
+   fire; a hand-written substitute would be a guess about which field types each
+   query depends on, and a wrong guess silently suppresses the detector again. A rule
+   tested under two different contexts gets two spec files rather than a merged one.
+
+   A **wildcard** source is deliberately not remapped: `wildcard-source-zero-match`
+   exists to flag a pattern matching no visible index, so rewriting `source=\`nope-*\``
+   to a concrete index destroys the only thing it detects.
 2. **Observe both halves.** `--specs-out` writes the corpus as ordinary spec files so
    the **existing** detector runner produces real diagnostic counts with no changes to
    it; a non-zero exit is expected there and ignored, because the generated
@@ -474,6 +488,15 @@ The report also prints per-rule trigger counts and whether each rule has enough
 (≥2) to support a scope decision. That table is the direct input to the full-vs-partial
 question above: a rule showing **1 trigger** cannot distinguish the two, and a rule
 showing **0** was not observed at all.
+
+Against OSD `main` on the compiled surface this currently yields **41 triggers with
+9 of 12 rules at ≥2**. The three that remain at one trigger are at the ceiling of
+what OSD's tests contain — `agg-on-text`, `wildcard-source-zero-match` and
+`unsupported-window-function-in-eventstats` each have exactly one trigger written
+there, and their other queries are genuine controls (`stats avg(balance)` on a
+numeric field is valid; `row_number` is the one window function eventstats
+supports). Raising those needs queries nobody has written yet — the point where
+generation, rather than harvesting, is what adds coverage.
 
 This job is `continue-on-error: true` and the labeler always exits zero. A finding
 here is a lead, not a proven defect; failing unrelated PRs on an auto-generated

@@ -286,6 +286,15 @@ function unescapeJsString(raw) {
  */
 export function remapIndex(query, targetIndex) {
   if (!targetIndex) return query;
+  // A WILDCARD source is left alone. `wildcard-source-zero-match` exists precisely
+  // to flag a pattern matching no visible index, so rewriting `source=\`nope-*\``
+  // to a concrete index destroys the only thing the rule detects — the query became
+  // a control and the rule reported zero triggers. More generally, a wildcard is
+  // part of the query's meaning rather than an incidental index name, and the
+  // engine resolves a non-matching pattern on its own without erroring.
+  if (/\bsource\s*=\s*`?[^\s`|,]*\*/.test(query) || /\bindex\s*=\s*`?[^\s`|,]*\*/.test(query)) {
+    return query;
+  }
   let out = query
     .replace(/\bsource\s*=\s*`[^`]+`/g, `source=${targetIndex}`)
     .replace(/\bsource\s*=\s*[A-Za-z_][\w.*-]*/g, `source=${targetIndex}`)
@@ -348,8 +357,54 @@ export function ruleFromDescribeTitle(title, knownRules) {
   return best;
 }
 
+/**
+ * Harvest the lint CONTEXT a test file declares, not just its queries.
+ *
+ * Seven of nineteen rules are `needsContext: true` — they self-suppress without a
+ * `typeMap`, and `enabled-false-object` additionally needs `disabledObjectFields`.
+ * Harvesting their queries without their context produced 26 `rex-scan-cost`
+ * queries and zero triggers: the detector never ran, which is indistinguishable in
+ * the report from a rule that fired on nothing.
+ *
+ * The context is taken from the file rather than invented because the OSD test
+ * author wrote it to make exactly these queries fire. A hand-written substitute
+ * would be a guess about which field types each query depends on, and a wrong guess
+ * silently suppresses the detector again.
+ *
+ * Parses the conventional shapes those files use:
+ *   const typeMap = new Map<string, string>([ ['age', 'long'], ... ]);
+ *   disabledObjectFields: new Set(['raw']),
+ *
+ * Regex rather than a TS parser for the same reason as `buildDescribeScopes`: these
+ * are conventional declarations, and the failure mode is an empty context, which
+ * leaves the rule visibly at zero triggers rather than producing a wrong verdict.
+ */
+export function harvestContext(source) {
+  const typeMap = {};
+  // Every `['name', 'type']` pair inside a `new Map...([ ... ])` initializer. Scoped
+  // to Map literals so unrelated tuple arrays in the file are not picked up.
+  for (const mapMatch of source.matchAll(/new Map\s*(?:<[^>]*>)?\s*\(\s*\[([\s\S]*?)\]\s*\)/g)) {
+    for (const pair of mapMatch[1].matchAll(/\[\s*'([^']+)'\s*,\s*'([^']+)'\s*\]/g)) {
+      typeMap[pair[1]] = pair[2];
+    }
+  }
+
+  const disabledObjectFields = [];
+  for (const match of source.matchAll(/disabledObjectFields:\s*new Set\s*\(\s*\[([^\]]*)\]/g)) {
+    for (const item of match[1].matchAll(/'([^']+)'/g)) {
+      disabledObjectFields.push(item[1]);
+    }
+  }
+
+  return {
+    typeMap,
+    disabledObjectFields: [...new Set(disabledObjectFields)],
+  };
+}
+
 /** Harvest one file into `{ ruleId, query, source }` records. */
 export function harvestFile(source, { file, knownRules, index }) {
+  const context = harvestContext(source);
   const scopes = buildDescribeScopes(source);
   const known = new Set(knownRules || []);
   const out = [];
@@ -384,6 +439,10 @@ export function harvestFile(source, { file, knownRules, index }) {
       originalQuery: query,
       identifiers: referencedIdentifiers(query),
       source: `${file}:${line}`,
+      // Carried per query, not per rule: two files can test the same rule with
+      // different field types, and merging them would give a query a typeMap its
+      // own test never used.
+      context,
     });
   }
   return out;
@@ -410,15 +469,34 @@ export function harvestFile(source, { file, knownRules, index }) {
  * One spec per rule, because the runner keys wiring checks off `spec.ruleId`.
  */
 export function toRunnerSpecs(corpus) {
+  // Grouped by rule AND by harvested context. A `needsContext` rule self-suppresses
+  // without a typeMap, so a query has to be scored under the context its own test
+  // declared — merging two files' contexts into one spec would hand a query field
+  // types its test never used, and the resulting verdict would describe a scenario
+  // nobody wrote.
   const byRule = new Map();
   for (const [i, entry] of (corpus.queries || []).entries()) {
     if (!entry.ruleId) continue;
-    if (!byRule.has(entry.ruleId)) byRule.set(entry.ruleId, []);
-    byRule.get(entry.ruleId).push({ ...entry, name: entry.name || `discovery-${i}` });
+    const contextKey = JSON.stringify(entry.context || {});
+    const key = `${entry.ruleId} ${contextKey}`;
+    if (!byRule.has(key)) {
+      byRule.set(key, { ruleId: entry.ruleId, context: entry.context, entries: [] });
+    }
+    byRule.get(key).entries.push({ ...entry, name: entry.name || `discovery-${i}` });
   }
 
+  // A rule with more than one distinct context needs more than one spec file, so
+  // names are suffixed only when that happens — keeping the common case readable.
+  const groupCount = new Map();
+  for (const { ruleId } of byRule.values()) {
+    groupCount.set(ruleId, (groupCount.get(ruleId) || 0) + 1);
+  }
+  const seenPerRule = new Map();
+
   const specs = [];
-  for (const [ruleId, entries] of [...byRule].sort()) {
+  for (const [, group] of [...byRule].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const { ruleId, context } = group;
+    const entries = group.entries;
     const queries = {};
     const expected = {};
     for (const entry of entries) {
@@ -429,8 +507,32 @@ export function toRunnerSpecs(corpus) {
       queries[entry.name] = { role: 'trigger', query: entry.query };
       expected[entry.name] = { detectorCount: 0 };
     }
+    const ordinal = (seenPerRule.get(ruleId) || 0) + 1;
+    seenPerRule.set(ruleId, ordinal);
+    const suffix = groupCount.get(ruleId) > 1 ? `.${ordinal}` : '';
+
+    const typeMap = (context && context.typeMap) || {};
+    const disabledObjectFields = (context && context.disabledObjectFields) || [];
+    const frontendContext = { isCalcite: true };
+    if (Object.keys(typeMap).length > 0) {
+      // `deriveFromMapping` is what the runner turns into `fields` + `typeMap`, the
+      // context every `needsContext` rule requires before it will emit anything.
+      frontendContext.deriveFromMapping = typeMap;
+    }
+    // Always supplied, independent of the typeMap. `wildcard-source-zero-match`
+    // reads ONLY `visibleIndices` and self-suppresses on an empty list (otherwise
+    // every wildcard would false-fire "matched 0 of 0") — and its test file declares
+    // no typeMap, so keying this off the mapping left the rule permanently inert.
+    frontendContext.visibleIndices = ['{{index}}'];
+    if (disabledObjectFields.length > 0) {
+      frontendContext.disabledObjectFields = disabledObjectFields;
+    }
+    // Two rules ship `enabled: false` and only run when the host overrides them.
+    // Without this they are inert and every harvested query reads as a control.
+    frontendContext.forceEnable = true;
+
     specs.push({
-      fileName: `${ruleId}.discovery.spec.json`,
+      fileName: `${ruleId}${suffix}.discovery.spec.json`,
       spec: {
         schemaVersion: 3,
         ruleId,
@@ -440,6 +542,7 @@ export function toRunnerSpecs(corpus) {
         // present, and a mismatch there would fail the run for a reason that has
         // nothing to do with discovery.
         index: corpus.index || undefined,
+        frontendContext,
         queries,
         // A single open expectation so exactly one entry matches every engine
         // version; the pinned counts are placeholders (see the note above).
