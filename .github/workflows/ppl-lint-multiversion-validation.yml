@@ -115,6 +115,7 @@ jobs:
     outputs:
       released: ${{ steps.plan.outputs.released }}
       compiled: ${{ steps.plan.outputs.compiled }}
+      discovery_engine: ${{ steps.plan.outputs.discovery_engine }}
       osd_repo: ${{ steps.plan.outputs.osd_repo }}
       osd_ref: ${{ steps.plan.outputs.osd_ref }}
     steps:
@@ -165,6 +166,24 @@ jobs:
           "
           echo "compiled=$compiled" >> "$GITHUB_OUTPUT"
           echo "Compiled-surface legs: $compiled" >> "$GITHUB_STEP_SUMMARY"
+
+          # Discovery runs against ONE engine — the newest released version in the
+          # matrix. It is a lead-generator, not a version-drift check, so paying for
+          # a full matrix would multiply cost without adding signal: a false positive
+          # found on the newest engine is the one users hit soonest, and per-version
+          # differences are already the enforced corpus's job.
+          discovery_engine=$(echo "$released" | python3 -c "
+          import json,sys
+          v=json.load(sys.stdin)
+          # Newest by semver, not list order, so a reordered matrix cannot silently
+          # point discovery at an old engine.
+          def key(s):
+              parts=[int(p) for p in s.split('-')[0].split('.') if p.isdigit()]
+              return parts + [0]*(3-len(parts))
+          print(sorted(v,key=key)[-1])
+          ")
+          echo "discovery_engine=$discovery_engine" >> "$GITHUB_OUTPUT"
+          echo "Discovery engine: \`$discovery_engine\`" >> "$GITHUB_STEP_SUMMARY"
           # Same precedence as the sibling workflow: dispatch input, then repo
           # variable, then the canonical upstream default.
           echo "osd_repo=${REQUESTED_REPO:-${VAR_REPO:-opensearch-project/OpenSearch-Dashboards}}" >> "$GITHUB_OUTPUT"
@@ -674,3 +693,194 @@ jobs:
             legs/**/detector-report.json
             legs/**/detector.log
             legs/**/target.json
+
+  # Discovery: harvest queries from OSD's own lint tests, run both halves over them,
+  # and report detector/engine disagreements as LEADS.
+  #
+  # Why this is separate from `detect`, and why it can never fail the build:
+  #
+  # The enforced corpus is hand-pinned — every expectation is a reviewed claim, which
+  # is what lets a mismatch red the build. That corpus is also small (about one
+  # trigger per rule), and `classifyRelaxationScope` needs SEVERAL triggers per rule
+  # to tell a FULL engine fix (version-scope the rule away) from a PARTIAL one
+  # (narrow the detector). Those need opposite actions, so with one trigger the
+  # advice can be confidently wrong.
+  #
+  # This job supplies that trigger variety from queries OSD's own detector authors
+  # already wrote. It pins NOTHING: roles are derived from real detector output and
+  # the engine supplies the other half, so no expectation is ever auto-generated.
+  # An auto-derived expectation could only confirm current behavior — locking in
+  # whatever the detector does today, bugs included.
+  #
+  # `continue-on-error` AND a zero exit from the labeler: a finding here is a lead to
+  # investigate, not a proven defect, and blocking unrelated PRs on an auto-generated
+  # guess would poison the whole check's credibility.
+  discovery:
+    name: Discovery corpus (harvested, not enforced)
+    # Only `plan`, for the OSD target and the engine version. Deliberately NOT the
+    # observe legs: discovery runs its own engine and harvests its own queries, so
+    # depending on them would idle this job behind ~30 minutes of matrix work it
+    # never reads, and a failed leg would block a report that does not need it.
+    needs: plan
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      opensearch:
+        image: opensearchproject/opensearch:${{ needs.plan.outputs.discovery_engine }}
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: 'true'
+          DISABLE_INSTALL_DEMO_CONFIG: 'true'
+          OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -sf http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 20
+          --health-start-period 60s
+    steps:
+      - name: Checkout SQL pull request
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Checkout OpenSearch-Dashboards
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: ${{ needs.plan.outputs.osd_repo }}
+          ref: ${{ needs.plan.outputs.osd_ref }}
+          path: .ci/OpenSearch-Dashboards
+
+      - name: Set up Node from OSD .nvmrc
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4
+        with:
+          node-version-file: .ci/OpenSearch-Dashboards/.nvmrc
+
+      - name: Pin Yarn from OSD engines
+        working-directory: .ci/OpenSearch-Dashboards
+        run: |
+          yarn_range=$(node -e "process.stdout.write(require('./package.json').engines.yarn)")
+          yarn_version=$(echo "$yarn_range" | sed -E 's/[^0-9.]//g')
+          npm install -g "yarn@${yarn_version}"
+
+      - name: Cache OSD Yarn dependencies
+        uses: actions/cache@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4
+        with:
+          path: |
+            ~/.cache/yarn
+          key: ${{ runner.os }}-osd-yarn-${{ hashFiles('.ci/OpenSearch-Dashboards/yarn.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-osd-yarn-
+
+      - name: Bootstrap OpenSearch-Dashboards
+        working-directory: .ci/OpenSearch-Dashboards
+        run: |
+          for i in 1 2 3; do
+            yarn osd bootstrap && exit 0
+            echo "Bootstrap attempt $i failed, retrying in 10s..."
+            sleep 10
+          done
+          exit 1
+
+      # The rule id list comes from the OSD catalog being validated, not a hardcoded
+      # copy: attribution keys off `describe('<rule id>')` titles, so a stale list
+      # would silently stop harvesting queries for any newly added rule.
+      - name: Harvest the discovery corpus from OSD's lint tests
+        run: |
+          set -euo pipefail
+          node -e "
+            const c = require('./.ci/OpenSearch-Dashboards/packages/osd-monaco/src/ppl/lint/rules_catalog.json');
+            process.stdout.write(JSON.stringify(c.map((r) => r.id)));
+          " > /tmp/catalog-rules.json
+          node scripts/ppl-lint/harvest-queries.mjs \
+            --osd .ci/OpenSearch-Dashboards \
+            --catalog-rules @/tmp/catalog-rules.json \
+            --index opensearch-sql_test_index_account \
+            --out "$GITHUB_WORKSPACE/discovery-corpus.json" \
+            --specs-out "$GITHUB_WORKSPACE/discovery-specs"
+
+      # Seed the one index every harvested query was rewritten onto. Without it the
+      # engine rejects everything with IndexNotFoundException — which the labeler
+      # would correctly suppress as uninformative, yielding a run that reports
+      # nothing at all.
+      - name: Seed the fixture index
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 40); do
+            curl -sf http://localhost:9200 > /dev/null && break
+            echo "waiting for engine (${i}/40)..."
+            sleep 5
+          done
+          curl -sf -X PUT "http://localhost:9200/opensearch-sql_test_index_account" \
+            -H 'content-type: application/json' -d '{
+              "mappings": { "properties": {
+                "account_number": { "type": "long" },
+                "balance":        { "type": "long" },
+                "age":            { "type": "integer" },
+                "status":         { "type": "keyword" },
+                "firstname":      { "type": "text" },
+                "lastname":       { "type": "text" },
+                "msg":            { "type": "text" },
+                "body":           { "type": "text" },
+                "raw":            { "type": "object", "enabled": false }
+              } }
+            }'
+          curl -sf -X POST "http://localhost:9200/opensearch-sql_test_index_account/_doc?refresh=true" \
+            -H 'content-type: application/json' \
+            -d '{"account_number":1,"balance":39225,"age":32,"status":"ok","firstname":"Amber","lastname":"Duke","msg":"took 42ms","body":"INFO started"}'
+
+      - name: Run the detectors over the discovery corpus
+        working-directory: .ci/OpenSearch-Dashboards
+        run: |
+          set -uo pipefail
+          # A non-zero exit is EXPECTED and ignored: the generated specs carry
+          # placeholder expectations, so the runner reports a "failure" for every
+          # query whose real diagnostic count differs. Only the report is read.
+          PPL_LINT_SURFACE=compiled-simplified \
+          PPL_LINT_CONTRACT_DIR="$GITHUB_WORKSPACE/discovery-specs" \
+          PPL_LINT_SCHEDULE=nightly \
+          PPL_LINT_REPORT="$GITHUB_WORKSPACE/discovery-detector-report.json" \
+          node -r ./src/setup_node_env \
+            "$GITHUB_WORKSPACE/scripts/ppl-lint/run-frontend-contract.mjs" \
+            > "$GITHUB_WORKSPACE/discovery-detector.log" 2>&1 || true
+          if [ ! -f "$GITHUB_WORKSPACE/discovery-detector-report.json" ]; then
+            echo "::warning::the detector runner produced no discovery report; skipping."
+            tail -50 "$GITHUB_WORKSPACE/discovery-detector.log" || true
+          fi
+
+      - name: Probe the engine with the discovery corpus
+        run: |
+          set -euo pipefail
+          node scripts/ppl-lint/probe-discovery-backend.mjs \
+            --corpus discovery-corpus.json \
+            --endpoint http://localhost:9200 \
+            --out discovery-backend-report.json
+
+      - name: Label and report
+        run: |
+          set -euo pipefail
+          if [ ! -f discovery-detector-report.json ]; then
+            echo "::warning::no detector report; nothing to label."
+            exit 0
+          fi
+          node scripts/ppl-lint/label-discovery.mjs \
+            --corpus discovery-corpus.json \
+            --detector discovery-detector-report.json \
+            --backend discovery-backend-report.json \
+            --version "${{ needs.plan.outputs.discovery_engine }}" \
+            --out discovery-findings.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload discovery artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        continue-on-error: true
+        with:
+          name: ppl-lint-discovery
+          path: |
+            discovery-corpus.json
+            discovery-findings.json
+            discovery-detector-report.json
+            discovery-backend-report.json
+            discovery-detector.log

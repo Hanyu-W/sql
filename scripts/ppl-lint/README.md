@@ -292,11 +292,36 @@ Every finding names a drift class, the evidence, and one remediation action:
 
 Drift classes: `grammar-rule-missing` (a parser rule the detector walks was
 renamed or removed — the finding names the closest current rule names),
-`engine-relaxed` / `engine-tightened` (the engine's verdict flipped),
-`engine-message-changed` (same verdict, reworded error), `detector-silent` /
-`detector-noisy` (false negative / false positive), `version-scope-too-narrow`
-(the engine rejects but the rule is scoped away from that version, so users see no
-diagnostic), and `severity-mismatch`.
+`engine-relaxed` / `engine-partially-relaxed` / `engine-tightened` (the engine's
+verdict flipped), `engine-message-changed` (same verdict, reworded error),
+`detector-silent` / `detector-noisy` (false negative / false positive),
+`version-scope-too-narrow` (the engine rejects but the rule is scoped away from
+that version, so users see no diagnostic), and `severity-mismatch`.
+
+#### Full vs partial relaxation: scope the rule, or narrow the detector?
+
+When an engine starts accepting a query a rule flags, the fix depends on a question
+a single query cannot answer: is the behavior **fully** gone on that version, or
+only **partially**?
+
+- **Every trigger relaxed** → `engine-relaxed`, action `version-scope-rule`. Nothing
+  the rule claims is still true on that engine, so bound it with `maxVersion`.
+- **Some triggers relaxed, others still rejected** → `engine-partially-relaxed`,
+  action `update-detector`. The engine fixed *part* of the condition. Scoping the
+  rule away here would drop the diagnostics that are still correct, converting a
+  partial engine fix into a shipped **false negative**. Narrow the detector so it
+  stops matching the now-valid shapes while still flagging the rest.
+
+This is decided per rule, not per query: the aggregator collects every trigger's
+engine verdict for a rule on a leg, then emits **one** rule-level finding that
+supersedes the per-query ones. A trigger with no verdict is counted as neither —
+treating it as "still rejects" would let a timed-out leg masquerade as a partial fix
+and send someone to narrow a healthy detector.
+
+The evidence always states the tally (`2 of 3 observed trigger(s) relaxed`), and a
+rule with only one pinned trigger gets an explicit warning that a "fully relaxed"
+verdict rests on a single observation. That is the gap the discovery corpus below
+closes.
 
 Four guards keep the check from passing vacuously. Each exists because "we could
 not check" must never render as "it is fine":
@@ -383,6 +408,90 @@ anywhere:
 
 ```bash
 node --test "scripts/ppl-lint/__tests__/*.test.mjs"
+```
+
+## Discovery corpus (harvested, never enforced)
+
+The enforced corpus is hand-pinned, which is what lets a mismatch red the build —
+and also why it is small (about one trigger per rule). One trigger is not enough to
+tell a full engine fix from a partial one, so the `discovery` job builds a second,
+much larger corpus that pins nothing.
+
+```
+harvest-queries.mjs ──▶ discovery-corpus.json ──┬──▶ run-frontend-contract.mjs ──▶ detector report
+                        + discovery-specs/      └──▶ probe-discovery-backend.mjs ─▶ backend report
+                                                                    │
+                                                     label-discovery.mjs ──▶ findings + trigger coverage
+```
+
+1. **Harvest.** `harvest-queries.mjs` extracts PPL literals from OSD's own lint test
+   suite and attributes each to the rule whose `describe(...)` block encloses it
+   (matched as a prefix, so `describe('rex-scan-cost (compiled surface)')` counts).
+   A query with no rule-owning ancestor is recorded unattributed and dropped rather
+   than guessed at. Indices are rewritten onto the fixture index; JS string escapes
+   are unescaped so the query matches what the test actually linted. Against OSD
+   `main` today this yields **~109 queries across 12 rules** versus 27 across 11 in
+   the enforced corpus.
+2. **Observe both halves.** `--specs-out` writes the corpus as ordinary spec files so
+   the **existing** detector runner produces real diagnostic counts with no changes to
+   it; a non-zero exit is expected there and ignored, because the generated
+   expectations are placeholders. `probe-discovery-backend.mjs` sends each query to
+   `POST /_plugins/_ppl` directly — no Gradle, no test cluster, since there is
+   nothing to assert.
+3. **Label and report.** `label-discovery.mjs` derives each role from real detector
+   output (fired → trigger, silent → control) and reports disagreements.
+
+Roles are derived; **expectations never are**. An auto-derived expectation could only
+confirm current behavior, locking in whatever the detector does today including its
+bugs. Promotion into the enforced corpus stays a human writing a spec entry.
+
+### What it reports, and how much to trust it
+
+| Detector | Engine | Reported as |
+| --- | --- | --- |
+| fires (error/warning) | accepts | `possible-false-positive` — nearly conclusive |
+| fires (**info** only) | accepts | nothing — advisory rules are never contradicted by acceptance |
+| silent | rejects | `possible-false-negative` — weak, verify first |
+| either | no verdict | nothing; the query is labelled but claims nothing |
+
+The asymmetry is deliberate. A query the engine *ran* successfully but the linter
+called broken is unambiguous. A rejection may be for a reason unrelated to the rule,
+so rejections matching an unknown field, a missing index, an unsupported command, or
+a syntax error are **suppressed** rather than reported — without that filter every
+harvested query naming an invented field becomes a finding and buries the real ones.
+Suppression never applies to the false-positive side.
+
+Advisory (`info`) rules are the other exclusion, and it was found by running this
+against a live 3.8 engine: `head-without-sort` and `rex-scan-cost` flag
+non-determinism and scan cost, which the engine executes happily and will never
+reject. For those, "accepted + flagged" is the rule working as designed. Severity is
+the discriminator because it already encodes the claim — only an error/warning rule
+asserts the engine will refuse the query, and only such a claim can be contradicted
+by acceptance. The judgement uses the severities the detector actually emitted, so a
+mixed-severity diagnostic is still reported.
+
+The report also prints per-rule trigger counts and whether each rule has enough
+(≥2) to support a scope decision. That table is the direct input to the full-vs-partial
+question above: a rule showing **1 trigger** cannot distinguish the two, and a rule
+showing **0** was not observed at all.
+
+This job is `continue-on-error: true` and the labeler always exits zero. A finding
+here is a lead, not a proven defect; failing unrelated PRs on an auto-generated
+guess would destroy the check's credibility. It runs against one engine (the newest
+in the matrix) because it generates leads rather than checking version drift.
+
+```bash
+# Locally, against a running cluster and an OSD checkout:
+node -e "const c=require('<osd>/packages/osd-monaco/src/ppl/lint/rules_catalog.json');
+         process.stdout.write(JSON.stringify(c.map(r=>r.id)))" > /tmp/rules.json
+node scripts/ppl-lint/harvest-queries.mjs --osd <osd> --catalog-rules @/tmp/rules.json \
+  --index opensearch-sql_test_index_account --out /tmp/corpus.json --specs-out /tmp/specs
+( cd <osd> && PPL_LINT_SURFACE=compiled-simplified PPL_LINT_CONTRACT_DIR=/tmp/specs \
+  PPL_LINT_SCHEDULE=nightly PPL_LINT_REPORT=/tmp/detector.json \
+  node -r ./src/setup_node_env "$PWD/../sql/scripts/ppl-lint/run-frontend-contract.mjs" || true )
+node scripts/ppl-lint/probe-discovery-backend.mjs --corpus /tmp/corpus.json --out /tmp/backend.json
+node scripts/ppl-lint/label-discovery.mjs --corpus /tmp/corpus.json \
+  --detector /tmp/detector.json --backend /tmp/backend.json --out /tmp/findings.json
 ```
 
 ## Interpreting a failure
