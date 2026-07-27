@@ -88,7 +88,7 @@
               "status": 400,
               "error": {
                 "type": "IllegalArgumentException",
-                "reason": "Invalid capture group name 'user_name'."
+                "reason": "Invalid capture group name"
               }
             }
           }
