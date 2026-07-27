@@ -33,6 +33,7 @@
 import fs from 'fs';
 import path from 'path';
 
+import { emitAnnotations } from './annotate.mjs';
 import {
   classifyDrift,
   classifyGrammarDrift,
@@ -520,7 +521,17 @@ function main() {
         });
 
         if (drift) {
-          drifts.push({ ...drift, enforced: isEnforced, contractFile: file });
+          // `expectationRange` is what the annotation anchors to: the version
+          // string identifies WHICH `expectations[]` entry produced this finding,
+          // so a `update-contract` annotation can land on that entry's line rather
+          // than at the top of the file.
+          drifts.push({
+            ...drift,
+            enforced: isEnforced,
+            contractFile: file,
+            expectationRange: expectation.version,
+            expectationEngine: expectation.engine,
+          });
           ruleDrifts++;
         }
       }
@@ -592,6 +603,17 @@ function main() {
 
   fs.writeFileSync(args.out, JSON.stringify(report, null, 2));
   log(`wrote ${args.out}`);
+
+  // Emitted BEFORE the summary on purpose. GitHub renders annotations at the top
+  // of the run page, which is where a developer looks first; without them the only
+  // thing above the summary is "Process completed with exit code 1" and the
+  // natural next click goes to raw logs instead of the remediation. When the
+  // contract is part of the PR's diff these also attach inline to the exact
+  // expectation that drifted.
+  emitAnnotations(report, {
+    contractsDir: args.contracts,
+    workspace: process.env.GITHUB_WORKSPACE,
+  });
 
   const markdown = renderMarkdown(report, drifts, coverageHoles, legs);
   // eslint-disable-next-line no-console

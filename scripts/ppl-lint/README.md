@@ -266,6 +266,37 @@ engine also accepts is reported as `n/a (out of scope)`, not as drift — that i
 the version window working. But if the engine *rejects* the trigger there, it is
 `version-scope-too-narrow`.
 
+### Where a failure shows up in the GitHub UI
+
+Every finding is emitted twice, because the run page and the diff are two
+different places a developer looks:
+
+1. **Annotations** (top of the run page, and inline on the file in *Files
+   changed* when the contract is part of the PR's diff). Each carries the drift
+   class, the rule, the engine version, and the one-line action. An
+   `update-contract` finding anchors on the exact `expectations[]` entry whose
+   `version` range produced it — not the top of the file — so the drift appears on
+   the line that caused it. Rule-wide findings (a renamed grammar rule) anchor on
+   the contract's `ruleId` instead.
+2. **The job summary** — the rule × version table plus the full grouped
+   remediation report, which stays the authoritative account.
+
+Without the annotations the only thing above the summary is `Process completed
+with exit code 1`, so the natural next click lands in raw job logs rather than the
+remediation. Severity is not cosmetic:
+
+| Finding | Level | Why |
+| --- | --- | --- |
+| enforced drift, coverage hole | `error` | a shipped default-error rule disagrees with a supported engine |
+| non-enforced drift | `warning` | reported, but it does not block |
+| `inconclusive` | `warning` | "we could not check" is a leg problem; the run is already red from the exit code, and rendering it as an error invites editing a rule because a leg timed out |
+| unvalidated default-error rule | `error` (no file) | the edit goes in `manifest.json`, not a contract |
+
+A line number is emitted only when it is unambiguous. If a contract pins the same
+version range twice, or the range cannot be found, the annotation carries the file
+and no line — a wrong line sends the reader to edit the wrong expectation, which
+is worse than making them find it.
+
 ### Running the multi-version check locally
 
 Each leg needs a reachable cluster. Point the observe step at any running engine:
