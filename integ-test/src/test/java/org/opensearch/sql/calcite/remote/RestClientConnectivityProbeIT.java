@@ -89,6 +89,7 @@ public class RestClientConnectivityProbeIT extends OpenSearchTestCase {
     boolean tcpOk = probeRawSocket(host, port);
     probeHttpUrlConnection(host, port);
     probeRestClient(host, port);
+    probeClientVariants(host, port);
 
     // Only a hard failure here is fatal: without a socket the rest is noise.
     if (!tcpOk) {
@@ -199,6 +200,83 @@ public class RestClientConnectivityProbeIT extends OpenSearchTestCase {
       }
     }
     return String.join(" <- ", chain);
+  }
+
+  /**
+   * Layer 4: candidate fixes, each a one-line change from the default client, all against the same
+   * endpoint on the same engine.
+   *
+   * <p>The default async client times out on EVERY endpoint here — including a 459-byte {@code
+   * _cluster/health} — while {@code HttpURLConnection} against the same URL returns 200 in 27ms. So
+   * the fault is in how the async client speaks to this engine, not in the network, the engine, the
+   * response size, or any one endpoint. Each variant isolates one suspect; whichever succeeds names
+   * the fix, and if none do, the client cannot be configured around it.
+   */
+  private void probeClientVariants(String host, int port) {
+    // Forcing HTTP/1.1 up front, rather than letting HttpClient 5.x negotiate h2.
+    variant(
+        host,
+        port,
+        "FORCE_HTTP_1",
+        b ->
+            b.setHttpClientConfigCallback(
+                c -> c.setVersionPolicy(org.apache.hc.core5.http2.HttpVersionPolicy.FORCE_HTTP_1)));
+    // Same, but negotiating h2 explicitly, to tell "policy matters" from "1.1 specifically works".
+    variant(
+        host,
+        port,
+        "NEGOTIATE",
+        b ->
+            b.setHttpClientConfigCallback(
+                c -> c.setVersionPolicy(org.apache.hc.core5.http2.HttpVersionPolicy.NEGOTIATE)));
+    // FORCE_HTTP_2, to confirm the direction of any protocol effect rather than assume it.
+    variant(
+        host,
+        port,
+        "FORCE_HTTP_2",
+        b ->
+            b.setHttpClientConfigCallback(
+                c -> c.setVersionPolicy(org.apache.hc.core5.http2.HttpVersionPolicy.FORCE_HTTP_2)));
+    // A fresh connection manager: rules out connection reuse/pooling against this engine.
+    variant(
+        host,
+        port,
+        "fresh-conn-manager",
+        b ->
+            b.setHttpClientConfigCallback(
+                c ->
+                    c.setConnectionManager(
+                        org.apache.hc.client5.http.impl.nio
+                            .PoolingAsyncClientConnectionManagerBuilder.create()
+                            .setMaxConnPerRoute(1)
+                            .setMaxConnTotal(1)
+                            .build())));
+  }
+
+  /** Run one client variant against {@code _cluster/health} — the smallest response available. */
+  private void variant(
+      String host,
+      int port,
+      String name,
+      java.util.function.UnaryOperator<RestClientBuilder> tune) {
+    RestClientBuilder builder =
+        RestClient.builder(new HttpHost("http", host, port))
+            .setRequestConfigCallback(
+                config -> config.setConnectTimeout(PROBE_TIMEOUT).setResponseTimeout(PROBE_TIMEOUT))
+            .setStrictDeprecationMode(false);
+    long start = System.nanoTime();
+    try (RestClient client = tune.apply(builder).build()) {
+      Response response = client.performRequest(new Request("GET", "/_cluster/health"));
+      log(
+          "variant "
+              + name
+              + " OK in "
+              + millis(start)
+              + "ms: HTTP "
+              + response.getStatusLine().getStatusCode());
+    } catch (Exception e) {
+      log("variant " + name + " FAILED after " + millis(start) + "ms: " + describe(e));
+    }
   }
 
   private static long millis(long startNanos) {

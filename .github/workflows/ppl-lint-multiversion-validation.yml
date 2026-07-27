@@ -84,6 +84,9 @@ env:
   # Released engine versions to validate on the RUNTIME-BUNDLE surface. Each must
   # be >= 3.6.0 (the _grammar endpoint floor) and must have a published
   # distribution image.
+  # Latest patch of each line (3.6.0 and 3.7.0 ARE the latest patches today; bump
+  # them when 3.6.1 / 3.7.1 publish, and never pin `<line>.0` once a newer patch
+  # exists — that would validate an engine no user runs).
   ENGINE_VERSIONS: '["3.6.0","3.7.0"]'
   # Released engine versions to validate on the COMPILED-SIMPLIFIED surface.
   #
@@ -97,7 +100,11 @@ env:
   # Only contracts declaring `grammarSurface: "both"` are scored here; the rest are
   # reported not-applicable. Nightly only — see the `compiled_versions` input to
   # run one ad hoc.
-  COMPILED_ENGINE_VERSIONS: '["2.19.0","3.0.0","3.5.0"]'
+  #
+  # Always the LATEST PATCH of each line, never `<line>.0`. A user on 2.19 is on
+  # 2.19.6, so validating 2.19.0 tests an engine nobody runs and attributes any
+  # bug fixed in between to the whole line.
+  COMPILED_ENGINE_VERSIONS: '["2.19.6","3.0.0","3.5.0"]'
 
 jobs:
   # Same reusable workflow + pinned SHA the sibling SQL workflows use, so a
