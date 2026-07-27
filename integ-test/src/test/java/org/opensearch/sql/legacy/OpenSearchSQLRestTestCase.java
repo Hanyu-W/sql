@@ -213,9 +213,19 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
         String indexName = jsonObject.getString("index");
         try {
           // System index, mostly named .opensearch-xxx or .opendistro-xxx, are not allowed to
-          // delete
+          // delete.
+          //
+          // `.plugins-` covers the system indices of bundled plugins (ML Commons'
+          // `.plugins-ml-config`, and friends). Deleting those is never the point of a
+          // test wipe, and it is actively harmful: on an engine whose plugins are
+          // still initializing, the DELETE blocks until the client's socket timeout
+          // and fails the suite before any test runs. That is what broke the 2.19
+          // observation leg of the PPL lint multi-version matrix — `_cluster/health`
+          // reports GREEN before ML Commons finishes creating its config index, so
+          // the wipe raced initialization.
           if (!indexName.startsWith(".opensearch")
               && !indexName.startsWith(".opendistro")
+              && !indexName.startsWith(".plugins-")
               && !indexName.startsWith(".ql")) {
             client.performRequest(new Request("DELETE", "/" + indexName));
           }
