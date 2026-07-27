@@ -357,6 +357,24 @@ jobs:
           # fails loudly in the next step anyway.
           echo "::warning::plugin index set did not stabilize; continuing"
 
+      # Probe the EXACT requests the test framework makes before any test runs.
+      # `OpenSearchRestTestCase.initClient` issues `GET _nodes/plugins`, and
+      # `wipeAllOpenSearchIndices` issues `GET _cat/indices?expand_wildcards=all`.
+      # A leg that dies with a bare socket timeout gives no clue which of those
+      # hung, so time them here where the output is readable.
+      - name: Probe the framework's own startup requests
+        run: |
+          set -uo pipefail
+          for path in "_nodes/plugins" "_cat/indices?format=json&expand_wildcards=all" "_cluster/health"; do
+            start=$(date +%s)
+            if curl -sS --max-time 30 -o /tmp/probe.out -w '%{http_code}' \
+                 "http://localhost:9200/${path}" > /tmp/probe.code 2>/tmp/probe.err; then
+              echo "OK   $(($(date +%s) - start))s  HTTP $(cat /tmp/probe.code)  ${path}  ($(wc -c < /tmp/probe.out) bytes)"
+            else
+              echo "::warning::SLOW/FAIL $(($(date +%s) - start))s  ${path}  $(cat /tmp/probe.err)"
+            fi
+          done
+
       - name: Set up JDK 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
