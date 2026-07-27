@@ -64,8 +64,8 @@ import org.opensearch.sql.ppl.PPLIntegTestCase;
  * <p>The suite honors {@code -Dppl.lint.schedule=pr|nightly} (default {@code pr}): a PR run skips
  * contracts declaring {@code schedule: "nightly"}, while nightly runs the full corpus. Every
  * contract in the corpus currently declares {@code schedule: "pr"}, so the two are equivalent
- * today; the filter stays because it is the only mechanism for holding a new contract back from
- * PR runs while its oracle is still settling.
+ * today; the filter stays because it is the only mechanism for holding a new contract back from PR
+ * runs while its oracle is still settling.
  *
  * <p>Note that a contract which RUNS also ASSERTS. This class does not consult the manifest's
  * {@code enforced} list — that list records oracle quality and review status, not blocking
@@ -111,8 +111,29 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
 
   @Override
   public void init() throws Exception {
-    super.init();
-    enableCalcite();
+    // Calcite is a 3.x engine feature: on 2.x the cluster rejects
+    // `plugins.calcite.enabled` outright with "not recognized", and the base class's
+    // init() sets it unconditionally. In observe-only mode (the multi-version
+    // matrix) that must not abort the leg — a pre-Calcite engine is a legitimate
+    // thing to observe, and the contracts' own `frontendContext.isCalcite` already
+    // describes what the linter should assume there.
+    //
+    // Asserting mode keeps the strict behavior: the required check runs against the
+    // PR's own build, where a missing Calcite setting is a real problem.
+    try {
+      super.init();
+      enableCalcite();
+    } catch (Exception e) {
+      if (!observeOnly || !isUnrecognizedCalciteSetting(e)) {
+        throw e;
+      }
+      System.err.println(
+          "[ppl-lint] engine does not support the Calcite setting; observing without it: "
+              + e.getMessage());
+      // super.init() aborted partway, so redo the part that is version-independent.
+      increaseMaxCompilationsRate();
+    }
+    // Fall through to fixture seeding either way.
     // Seed the union of every index every scheduled contract needs, once.
     for (String indexEnum : requiredIndexEnums()) {
       try {
@@ -639,6 +660,29 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
   }
 
   /** Target manifest for a leg with no grammar bundle (compiled surface / local run). */
+  /**
+   * True when a failure is the cluster rejecting {@code plugins.calcite.enabled} because it does
+   * not know that setting — i.e. a pre-Calcite (2.x) engine.
+   *
+   * <p>Deliberately narrow: matched on the setting name plus "not recognized" rather than on any
+   * 400, so a genuinely broken settings call on a Calcite-capable engine still fails the run
+   * instead of being waved through as "old engine".
+   */
+  private static boolean isUnrecognizedCalciteSetting(Throwable error) {
+    for (Throwable current = error; current != null; current = current.getCause()) {
+      String message = current.getMessage();
+      if (message != null
+          && message.contains(Settings.Key.CALCITE_ENGINE_ENABLED.getKeyValue())
+          && message.contains("not recognized")) {
+        return true;
+      }
+      if (current.getCause() == current) {
+        break;
+      }
+    }
+    return false;
+  }
+
   private void writeTargetManifest(String grammarHash, List<String> failures) {
     writeTargetManifest(grammarHash, "", failures);
   }
