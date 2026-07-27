@@ -10,11 +10,19 @@
     "runtimeOnly": false,
     "needsContext": false,
     "needsExplain": false,
-    "appliesTo": { "minVersion": "3.3.0", "engine": "calcite" }
+    "appliesTo": {
+      "minVersion": "3.3.0",
+      "engine": "calcite"
+    }
   },
   "backendFixture": {
-    "indices": ["ACCOUNT"],
-    "clusterSettings": { "calcite": true, "calciteFallback": true }
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": true
+    }
   },
   "frontendContext": {
     "isCalcite": true
@@ -24,6 +32,10 @@
     "dedup-consecutive-true": {
       "role": "trigger",
       "query": "source={{index}} | dedup firstname consecutive=true"
+    },
+    "dedup-consecutive-true-multi-field": {
+      "role": "trigger",
+      "query": "source={{index}} | dedup firstname, lastname consecutive=true"
     },
     "dedup-plain-control": {
       "role": "control",
@@ -38,11 +50,34 @@
         "dedup-consecutive-true": {
           "detectorCount": 1,
           "severity": "warning",
-          "backend": { "kind": "advisory", "httpStatus": 200, "expect": { "accepted": true } }
+          "backend": {
+            "kind": "advisory",
+            "httpStatus": 200,
+            "expect": {
+              "accepted": true
+            }
+          }
+        },
+        "dedup-consecutive-true-multi-field": {
+          "detectorCount": 1,
+          "severity": "warning",
+          "backend": {
+            "kind": "advisory",
+            "httpStatus": 200,
+            "expect": {
+              "accepted": true
+            }
+          }
         },
         "dedup-plain-control": {
           "detectorCount": 0,
-          "backend": { "kind": "advisory", "httpStatus": 200, "expect": { "accepted": true } }
+          "backend": {
+            "kind": "advisory",
+            "httpStatus": 200,
+            "expect": {
+              "accepted": true
+            }
+          }
         }
       }
     }

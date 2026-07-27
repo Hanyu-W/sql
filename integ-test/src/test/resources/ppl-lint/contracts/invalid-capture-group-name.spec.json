@@ -37,6 +37,10 @@
       "role": "trigger",
       "query": "source={{index}} | rex field=email \"(?<user_name>[^@]+)@(?<domain>.+)\" | fields email"
     },
+    "rex-capture-name-hyphen": {
+      "role": "trigger",
+      "query": "source={{index}} | rex field=email \"(?<user-name>[^@]+)@(?<domain>.+)\" | fields email"
+    },
     "rex-capture-name-alphanumeric-control": {
       "role": "control",
       "query": "source={{index}} | rex field=email \"(?<username>[^@]+)@(?<domain>.+)\" | fields email, username, domain | head 1"
@@ -48,6 +52,21 @@
       "engine": "calcite",
       "queries": {
         "rex-capture-name-underscore": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Invalid Query"
+              }
+            }
+          }
+        },
+        "rex-capture-name-hyphen": {
           "detectorCount": 1,
           "severity": "error",
           "backend": {
@@ -89,6 +108,21 @@
               "error": {
                 "type": "IllegalArgumentException",
                 "reason": "Invalid capture group name 'user_name'."
+              }
+            }
+          }
+        },
+        "rex-capture-name-hyphen": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Invalid capture group name 'user-name'."
               }
             }
           }
