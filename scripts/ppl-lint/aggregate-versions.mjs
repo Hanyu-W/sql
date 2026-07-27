@@ -148,6 +148,9 @@ function loadLeg({ version, dir }) {
     label: version,
     dir,
     grammarHash: target.grammarHash || '',
+    // Which of OSD's two lint surfaces this leg validated. Older detector reports
+    // predate the field; they were all runtime-bundle runs.
+    surface: detector.surface || 'runtime-bundle',
     parserRuleNames: bundle && Array.isArray(bundle.parserRuleNames) ? bundle.parserRuleNames : undefined,
     detector,
     backend,
@@ -386,6 +389,10 @@ function main() {
   // its engine verdicts or its detector rows). Tracked separately from drift
   // because the answer is "re-run / fix the leg", not "edit the linter".
   const inconclusive = [];
+  // Cases a leg's grammar surface cannot express (a `runtimeOnly` rule on a
+  // compiled-simplified leg). Recorded so the report can say WHY a cell is blank,
+  // but never a failure: the rule is inert there by design.
+  const notApplicable = [];
   const matrix = []; // one row per rule × version, for the summary table
 
   // A rule that ships enabled at error severity but has no contract file is
@@ -420,7 +427,7 @@ function main() {
         });
         if (grammarDrift) {
           drifts.push({ ...grammarDrift, enforced: isEnforced, contractFile: file });
-          matrix.push({ ruleId, version: leg.version, status: 'drift', drifts: 1 });
+          matrix.push({ ruleId, version: leg.version, leg: leg.label, status: 'drift', drifts: 1 });
           continue;
         }
       }
@@ -443,6 +450,7 @@ function main() {
           matrix.push({
             ruleId,
             version: leg.version,
+            leg: leg.label,
             status: outOfScopeDrifts.length > 0 ? 'drift' : 'out-of-scope',
             drifts: outOfScopeDrifts.length,
           });
@@ -450,7 +458,7 @@ function main() {
         }
         // In scope on this engine but nothing pins its behavior there.
         coverageHoles.push({ ruleId, file, version: leg.version, enforced: isEnforced });
-        matrix.push({ ruleId, version: leg.version, status: 'uncovered', drifts: 0 });
+        matrix.push({ ruleId, version: leg.version, leg: leg.label, status: 'uncovered', drifts: 0 });
         continue;
       }
 
@@ -464,6 +472,10 @@ function main() {
       // otherwise render `agree` off the control alone.
       let triggersExpected = 0;
       let triggersCompared = 0;
+      // Cases this leg's surface cannot express. Counted separately from `unusable`
+      // because the two need opposite advice: not-applicable is expected and needs
+      // no action, unusable means something did not answer and needs a re-run.
+      let ruleNotApplicable = 0;
       const unusable = [];
       for (const [queryName, expected] of Object.entries(expectation.queries || {})) {
         const queryDef = (spec.queries || {})[queryName];
@@ -483,6 +495,23 @@ function main() {
         const detectorResult = (leg.detector.results || []).find(
           (r) => r.ruleId === ruleId && r.queryName === queryName
         );
+        // A case the surface cannot express at all (a `runtimeOnly` rule on a
+        // compiled-simplified leg) is excluded rather than compared. Its zero
+        // diagnostics are `lint_runner` deliberately skipping the rule, so
+        // comparing them against a non-zero expectation would classify a healthy
+        // rule as detector-silent and send someone to fix it. This is NOT the same
+        // as `inconclusive`: nothing went wrong, and there is nothing to re-run.
+        if (detectorResult && detectorResult.notApplicable) {
+          notApplicable.push({
+            ruleId,
+            version: leg.version,
+            queryName,
+            surface: leg.surface,
+            reason: detectorResult.notApplicable,
+          });
+          ruleNotApplicable++;
+          continue;
+        }
         const backendEntry = leg.backend.get(`${ruleId}::${queryName}`);
         const { observed, usable } = readBackendObservation(backendEntry, detectorResult);
         if (!usable) {
@@ -541,7 +570,19 @@ function main() {
       // that lost every TRIGGER while keeping a control, since the triggers are
       // where the rule's behavior actually lives. Calling either agreement is the
       // vacuous pass this check exists to prevent.
-      if (compared === 0 || (triggersExpected > 0 && triggersCompared === 0)) {
+      // A rule the surface cannot express at all is `n/a`, not `inconclusive`:
+      // nothing failed and there is nothing to re-run, so it must not fail the run.
+      // Checked BEFORE the inconclusive test, which would otherwise catch it
+      // (compared === 0) and demand a re-run that could never change the outcome.
+      if (compared === 0 && ruleNotApplicable > 0) {
+        matrix.push({
+          ruleId,
+          version: leg.version,
+          leg: leg.label,
+          status: 'not-applicable',
+          drifts: 0,
+        });
+      } else if (compared === 0 || (triggersExpected > 0 && triggersCompared === 0)) {
         inconclusive.push({
           ruleId,
           file,
@@ -549,7 +590,7 @@ function main() {
           enforced: isEnforced,
           reasons: unusable,
         });
-        matrix.push({ ruleId, version: leg.version, status: 'inconclusive', drifts: ruleDrifts });
+        matrix.push({ ruleId, version: leg.version, leg: leg.label, status: 'inconclusive', drifts: ruleDrifts });
       } else {
         if (unusable.length > 0) {
           log(
@@ -560,6 +601,7 @@ function main() {
         matrix.push({
           ruleId,
           version: leg.version,
+          leg: leg.label,
           status: ruleDrifts === 0 ? 'agree' : 'drift',
           drifts: ruleDrifts,
         });
@@ -577,6 +619,7 @@ function main() {
       label: l.label,
       engineVersion: l.version,
       grammarHash: l.grammarHash,
+      surface: l.surface,
     })),
     enforcedRules: [...enforcedRules].sort(),
     missingContracts,
@@ -585,6 +628,7 @@ function main() {
     drifts,
     coverageHoles,
     inconclusive,
+    notApplicable,
     result: {
       driftCount: drifts.length,
       enforcedDriftCount: enforcedDrifts.length,
@@ -662,25 +706,42 @@ function renderMarkdown(report, drifts, coverageHoles, legs) {
     reasons.push(`${report.result.missingContractCount} unvalidated rule(s)`);
   }
   lines.push(
-    `Engine versions: ${legs.map((l) => `\`${l.version}\``).join(', ')} — ` +
-      `**${report.result.passed ? 'PASS' : 'FAIL'}** (${reasons.join(', ')})`
+    // Name the surface when a leg is not the default runtime-bundle one, so a
+    // reader knows a column speaks for OSD's compiled grammar rather than the
+    // engine's exported one — the two do not run the same set of rules.
+    `Engine versions: ${legs
+      .map((l) =>
+        l.surface && l.surface !== 'runtime-bundle' ? `\`${l.version}\` (${l.surface})` : `\`${l.version}\``
+      )
+      .join(', ')} — ` + `**${report.result.passed ? 'PASS' : 'FAIL'}** (${reasons.join(', ')})`
   );
   lines.push('');
 
-  const versions = legs.map((l) => l.version);
+  // Columns are keyed on the LEG LABEL, not the engine version: two legs can share
+  // a version while validating different surfaces (a 3.7 runtime-bundle leg and a
+  // 3.7 compiled leg), and keying on version alone made them collide so one leg's
+  // results silently rendered in place of the other's.
+  const columns = legs.map((l) => ({
+    label: l.label,
+    heading:
+      l.surface && l.surface !== 'runtime-bundle'
+        ? `\`${l.version}\`<br>${l.surface}`
+        : `\`${l.version}\``,
+  }));
   const rules = [...new Set(report.matrix.map((m) => m.ruleId))].sort();
-  lines.push(`| Rule | ${versions.map((v) => `\`${v}\``).join(' | ')} |`);
-  lines.push(`| ---- | ${versions.map(() => '----').join(' | ')} |`);
+  lines.push(`| Rule | ${columns.map((c) => c.heading).join(' | ')} |`);
+  lines.push(`| ---- | ${columns.map(() => '----').join(' | ')} |`);
   const cell = {
     agree: 'agree',
     drift: 'DRIFT',
     uncovered: 'not covered',
     'out-of-scope': 'n/a (out of scope)',
+    'not-applicable': 'n/a (surface)',
     inconclusive: '**inconclusive**',
   };
   for (const ruleId of rules) {
-    const cells = versions.map((version) => {
-      const row = report.matrix.find((m) => m.ruleId === ruleId && m.version === version);
+    const cells = columns.map((column) => {
+      const row = report.matrix.find((m) => m.ruleId === ruleId && m.leg === column.label);
       if (!row) return '—';
       if (row.status === 'drift') return `**DRIFT** (${row.drifts})`;
       // An unmapped status must still render as something visible. A blank cell

@@ -213,9 +213,52 @@ run the **same** contract oracle (`PplLintRuleValidationIT`) with
 against expectations — on an older engine a mismatch is the signal being
 collected, not a broken run.
 
-**Engine floor: 3.6.0.** `GET /_plugins/_ppl/_grammar` landed in #5162, which is
-an ancestor of 3.6 but not 3.5, so a 3.5 leg could not export a grammar bundle for
-the detectors to lint against.
+**Engine floor: 3.6.0 — for the runtime-bundle surface.**
+`GET /_plugins/_ppl/_grammar` landed in #5162, which is an ancestor of 3.6 but not
+3.5, so a 3.5 leg cannot export a grammar bundle for the detectors to lint against.
+
+### The two grammar surfaces
+
+OSD ships lint on **two** surfaces, and a user gets whichever one their session
+resolves to (`lintRuntimePPLQuery`):
+
+| Surface | When the product uses it | Engine floor |
+| --- | --- | --- |
+| `runtime-bundle` | the engine exported a grammar bundle and it has loaded | 3.6.0 |
+| `compiled-simplified` | no bundle — no dataset selected, engine below 3.6, or bundle not yet loaded | none |
+
+The compiled surface is not a degraded copy of the runtime one: it runs detector
+logic the runtime path does not (`field_validation`'s text-side pass keys off
+`grammarSurface === 'compiled-simplified'`). It is also the surface with no engine
+floor, so it is where old-engine coverage is possible at all.
+
+`PPL_LINT_SURFACE` selects which surface a detector run validates. It defaults to
+`runtime-bundle`, so the required check is unchanged, and the compiled surface is
+an **explicit opt-in** — never a silent fallback. A missing bundle on the runtime
+surface stays a hard failure, because quietly linting OSD's own grammar instead of
+the candidate would validate the wrong thing.
+
+**`runtimeOnly` rules do not run on the compiled surface.** `lint_runner` skips
+them (the productions they walk are absent from the compiled grammar), so a
+compiled leg reports them `not-applicable` rather than as zero diagnostics. This
+distinction is load-bearing: counted as zero, a healthy rule would classify as
+`detector-silent` drift and send someone to "fix" it. In the summary table those
+cells read `n/a (surface)`, and a rule whose every case is inert is `n/a` — not
+`agree` (it proved nothing) and not `inconclusive` (nothing went wrong, and there
+is nothing to re-run).
+
+Two legs may share an engine version while validating different surfaces, so the
+matrix is keyed on the **leg label**, not the version.
+
+```bash
+# A compiled-surface leg: no grammar bundle needed, so any engine version works.
+PPL_LINT_SURFACE=compiled-simplified \
+PPL_LINT_CONTRACT_DIR=<contracts> \
+PPL_LINT_TARGET_MANIFEST=<leg>/target.json \
+PPL_LINT_SCHEDULE=nightly \
+PPL_LINT_REPORT=<leg>/detector-report.json \
+node -r ./src/setup_node_env <sql>/scripts/ppl-lint/run-frontend-contract.mjs
+```
 
 This workflow is **non-enforcing for now**: it reports and uploads, while the
 required check stays the single-version `validation-result`. Promoting it needs a
