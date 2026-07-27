@@ -45,6 +45,33 @@
  *      — a trigger the detector flags is one the backend rejected; a control the
  *      detector passes is one the backend accepted (design §3.2, §4.3).
  *   4. Coverage (nightly only): every enabled catalog rule has a contract file.
+ *
+ * ## Two grammar surfaces
+ *
+ * OSD ships lint on TWO surfaces, and a user gets whichever one their session
+ * resolves to:
+ *
+ *   runtime-bundle       the candidate grammar the engine exported. Requires
+ *                        `GET /_plugins/_ppl/_grammar`, which landed in 3.6.
+ *   compiled-simplified  OSD's own checked-in grammar, used whenever the runtime
+ *                        bundle is unavailable — no dataset selected, an engine
+ *                        below 3.6, or a bundle that has not loaded yet. This is
+ *                        `lintRuntimePPLQuery`'s fallback path, and it runs
+ *                        detector logic the runtime path does not (see
+ *                        field_validation's text-side pass).
+ *
+ * `PPL_LINT_SURFACE` selects which one this run validates; it defaults to
+ * `runtime-bundle`, so the required check is unchanged. The compiled surface is
+ * an EXPLICIT opt-in, never a silent fallback: the whole point of the required
+ * check is that a missing bundle is a hard failure rather than a quiet
+ * downgrade to OSD's own grammar (which would validate the wrong thing).
+ *
+ * The compiled surface is what makes pre-3.6 engine legs meaningful. It also
+ * carries a mandatory caveat: `runtimeOnly` rules (multisearch/union/replace
+ * arity) are SKIPPED on it by `lint_runner` because the productions they walk do
+ * not exist in the compiled grammar. A compiled leg therefore reports them as
+ * `not-applicable` rather than as zero diagnostics, so the aggregator cannot
+ * mistake a deliberately-inert rule for a detector that regressed.
  */
 
 import fs from 'fs';
@@ -54,10 +81,38 @@ import { createRequire } from 'module';
 // OSD's Node-safe headless lint API (design §4.3). Deep-path module; resolved
 // against the OSD checkout root, not this script's SQL-repo location.
 const HEADLESS_MODULE = 'src/plugins/data/public/antlr/opensearch_ppl/headless_ppl_lint';
+// The COMPILED-simplified surface: OSD's own checked-in grammar, used when the
+// engine cannot export a runtime bundle. See `PPL_LINT_SURFACE` below.
+const ANALYZER_MODULE = 'packages/osd-monaco/src/ppl/ppl_language_analyzer';
 // The Monaco-free engine barrel (@osd/monaco/ppl-lint) exposes the catalog; the
 // detector registry is a deep import used only for the wiring registration check.
 const CATALOG_MODULE = 'packages/osd-monaco/ppl-lint';
+// Source-path fallback for the catalog. The `ppl-lint` subpath is a built export
+// that only exists on checkouts that ship it; the compiled surface deliberately
+// supports older checkouts (that is the coverage it adds), so fall back to the
+// source module, which `setup_node_env` transpiles on require anyway.
+const CATALOG_SOURCE_MODULE = 'packages/osd-monaco/src/ppl/lint/catalog';
 const DETECTOR_REGISTRY_MODULE = 'packages/osd-monaco/target/ppl/lint/detector_registry.js';
+
+/**
+ * Which grammar surface this run validates. Defaults to `runtime-bundle` so the
+ * required check's behavior is unchanged; `compiled-simplified` is an explicit
+ * opt-in for legs whose engine cannot export a bundle.
+ */
+const SURFACE = (() => {
+  const requested = process.env.PPL_LINT_SURFACE || 'runtime-bundle';
+  if (requested !== 'runtime-bundle' && requested !== 'compiled-simplified') {
+    // A typo must not silently select the default: that would report compiled
+    // results under a runtime-bundle label, or vice versa.
+    // eslint-disable-next-line no-console
+    console.error(
+      `[ppl-lint-frontend] FATAL: PPL_LINT_SURFACE must be "runtime-bundle" or ` +
+        `"compiled-simplified", got "${requested}".`
+    );
+    process.exit(2);
+  }
+  return requested;
+})();
 
 function log(message) {
   // eslint-disable-next-line no-console
@@ -143,10 +198,41 @@ function loadOsd() {
     }
   };
 
-  const headless = resolveOsd(HEADLESS_MODULE);
-  const { getBundledCatalog } = resolveOsd(CATALOG_MODULE);
+  // Prefer the built subpath (what the required check uses); fall back to source
+  // so a checkout without the built export can still run the compiled surface.
+  const catalogModule =
+    resolveOsd(CATALOG_MODULE, { optional: true }) || resolveOsd(CATALOG_SOURCE_MODULE);
+  const { getBundledCatalog } = catalogModule;
   const registry = resolveOsd(DETECTOR_REGISTRY_MODULE, { optional: true });
+  if (typeof getBundledCatalog !== 'function') {
+    fatal(`getBundledCatalog not found in ${CATALOG_MODULE} or ${CATALOG_SOURCE_MODULE}.`);
+  }
+  const getDetector = registry && registry.getDetector;
 
+  // On the compiled surface the headless bundle API is not needed at all, and
+  // requiring it would make this mode unusable on an OSD checkout that predates
+  // it — precisely the older-version coverage the mode exists to provide.
+  if (SURFACE === 'compiled-simplified') {
+    const { PPLLanguageAnalyzer } = resolveOsd(ANALYZER_MODULE);
+    if (typeof PPLLanguageAnalyzer !== 'function') {
+      fatal(`PPLLanguageAnalyzer not found in ${ANALYZER_MODULE}.`);
+    }
+    const analyzer = new PPLLanguageAnalyzer();
+    return {
+      surface: SURFACE,
+      // Same (query, grammar, context) shape as the bundle path so the main loop
+      // does not branch per surface; `grammar` is unused here.
+      lintQuery: (query, _grammar, context) => {
+        const analysis = analyzer.analyzeLint(query, context);
+        return (analysis && analysis.result) || { diagnostics: [] };
+      },
+      getBundledCatalog,
+      getDetector,
+      osdRoot,
+    };
+  }
+
+  const headless = resolveOsd(HEADLESS_MODULE);
   const { deserializeBundleOrThrow, lintQueryWithBundle } = headless;
   if (typeof deserializeBundleOrThrow !== 'function' || typeof lintQueryWithBundle !== 'function') {
     fatal(
@@ -155,12 +241,15 @@ function loadOsd() {
         `Is the OSD checkout on a branch that ships the headless API (design §4.3)?`
     );
   }
-  if (typeof getBundledCatalog !== 'function') {
-    fatal(`getBundledCatalog not found in ${CATALOG_MODULE}.`);
-  }
 
-  const getDetector = registry && registry.getDetector;
-  return { deserializeBundleOrThrow, lintQueryWithBundle, getBundledCatalog, getDetector, osdRoot };
+  return {
+    surface: SURFACE,
+    deserializeBundleOrThrow,
+    lintQuery: lintQueryWithBundle,
+    getBundledCatalog,
+    getDetector,
+    osdRoot,
+  };
 }
 
 /** Load the candidate grammar bundle + deserialize it once (fail loud; CI has no fallback). */
@@ -403,10 +492,13 @@ function main() {
   const reportPath = process.env.PPL_LINT_REPORT;
 
   const osd = loadOsd();
-  const { getBundledCatalog, getDetector, lintQueryWithBundle, osdRoot } = osd;
+  const { getBundledCatalog, getDetector, lintQuery, osdRoot, surface } = osd;
   const catalog = getBundledCatalog();
 
-  const grammar = loadCandidateGrammar(osd);
+  // The compiled surface lints with OSD's own checked-in grammar, so there is no
+  // candidate bundle to load. On the runtime surface a missing bundle stays a hard
+  // failure — never a quiet downgrade to the compiled grammar.
+  const grammar = surface === 'compiled-simplified' ? undefined : loadCandidateGrammar(osd);
   const target = loadTarget();
   const engineVersion = target.engineVersion || process.env.PPL_SQL_VERSION || '';
   const backendReport = loadBackendReport();
@@ -417,6 +509,11 @@ function main() {
     osdRoot,
     schedule,
     engineVersion,
+    // Which of OSD's two lint surfaces produced these results. The aggregator
+    // needs this to interpret them: a compiled leg legitimately has no verdict for
+    // `runtimeOnly` rules, and mixing the two surfaces under one label would
+    // report a deliberately-inert rule as a regression.
+    surface,
     grammarHash: target.grammarHash || '',
     differential: !!backendReport,
     // Census of the rules that ship enabled at ERROR severity, read from the OSD
@@ -474,7 +571,29 @@ function main() {
       const expected = expectedQueries[queryName];
       const expectedCount = expected.detectorCount;
 
-      const result = lintQueryWithBundle(query, grammar, context);
+      // A `runtimeOnly` rule walks grammar productions that exist only in the
+      // runtime bundle, so `lint_runner` skips it on the compiled surface. Its
+      // zero diagnostics here mean "deliberately inert", NOT "the detector went
+      // silent" — reporting them as a count would make the aggregator classify a
+      // healthy rule as detector-silent drift and send someone to fix it. Mark the
+      // case not-applicable and let the aggregator exclude it.
+      if (surface === 'compiled-simplified' && entry && entry.runtimeOnly) {
+        log(
+          `  SKIP ${ruleId}/${queryName} (${role}): runtimeOnly rule is inert on the ` +
+            `compiled-simplified surface.`
+        );
+        report.results.push({
+          ruleId,
+          queryName,
+          role,
+          query,
+          surface,
+          notApplicable: 'runtimeOnly rule does not run on the compiled-simplified surface',
+        });
+        continue;
+      }
+
+      const result = lintQuery(query, grammar, context);
       const matches = (result.diagnostics || []).filter((d) => d.ruleId === ruleId);
       const actual = matches.length;
       const ok = actual === expectedCount;
