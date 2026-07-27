@@ -419,12 +419,21 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
         expectedBody.getInt("status"),
         obs.body.getInt("status"));
 
+    // A contract may omit `error` entirely to assert only THAT the engine rejects,
+    // without pinning wording that has not been observed live on that version. That
+    // is weaker than a full oracle but honest; inventing a type/reason would either
+    // fail spuriously or get "fixed" by pinning whatever CI first happened to see.
+    if (!expectedBody.has("error")) {
+      return;
+    }
     JSONObject expectedError = expectedBody.getJSONObject("error");
     JSONObject actualError = obs.body.getJSONObject("error");
-    assertEquals(
-        "case \"" + queryName + "\": unexpected error.type for query: " + query,
-        expectedError.getString("type"),
-        actualError.getString("type"));
+    if (expectedError.has("type")) {
+      assertEquals(
+          "case \"" + queryName + "\": unexpected error.type for query: " + query,
+          expectedError.getString("type"),
+          actualError.getString("type"));
+    }
     if (expectedError.has("reason")) {
       assertEquals(
           "case \"" + queryName + "\": unexpected error.reason for query: " + query,

@@ -250,6 +250,21 @@ is nothing to re-run).
 Two legs may share an engine version while validating different surfaces, so the
 matrix is keyed on the **leg label**, not the version.
 
+Each contract declares the surface(s) it was verified against, and a contract is
+only scored on a matching leg — `"both"` opts into either. Judged on a surface it
+never claimed, every verdict is meaningless: a runtime-bundle contract on a
+compiled leg yields both `version-scope-too-narrow` ("the engine rejects but the
+rule is scoped away") and a coverage hole, each about a surface the contract does
+not describe. Contracts declaring `"both"` are what a pre-3.6 leg can actually
+validate; the rest report `n/a (surface)`.
+
+**Compiled-surface legs run nightly** (`COMPILED_ENGINE_VERSIONS`, default
+`2.19.0` / `3.0.0` / `3.5.0`) — three more engine images is too slow for every PR.
+Dispatch with `compiled_versions` to run one ad hoc, or `[]` to skip. Their observe
+job omits `-Dppl.lint.grammar.bundle` (the IT then exports nothing) and writes a
+`surface` marker file, which is what tells the detect job to lint them on the
+compiled surface rather than treating a missing bundle as a failed export.
+
 ```bash
 # A compiled-surface leg: no grammar bundle needed, so any engine version works.
 PPL_LINT_SURFACE=compiled-simplified \

@@ -72,14 +72,32 @@ on:
         description: 'JSON array of released engine versions to validate, e.g. ["3.6.0","3.7.0"]. The PR build is always added.'
         required: false
         type: string
+      compiled_versions:
+        description: 'JSON array of engine versions to validate on the compiled-simplified surface, e.g. ["2.19.0"]. Use "[]" to skip them.'
+        required: false
+        type: string
 
 permissions:
   contents: read
 
 env:
-  # Released engine versions to validate, newest last. Each must be >= 3.6.0 (the
-  # _grammar endpoint floor) and must have a published distribution image.
+  # Released engine versions to validate on the RUNTIME-BUNDLE surface. Each must
+  # be >= 3.6.0 (the _grammar endpoint floor) and must have a published
+  # distribution image.
   ENGINE_VERSIONS: '["3.6.0","3.7.0"]'
+  # Released engine versions to validate on the COMPILED-SIMPLIFIED surface.
+  #
+  # These engines cannot export a grammar bundle (GET /_plugins/_ppl/_grammar
+  # landed in 3.6), so the runtime surface cannot reach them at all. But the
+  # compiled surface has no such floor: it lints with OSD's own checked-in grammar,
+  # which is exactly what a user gets when no bundle is available — including every
+  # user on an engine below 3.6. Those legs still run the real contract queries
+  # against the real engine, so the backend half of the differential is genuine.
+  #
+  # Only contracts declaring `grammarSurface: "both"` are scored here; the rest are
+  # reported not-applicable. Nightly only — see the `compiled_versions` input to
+  # run one ad hoc.
+  COMPILED_ENGINE_VERSIONS: '["2.19.0","3.0.0","3.5.0"]'
 
 jobs:
   # Same reusable workflow + pinned SHA the sibling SQL workflows use, so a
@@ -96,6 +114,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       released: ${{ steps.plan.outputs.released }}
+      compiled: ${{ steps.plan.outputs.compiled }}
       osd_repo: ${{ steps.plan.outputs.osd_repo }}
       osd_ref: ${{ steps.plan.outputs.osd_ref }}
     steps:
@@ -104,6 +123,9 @@ jobs:
         env:
           REQUESTED_VERSIONS: ${{ inputs.engine_versions }}
           DEFAULT_VERSIONS: ${{ env.ENGINE_VERSIONS }}
+          REQUESTED_COMPILED: ${{ inputs.compiled_versions }}
+          DEFAULT_COMPILED: ${{ env.COMPILED_ENGINE_VERSIONS }}
+          EVENT_NAME: ${{ github.event_name }}
           REQUESTED_REPO: ${{ inputs.osd_repo }}
           REQUESTED_REF: ${{ inputs.osd_ref }}
           VAR_REPO: ${{ vars.OSD_REPO }}
@@ -121,6 +143,28 @@ jobs:
               assert isinstance(item,str), 'engine_versions entries must be strings'
           "
           echo "released=$released" >> "$GITHUB_OUTPUT"
+
+          # Compiled-surface legs add three more engine images, so they run on the
+          # nightly schedule (and on an explicit dispatch), not on every PR that
+          # touches the corpus. An explicit input always wins, including "[]".
+          if [ -n "${REQUESTED_COMPILED:-}" ]; then
+            compiled="$REQUESTED_COMPILED"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            compiled='[]'
+          else
+            compiled="$DEFAULT_COMPILED"
+          fi
+          # An EMPTY list is legitimate here (unlike engine_versions): it means "skip
+          # the compiled surface this run". Still reject a non-list.
+          echo "$compiled" | python3 -c "
+          import json,sys
+          v=json.load(sys.stdin)
+          assert isinstance(v,list), 'compiled_versions must be a JSON array'
+          for item in v:
+              assert isinstance(item,str), 'compiled_versions entries must be strings'
+          "
+          echo "compiled=$compiled" >> "$GITHUB_OUTPUT"
+          echo "Compiled-surface legs: $compiled" >> "$GITHUB_STEP_SUMMARY"
           # Same precedence as the sibling workflow: dispatch input, then repo
           # variable, then the canonical upstream default.
           echo "osd_repo=${REQUESTED_REPO:-${VAR_REPO:-opensearch-project/OpenSearch-Dashboards}}" >> "$GITHUB_OUTPUT"
@@ -223,6 +267,103 @@ jobs:
           name: ppl-lint-leg-${{ matrix.version }}-logs
           path: integ-test/build/reports/**
 
+  # Legs for engines BELOW the _grammar endpoint floor (3.6). These cannot export a
+  # grammar bundle, so they are observed for backend behavior only and their
+  # detector pass runs on the compiled-simplified surface — which is what a real
+  # user on such an engine gets, since no bundle can ever load there.
+  #
+  # Identical to observe-released except that `-Dppl.lint.grammar.bundle` is
+  # omitted: the IT skips the export when that property is unset, so no bundle
+  # fetch is attempted against an engine that has no such endpoint.
+  observe-compiled:
+    name: Observe engine ${{ matrix.version }} (compiled surface)
+    needs: plan
+    # An empty compiled list means "skip this surface" (the pull_request default).
+    if: ${{ needs.plan.outputs.compiled != '[]' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJSON(needs.plan.outputs.compiled) }}
+    services:
+      opensearch:
+        image: opensearchproject/opensearch:${{ matrix.version }}
+        env:
+          discovery.type: single-node
+          DISABLE_SECURITY_PLUGIN: 'true'
+          DISABLE_INSTALL_DEMO_CONFIG: 'true'
+          OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
+        ports:
+          - 9200:9200
+        options: >-
+          --health-cmd "curl -sf http://localhost:9200/_cluster/health || exit 1"
+          --health-interval 15s
+          --health-timeout 10s
+          --health-retries 20
+          --health-start-period 60s
+    steps:
+      - name: Checkout SQL pull request
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Wait for the engine and confirm its version
+        id: engine
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 40); do
+            if curl -sf http://localhost:9200 > /tmp/root.json; then break; fi
+            echo "waiting for engine (${i}/40)..."
+            sleep 5
+          done
+          cat /tmp/root.json
+          reported=$(python3 -c "import json;print(json.load(open('/tmp/root.json'))['version']['number'])")
+          case "$reported" in
+            ${{ matrix.version }}*) ;;
+            *) echo "::error::engine reported $reported but the matrix asked for ${{ matrix.version }}"; exit 1 ;;
+          esac
+          curl -sf http://localhost:9200/_cat/plugins | grep -i sql
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: 'temurin'
+          java-version: 21
+
+      - name: Run contract observation against engine ${{ matrix.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p leg
+          # No -Dppl.lint.grammar.bundle: this engine predates the _grammar endpoint,
+          # and the IT correctly exports nothing when the property is unset.
+          ./gradlew :integ-test:integTestRemote \
+            --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT \
+            -Dtests.rest.cluster=localhost:9200 \
+            -Dtests.cluster=localhost:9200 \
+            -Dtests.clustername=docker-cluster \
+            -Dppl.lint.schedule=nightly \
+            -Dppl.lint.observe.only=true \
+            -Dppl.lint.report="$(pwd)/leg/backend-report.json" \
+            -Dppl.lint.target="$(pwd)/leg/target.json"
+          # Mark the leg so the detect job knows to lint it on the compiled surface.
+          # A leg with no bundle would otherwise look like a failed export.
+          echo 'compiled-simplified' > leg/surface
+
+      - name: Upload leg artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ppl-lint-leg-${{ matrix.version }}-compiled
+          path: leg
+          if-no-files-found: error
+
+      - name: Upload failure logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        continue-on-error: true
+        with:
+          name: ppl-lint-leg-${{ matrix.version }}-compiled-logs
+          path: integ-test/build/reports/**
+
   # The PR's own engine build, so the newest point in the matrix is the code under
   # review rather than the last release. Same oracle as the released legs; the only
   # difference is a Gradle-managed cluster instead of a published image, which is
@@ -294,6 +435,7 @@ jobs:
     needs:
       - plan
       - observe-released
+      - observe-compiled
       - observe-pr-build
     if: ${{ always() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
@@ -369,13 +511,25 @@ jobs:
             exit 1
           fi
           for leg in "${legs[@]}"; do
-            # Skip the log-only artifacts an observation failure may have uploaded.
-            [ -f "$leg/ppl-grammar-bundle.json" ] || { echo "skipping $leg (no grammar bundle)"; continue; }
             version=$(basename "$leg" | sed 's/^ppl-lint-leg-//')
-            echo "=== detectors vs engine $version ==="
+            # A leg is compiled-surface when its observe job said so. That marker is
+            # what distinguishes "this engine has no _grammar endpoint" from "the
+            # bundle export failed", which must stay a hard error.
+            if [ -f "$leg/surface" ] && [ "$(cat "$leg/surface")" = 'compiled-simplified' ]; then
+              surface_env=(PPL_LINT_SURFACE=compiled-simplified)
+              echo "=== detectors vs engine $version (compiled-simplified surface) ==="
+            elif [ -f "$leg/ppl-grammar-bundle.json" ]; then
+              surface_env=(PPL_LINT_SURFACE=runtime-bundle
+                           PPL_LINT_GRAMMAR_BUNDLE="$leg/ppl-grammar-bundle.json")
+              echo "=== detectors vs engine $version (runtime-bundle surface) ==="
+            else
+              # Skip the log-only artifacts an observation failure may have uploaded.
+              echo "skipping $leg (no grammar bundle and no compiled-surface marker)"
+              continue
+            fi
+            env "${surface_env[@]}" \
             PPL_LINT_CONTRACT_DIR="$GITHUB_WORKSPACE/integ-test/src/test/resources/ppl-lint/contracts" \
             PPL_LINT_SCHEDULE=nightly \
-            PPL_LINT_GRAMMAR_BUNDLE="$leg/ppl-grammar-bundle.json" \
             PPL_LINT_TARGET_MANIFEST="$leg/target.json" \
             PPL_LINT_REPORT="$leg/detector-report.json" \
             node -r ./src/setup_node_env \
@@ -399,6 +553,7 @@ jobs:
         id: aggregate
         env:
           RELEASED: ${{ needs.plan.outputs.released }}
+          COMPILED: ${{ needs.plan.outputs.compiled }}
         run: |
           set -euo pipefail
           shopt -s nullglob
@@ -419,7 +574,14 @@ jobs:
           # a matrix that silently lost one — the exact vacuous pass this workflow
           # exists to prevent. A dead leg is a failure, not a smaller matrix.
           missing=()
-          for want in $(echo "$RELEASED" | python3 -c "import json,sys;print(' '.join(json.load(sys.stdin)))") pr-build; do
+          # Compiled legs are labelled "<version>-compiled" to match their artifact
+          # name, so they occupy their own column even when a runtime leg validated
+          # the same engine version.
+          compiled_wanted=$(echo "$COMPILED" | python3 -c "
+          import json,sys
+          print(' '.join(f'{v}-compiled' for v in json.load(sys.stdin)))
+          ")
+          for want in $(echo "$RELEASED" | python3 -c "import json,sys;print(' '.join(json.load(sys.stdin)))") $compiled_wanted pr-build; do
             found=no
             for have in "${present[@]}"; do
               [ "$have" = "$want" ] && found=yes && break

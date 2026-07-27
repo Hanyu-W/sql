@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
   "ruleId": "disabled-join-type",
-  "grammarSurface": "compiled-simplified",
+  "grammarSurface": "both",
   "schedule": "nightly",
   "wiring": {
     "detector": "disabled-join-type",
