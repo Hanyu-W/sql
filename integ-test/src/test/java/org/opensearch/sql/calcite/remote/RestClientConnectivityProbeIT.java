@@ -14,11 +14,12 @@ import java.util.ArrayList;
 import java.util.List;
 import org.apache.hc.core5.http.HttpHost;
 import org.apache.hc.core5.util.Timeout;
-import org.junit.jupiter.api.Test;
+import org.junit.Test;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 import org.opensearch.client.RestClient;
 import org.opensearch.client.RestClientBuilder;
+import org.opensearch.test.OpenSearchTestCase;
 
 /**
  * Connectivity probe for {@code tests.rest.cluster}, used to diagnose why the REST test client
@@ -33,10 +34,14 @@ import org.opensearch.client.RestClientBuilder;
  * negotiation, FIPS, plugin set, port collision, address family) have each been refuted by
  * observation.
  *
- * <p>This class deliberately does NOT extend the test framework's base class: that base class is
- * what hangs, so inheriting it would reproduce the symptom without isolating the cause. Instead it
- * walks up the stack one layer at a time against the same address, so a single run says exactly
- * which layer stops working:
+ * <p>It extends {@link OpenSearchTestCase}, NOT the REST base class. Two constraints meet here:
+ * {@code integTestRemote} runs the default JUnit 4 runner (only {@code integJdbcTest} calls {@code
+ * useJUnitPlatform()}), and Gradle only discovers an IT that inherits a runner from a framework
+ * base class — a standalone class is silently collected as ZERO tests, which is how the first
+ * version of this probe "passed" while reporting nothing. {@code OpenSearchTestCase} supplies that
+ * runner but builds no REST client, so discovery works without inheriting the hang under
+ * investigation. Instead of the framework's client setup, this walks up the stack one layer at a
+ * time against the same address, so a single run says exactly which layer stops working:
  *
  * <ol>
  *   <li>raw TCP connect — is the port reachable from this JVM at all?
@@ -52,7 +57,7 @@ import org.opensearch.client.RestClientBuilder;
  * <p>Run with: {@code ./gradlew :integ-test:integTestRemote --tests
  * '*RestClientConnectivityProbeIT' -Dtests.rest.cluster=localhost:9200}
  */
-public class RestClientConnectivityProbeIT {
+public class RestClientConnectivityProbeIT extends OpenSearchTestCase {
 
   /** Bound well below the framework's 60s so a hang is visibly a hang, not a wait. */
   private static final Timeout PROBE_TIMEOUT = Timeout.ofSeconds(15);
