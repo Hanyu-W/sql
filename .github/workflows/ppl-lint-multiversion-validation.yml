@@ -431,7 +431,8 @@ jobs:
             --tests 'org.opensearch.sql.calcite.remote.RestClientConnectivityProbeIT' \
             -Dtests.rest.cluster=localhost:9200 \
             -Dtests.cluster=localhost:9200 \
-            -Dtests.clustername=docker-cluster 2>&1 | grep -E 'rest-connectivity-probe|FAILED|BUILD' || true
+            -Dtests.clustername=docker-cluster \
+            --info 2>&1 | grep -E 'rest-connectivity-probe|FAILED|BUILD|tests? completed|No tests found' || true
 
       - name: Run contract observation against engine ${{ matrix.version }}
         run: |

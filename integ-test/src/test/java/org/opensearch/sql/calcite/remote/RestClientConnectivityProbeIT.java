@@ -14,7 +14,7 @@ import java.util.ArrayList;
 import java.util.List;
 import org.apache.hc.core5.http.HttpHost;
 import org.apache.hc.core5.util.Timeout;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
 import org.opensearch.client.Request;
 import org.opensearch.client.Response;
 import org.opensearch.client.RestClient;
