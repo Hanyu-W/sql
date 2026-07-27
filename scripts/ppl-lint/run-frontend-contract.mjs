@@ -685,14 +685,38 @@ function main() {
                 `but the contract's backend.kind="${backendKind}" expects ${expectRejected ? 'rejection' : 'acceptance'} for: ${query}`
             );
           }
-          // Trigger/control cross-check against the detector's own verdict.
+          // Trigger cross-check: a trigger the detector flags must be one the engine
+          // ALSO objects to — but only where the contract claims the engine objects
+          // at all.
+          //
+          // For a `rejection` rule the two coincide: detector flags <-> engine
+          // rejects, and a disagreement means one side drifted. That is the original
+          // check and it is unchanged.
+          //
+          // An ADVISORY rule is different by design. It flags a query the engine
+          // runs happily: `head-without-sort` marks non-determinism,
+          // `division-by-zero` marks a silent null, `dedup-consecutive` succeeds via
+          // the Calcite-to-v2 fallback. "Detector flagged, backend accepted" is that
+          // rule working, not drift — so pairing the detector against `be.rejected`
+          // failed every advisory trigger unconditionally. That, not runtime cost,
+          // is the structural reason those contracts could only run nightly.
+          //
+          // The contracts already carry the distinction in `backend.kind`, so this
+          // reads data that exists rather than adding a flag. Advisory triggers keep
+          // full coverage from the other two assertions: the backend-kind check above
+          // fires if the engine starts REJECTING a query pinned as accepted, and the
+          // `detectorCount` assertion fires if the detector stops flagging it. Only
+          // the pairing rule is scoped to the rules it makes sense for.
           const detectorFlagged = actual > 0;
-          if (role === 'trigger' && detectorFlagged !== !!be.rejected) {
+          if (role === 'trigger' && expectRejected && detectorFlagged !== !!be.rejected) {
             failures.push(
               `[${ruleId}/${queryName}] differential: trigger detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
                 `but backend ${be.rejected ? 'rejected' : 'accepted'} for: ${query}`
             );
           }
+          // A control must pass on both sides regardless of kind: it is a valid
+          // query the rule has to stay quiet on. Unlike a trigger, that claim does
+          // not vary with `backend.kind`.
           if (role === 'control' && (detectorFlagged || be.rejected)) {
             failures.push(
               `[${ruleId}/${queryName}] differential: control must pass on both sides but detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
