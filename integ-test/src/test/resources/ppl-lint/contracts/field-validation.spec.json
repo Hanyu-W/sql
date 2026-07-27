@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "ruleId": "field-validation",
   "grammarSurface": "both",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "detector": "field-validation",
     "enabled": true,

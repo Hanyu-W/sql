@@ -3,7 +3,7 @@
   "ruleId": "division-by-zero",
   "note": "The detector deliberately flags only `/`: division_by_zero.ts pins DIVISION_OPERATOR to \"/\" because modulo-by-zero was never verified live. `modulo-by-zero-not-flagged` is therefore a CONTROL \u2014 it documents that boundary rather than asserting a gap.",
   "grammarSurface": "both",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "detector": "division-by-zero",
     "enabled": true,

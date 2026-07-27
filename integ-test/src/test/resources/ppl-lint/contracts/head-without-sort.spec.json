@@ -2,7 +2,7 @@
   "schemaVersion": 3,
   "ruleId": "head-without-sort",
   "grammarSurface": "both",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "detector": "head-without-sort",
     "enabled": true,

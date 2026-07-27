@@ -49,6 +49,12 @@ backend-validation ──(target.json, ppl-grammar-bundle.json, backend-report.j
 | `workflow_dispatch` (`osd_ref`) | OSD-branch evidence | the given commit/branch | No — pre-merge evidence only |
 | `schedule` (nightly) | full corpus + coverage | `main` | No |
 
+Every contract declares `schedule: "pr"`, so a PR run exercises the **whole corpus**
+— 11 rules, 35 queries. A contract that runs also asserts: neither the IT nor the
+detector runner consults the manifest's `enforced` list, so any contract on the PR
+schedule can fail the required check. Keep that in mind when adding one; a new
+contract whose oracle has not settled should say `schedule: "nightly"` until it has.
+
 `workflow_dispatch` inputs:
 
 - `osd_repo` — the OSD repository to check out, for validating an unmerged change
@@ -184,8 +190,17 @@ rule cannot be validated end to end.
   single-version `enforced` set because their backend oracle is a semantic
   `Field [...] not found.` rejection they share with each other rather than a
   rule-unique grammar rejection.
-- `nonEnforcing` — warning/info/advisory/result-shape rules. They run on the
-  nightly schedule for coverage and never block a PR.
+- `nonEnforcing` — warning/info/advisory/result-shape rules. Their oracle is weaker
+  than a clean rejection: an advisory rule's query *succeeds*, so the contract can
+  only assert a result shape or plain acceptance, which is likelier to move for
+  reasons unrelated to the lint rule (`dedup-consecutive` depends on the
+  Calcite-to-v2 fallback staying on). These ran nightly-only until every contract
+  moved to the PR schedule, so they now block like any other. A red result here is
+  worth checking against the oracle before editing a rule.
+
+The `enforced` / `nonEnforcing` split therefore describes **oracle quality and review
+status, not blocking behavior** — it tells a reviewer how much to trust a red result,
+not whether one can occur.
 
 ## Multi-version validation
 

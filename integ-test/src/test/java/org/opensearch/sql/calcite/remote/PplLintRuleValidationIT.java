@@ -61,8 +61,16 @@ import org.opensearch.sql.ppl.PPLIntegTestCase;
  * SAME candidate grammar (design §4.2, §4.3). Export runs only when {@code
  * -Dppl.lint.grammar.bundle} is set (CI); local runs without it are unaffected.
  *
- * <p>The suite honors {@code -Dppl.lint.schedule=pr|nightly} (default {@code pr}): PR runs only the
- * fast, deterministic {@code schedule:pr} contracts; nightly runs the full corpus.
+ * <p>The suite honors {@code -Dppl.lint.schedule=pr|nightly} (default {@code pr}): a PR run skips
+ * contracts declaring {@code schedule: "nightly"}, while nightly runs the full corpus. Every
+ * contract in the corpus currently declares {@code schedule: "pr"}, so the two are equivalent
+ * today; the filter stays because it is the only mechanism for holding a new contract back from
+ * PR runs while its oracle is still settling.
+ *
+ * <p>Note that a contract which RUNS also ASSERTS. This class does not consult the manifest's
+ * {@code enforced} list — that list records oracle quality and review status, not blocking
+ * behavior. Adding a contract, or moving one onto the PR schedule, makes it capable of failing the
+ * required check.
  */
 public class PplLintRuleValidationIT extends PPLIntegTestCase {
 
