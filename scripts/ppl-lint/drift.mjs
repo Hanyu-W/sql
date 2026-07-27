@@ -32,6 +32,7 @@
 export const DRIFT_CLASSES = {
   GRAMMAR_RULE_MISSING: 'grammar-rule-missing',
   ENGINE_RELAXED: 'engine-relaxed',
+  ENGINE_PARTIALLY_RELAXED: 'engine-partially-relaxed',
   ENGINE_TIGHTENED: 'engine-tightened',
   ENGINE_MESSAGE_CHANGED: 'engine-message-changed',
   DETECTOR_SILENT: 'detector-silent',
@@ -242,6 +243,139 @@ export function classifyGrammarDrift({
 }
 
 /**
+ * Decide, for ONE rule on ONE engine version, whether an observed relaxation is
+ * total or partial — the difference between "scope the rule away from this
+ * version" and "narrow the detector".
+ *
+ * `classifyDrift` sees a single query, so it cannot tell these apart: one trigger
+ * that the engine now accepts looks identical whether the rule's other triggers
+ * still fail or not. Acting on that one query is actively harmful in the partial
+ * case, because scoping the rule out of the version drops the diagnostics that
+ * are STILL correct — turning a partial engine fix into a false negative on the
+ * shapes that remain broken. That is why this runs over the whole rule.
+ *
+ * Inputs are the per-trigger verdicts the caller already gathered:
+ *   relaxed   engine ACCEPTS a trigger the contract pinned as rejected
+ *   holding   engine still REJECTS the trigger
+ * Triggers with no usable verdict are passed as neither, and are reported as the
+ * reason a verdict is being withheld rather than silently treated as `holding`
+ * (which would read a dead leg as a partial fix and narrow a healthy detector).
+ *
+ * Returns null when nothing relaxed — the caller's per-query drifts stand on
+ * their own. Otherwise returns ONE rule-level drift that supersedes the
+ * per-query `engine-relaxed` findings, so the report shows a single decision
+ * instead of one "scope this away" paragraph per trigger.
+ *
+ * @param {object} input
+ * @param {string[]} input.relaxedTriggers  trigger names the engine now accepts
+ * @param {string[]} input.holdingTriggers  trigger names the engine still rejects
+ * @param {string[]} [input.unobservedTriggers] triggers with no comparable verdict
+ * @param {boolean} [input.detectorFlagged] did the detector fire on any relaxed trigger
+ */
+export function classifyRelaxationScope({
+  ruleId,
+  version,
+  relaxedTriggers = [],
+  holdingTriggers = [],
+  unobservedTriggers = [],
+  detectorFlagged = false,
+  wiring,
+  detectorPath,
+}) {
+  if (relaxedTriggers.length === 0) {
+    return null;
+  }
+
+  const where = `${ruleId} @ ${version}`;
+  const base = {
+    ruleId,
+    version,
+    driftVersion: version,
+    role: 'trigger',
+    scope: {
+      relaxed: [...relaxedTriggers],
+      holding: [...holdingTriggers],
+      unobserved: [...unobservedTriggers],
+    },
+  };
+  // How thin is the basis for a "fully relaxed" claim? A rule with ONE pinned
+  // trigger that relaxes proves only that one shape changed; calling that "the
+  // behavior is gone" is a much bigger inference than the data supports. The
+  // count goes in the evidence either way so the reader can judge it, rather
+  // than the tool quietly presenting 1-of-1 as though it were 5-of-5.
+  const observed = relaxedTriggers.length + holdingTriggers.length;
+  const basis = `${relaxedTriggers.length} of ${observed} observed trigger(s) relaxed`;
+
+  // --- Partial: some triggers relaxed, others still rejected ------------------
+  // The engine fixed part of the condition. Scoping the rule out of this version
+  // would ship a false negative on everything in `holding`, so the action is to
+  // narrow the detector to the shapes that still fail.
+  if (holdingTriggers.length > 0) {
+    return {
+      ...base,
+      driftClass: DRIFT_CLASSES.ENGINE_PARTIALLY_RELAXED,
+      evidence:
+        `${where}: engine ${version} now ACCEPTS ${relaxedTriggers.length} of this rule's triggers ` +
+        `(${relaxedTriggers.join(', ')}) but still REJECTS ${holdingTriggers.length} ` +
+        `(${holdingTriggers.join(', ')}) — a PARTIAL fix, ${basis}.`,
+      remediation: {
+        action: REMEDIATIONS.UPDATE_DETECTOR,
+        target: detectorFile(ruleId, detectorPath),
+        detail:
+          `Do NOT scope "${ruleId}" away from ${version}: the engine still rejects ` +
+          `${holdingTriggers.join(', ')}, so a maxVersion below ${version} would drop diagnostics that ` +
+          `are still correct and ship a false NEGATIVE there. Narrow the detector so it stops matching ` +
+          `the now-valid shape(s) (${relaxedTriggers.join(', ')}) while still flagging the rest, then ` +
+          `re-pin the ${version} expectation for the relaxed trigger(s) to detectorCount 0.`,
+      },
+    };
+  }
+
+  // --- Full: every observed trigger relaxed -----------------------------------
+  // Nothing the rule claims is still true on this engine. Version-scoping is now
+  // the right action — with the caveat that "every observed trigger" is only as
+  // strong as the trigger count, which the evidence states.
+  return {
+    ...base,
+    driftClass: DRIFT_CLASSES.ENGINE_RELAXED,
+    evidence:
+      `${where}: engine ${version} now ACCEPTS every observed trigger for this rule ` +
+      `(${relaxedTriggers.join(', ')}) — a FULL fix, ${basis}` +
+      (unobservedTriggers.length > 0
+        ? `; ${unobservedTriggers.length} trigger(s) produced no verdict (${unobservedTriggers.join(', ')}) ` +
+          `and were NOT counted`
+        : '') +
+      '.',
+    remediation: detectorFlagged
+      ? {
+          action: REMEDIATIONS.VERSION_SCOPE_RULE,
+          target: OSD_PATHS.catalog,
+          detail:
+            `Every trigger this contract pins is now valid on ${version}, so "${ruleId}" is a FALSE ` +
+            `POSITIVE there. Set appliesTo.maxVersion just below ${version} to keep protecting users on ` +
+            `older engines; if no supported engine rejects any trigger any more, set "enabled": false and ` +
+            `drop the detector. Then re-pin the ${version} expectations to detectorCount 0.` +
+            (observed < 2
+              ? ` NOTE: this rule pins only ${observed} trigger, so "fully relaxed" rests on a single ` +
+                `observation — confirm with more shapes of the same condition before scoping the rule away.`
+              : '') +
+            (unobservedTriggers.length > 0
+              ? ` NOTE: ${unobservedTriggers.length} trigger(s) produced no verdict on this leg; re-run it ` +
+                `before acting, since one of them may still reject.`
+              : ''),
+        }
+      : {
+          action: REMEDIATIONS.UPDATE_CONTRACT,
+          target: 'this contract file',
+          detail:
+            `The detector already stays silent on ${version}, so no linter change is needed. Re-pin the ` +
+            `${version} expectations to detectorCount 0 / backend.kind "result-shape" to record the ` +
+            `engine's new behavior.`,
+        },
+  };
+}
+
+/**
  * Classify one query's outcome on one engine version.
  *
  * Returns `null` when the detector, the engine and the pinned expectation all
@@ -379,6 +513,13 @@ export function classifyDrift(input) {
   if (role === 'trigger' && expectRejection && backendRejected === false) {
     return {
       ...base,
+      // A single relaxed trigger cannot tell a full fix from a partial one, and the
+      // two need OPPOSITE actions (scope the rule away vs narrow the detector). The
+      // caller aggregates every trigger through `classifyRelaxationScope` and drops
+      // the findings carrying this marker in favour of that one rule-level verdict.
+      // Kept as a finding rather than returning null so a caller that does not
+      // aggregate still reports the relaxation instead of silently passing.
+      supersededBy: DRIFT_CLASSES.ENGINE_PARTIALLY_RELAXED,
       driftClass: DRIFT_CLASSES.ENGINE_RELAXED,
       evidence:
         `${where}: engine ${version} now ACCEPTS a query the contract pinned as rejected ` +

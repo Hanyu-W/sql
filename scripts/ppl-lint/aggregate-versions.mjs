@@ -37,6 +37,8 @@ import { emitAnnotations } from './annotate.mjs';
 import {
   classifyDrift,
   classifyGrammarDrift,
+  classifyRelaxationScope,
+  DRIFT_CLASSES,
   formatDriftReport,
   versionInAppliesTo,
 } from './drift.mjs';
@@ -504,6 +506,19 @@ function main() {
       // no action, unusable means something did not answer and needs a re-run.
       let ruleNotApplicable = 0;
       const unusable = [];
+      // Per-trigger engine verdicts for this rule on this leg, so a relaxation can
+      // be judged across the WHOLE rule rather than one query at a time. A single
+      // relaxed trigger cannot distinguish a full engine fix (scope the rule away)
+      // from a partial one (narrow the detector), and those actions are opposites —
+      // acting on the per-query view ships a false negative in the partial case.
+      // `unobserved` is kept apart from `holding` on purpose: a trigger that never
+      // answered must not be counted as "still rejects", or a timed-out leg would
+      // read as a partial fix and send someone to narrow a healthy detector.
+      const relaxedTriggers = [];
+      const holdingTriggers = [];
+      const unobservedTriggers = [];
+      let relaxedDetectorFlagged = false;
+      const perQueryDrifts = [];
       for (const [queryName, expected] of Object.entries(expectation.queries || {})) {
         const queryDef = (spec.queries || {})[queryName];
         if (!queryDef) {
@@ -550,11 +565,28 @@ function main() {
           unusable.push(
             `${queryName} (${!detectorResult ? 'no detector result' : 'no engine verdict'})`
           );
+          if (role === 'trigger') {
+            unobservedTriggers.push(queryName);
+          }
           continue;
         }
         compared++;
         if (role === 'trigger') {
           triggersCompared++;
+          // Bucket this trigger by what the ENGINE did, but only where the contract
+          // pinned a rejection — a trigger pinned as accepted (an advisory rule like
+          // head-without-sort, whose queries are all valid PPL) never "relaxes", and
+          // counting it as relaxed would fabricate a full-fix verdict for a rule the
+          // engine was never rejecting in the first place.
+          const pinnedRejection = (expected.backend && expected.backend.kind) === 'rejection';
+          if (pinnedRejection) {
+            if (observed.backendRejected === false) {
+              relaxedTriggers.push(queryName);
+              if ((observed.detectorCount || 0) > 0) relaxedDetectorFlagged = true;
+            } else if (observed.backendRejected === true) {
+              holdingTriggers.push(queryName);
+            }
+          }
         }
 
         const drift = classifyDrift({
@@ -581,15 +613,49 @@ function main() {
           // string identifies WHICH `expectations[]` entry produced this finding,
           // so a `update-contract` annotation can land on that entry's line rather
           // than at the top of the file.
-          drifts.push({
+          // Buffered rather than pushed: a relaxation finding is only final once
+          // every trigger has been seen, because the rule-level rollup below
+          // replaces the per-query ones with a single full-vs-partial verdict.
+          perQueryDrifts.push({
             ...drift,
             enforced: isEnforced,
             contractFile: file,
             expectationRange: expectation.version,
             expectationEngine: expectation.engine,
           });
-          ruleDrifts++;
         }
+      }
+
+      // Every trigger has now been observed, so a relaxation can be judged for the
+      // rule as a whole. This supersedes the per-query `engine-relaxed` findings —
+      // they each said "scope this rule away from this version", which is the wrong
+      // action whenever another trigger still rejects.
+      const relaxationScope = classifyRelaxationScope({
+        ruleId,
+        version: leg.version,
+        relaxedTriggers,
+        holdingTriggers,
+        unobservedTriggers,
+        detectorFlagged: relaxedDetectorFlagged,
+        wiring: spec.wiring,
+        detectorPath: spec.detectorPath,
+      });
+      const kept = relaxationScope
+        ? perQueryDrifts.filter((d) => d.supersededBy !== DRIFT_CLASSES.ENGINE_PARTIALLY_RELAXED)
+        : perQueryDrifts;
+      for (const drift of kept) {
+        drifts.push(drift);
+        ruleDrifts++;
+      }
+      if (relaxationScope) {
+        drifts.push({
+          ...relaxationScope,
+          enforced: isEnforced,
+          contractFile: file,
+          expectationRange: expectation.version,
+          expectationEngine: expectation.engine,
+        });
+        ruleDrifts++;
       }
       // "agree" has to mean "we compared the rule's claim and it held". A rule
       // whose every case lost its engine verdict (a timed-out leg) or its detector

@@ -23,6 +23,7 @@ import {
   DRIFT_CLASSES,
   REMEDIATIONS,
   classifyDrift,
+  classifyRelaxationScope,
   formatDriftReport,
   parseVersion,
   suggestParserRules,
@@ -434,6 +435,99 @@ test('rename suggestions prefer containment then near spellings', () => {
   assert.deepEqual(suggestParserRules('rexCommand', ['regexCommand'], 3), ['regexCommand']);
   // Nothing remotely similar: say nothing rather than guess.
   assert.deepEqual(suggestParserRules('rexCommand', ['whereClause', 'sortCommand'], 3), []);
+});
+
+// --- partial vs full relaxation ----------------------------------------------
+//
+// The distinction these tests protect: a rule whose triggers ALL relaxed should be
+// scoped away from the version; a rule where only SOME relaxed must NOT be, because
+// scoping it would drop the diagnostics that are still correct. Getting this
+// backwards converts a partial engine fix into a shipped false negative, so each
+// branch is pinned including the advice text that names the wrong action.
+
+const scopeBase = {
+  ruleId: 'invalid-capture-group-name',
+  version: '3.8.0',
+  detectorFlagged: true,
+};
+
+test('no relaxed trigger yields no rule-level finding', () => {
+  assert.equal(
+    classifyRelaxationScope({ ...scopeBase, relaxedTriggers: [], holdingTriggers: ['a', 'b'] }),
+    null
+  );
+});
+
+test('every trigger relaxed is a FULL fix and advises version scoping', () => {
+  const drift = classifyRelaxationScope({
+    ...scopeBase,
+    relaxedTriggers: ['hyphen', 'leading-digit'],
+    holdingTriggers: [],
+  });
+  assert.equal(drift.driftClass, DRIFT_CLASSES.ENGINE_RELAXED);
+  assert.equal(drift.remediation.action, REMEDIATIONS.VERSION_SCOPE_RULE);
+  assert.match(drift.evidence, /FULL fix, 2 of 2 observed trigger\(s\) relaxed/);
+});
+
+test('some triggers still rejected is a PARTIAL fix and advises the detector, NOT scoping', () => {
+  const drift = classifyRelaxationScope({
+    ...scopeBase,
+    relaxedTriggers: ['hyphen'],
+    holdingTriggers: ['leading-digit', 'all-digits'],
+  });
+  assert.equal(drift.driftClass, DRIFT_CLASSES.ENGINE_PARTIALLY_RELAXED);
+  assert.equal(drift.remediation.action, REMEDIATIONS.UPDATE_DETECTOR);
+  assert.match(drift.evidence, /PARTIAL fix, 1 of 3 observed trigger\(s\) relaxed/);
+  // The advice must say the wrong action out loud. An engineer reading only the
+  // action verb could still reach for maxVersion, which is the regression.
+  assert.match(drift.remediation.detail, /Do NOT scope .* away from 3\.8\.0/);
+  assert.match(drift.remediation.detail, /false NEGATIVE/);
+});
+
+test('a single-trigger rule warns that a FULL verdict rests on one observation', () => {
+  const drift = classifyRelaxationScope({
+    ...scopeBase,
+    relaxedTriggers: ['only-one'],
+    holdingTriggers: [],
+  });
+  assert.equal(drift.driftClass, DRIFT_CLASSES.ENGINE_RELAXED);
+  assert.match(drift.remediation.detail, /only 1 trigger/);
+  assert.match(drift.remediation.detail, /confirm with more shapes/);
+});
+
+test('unobserved triggers are excluded from the tally and named in the advice', () => {
+  // The trap: counting an unobserved trigger as "holding" turns a dead leg into a
+  // partial fix and sends someone to narrow a healthy detector.
+  const drift = classifyRelaxationScope({
+    ...scopeBase,
+    relaxedTriggers: ['a'],
+    holdingTriggers: [],
+    unobservedTriggers: ['b'],
+  });
+  assert.equal(drift.driftClass, DRIFT_CLASSES.ENGINE_RELAXED, 'must not read as partial');
+  assert.match(drift.evidence, /1 of 1 observed trigger\(s\) relaxed/);
+  assert.match(drift.evidence, /1 trigger\(s\) produced no verdict \(b\) and were NOT counted/);
+  assert.match(drift.remediation.detail, /re-run it before acting/);
+});
+
+test('a silent detector on a fully relaxed rule needs no linter change', () => {
+  const drift = classifyRelaxationScope({
+    ...scopeBase,
+    relaxedTriggers: ['a', 'b'],
+    holdingTriggers: [],
+    detectorFlagged: false,
+  });
+  assert.equal(drift.remediation.action, REMEDIATIONS.UPDATE_CONTRACT);
+});
+
+test('the per-query relaxed finding is marked supersedable', () => {
+  // The aggregator drops these in favour of the rule-level verdict; without the
+  // marker it would report both, and the per-query one gives the wrong action.
+  const drift = classifyDrift(
+    agreeingTrigger({ observed: { detectorCount: 1, severities: ['error'], backendRejected: false } })
+  );
+  assert.equal(drift.driftClass, DRIFT_CLASSES.ENGINE_RELAXED);
+  assert.equal(drift.supersededBy, DRIFT_CLASSES.ENGINE_PARTIALLY_RELAXED);
 });
 
 // --- report ------------------------------------------------------------------

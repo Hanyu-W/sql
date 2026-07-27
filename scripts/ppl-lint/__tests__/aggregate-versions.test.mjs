@@ -215,6 +215,133 @@ test('a version where only one engine relaxed is red, and names just that versio
   assert.equal(report.matrix.find((m) => m.version === '3.7.0').status, 'agree');
 });
 
+// --- partial vs full relaxation, end to end ---------------------------------
+//
+// Driven through the real script because the bug this guards is in the AGGREGATION:
+// `classifyDrift` is per-query and cannot see the other triggers, so the rollup has
+// to happen here or the advice is wrong whenever a rule has more than one trigger.
+
+/** A two-trigger contract: the shape that makes partial-vs-full decidable. */
+function writeTwoTriggerContracts() {
+  const dir = makeTmp('ppl-lint-contracts-multi-');
+  const spec = {
+    ...SPEC,
+    queries: {
+      triggerA: { role: 'trigger', query: 'union [ source={{index}} ]' },
+      triggerB: { role: 'trigger', query: 'union [ source={{index}} ] extra' },
+      control: { role: 'control', query: 'union [ source={{index}} ] [ source={{index}} ]' },
+    },
+    expectations: [
+      {
+        version: '>=3.7.0',
+        engine: 'calcite',
+        queries: {
+          triggerA: {
+            detectorCount: 1,
+            severity: 'error',
+            backend: { kind: 'rejection', httpStatus: 400, body: { status: 400, error: REJECTION } },
+          },
+          triggerB: {
+            detectorCount: 1,
+            severity: 'error',
+            backend: { kind: 'rejection', httpStatus: 400, body: { status: 400, error: REJECTION } },
+          },
+          control: { detectorCount: 0, backend: { kind: 'result-shape', httpStatus: 200 } },
+        },
+      },
+    ],
+  };
+  fs.writeFileSync(path.join(dir, 'union.spec.json'), JSON.stringify(spec));
+  fs.writeFileSync(
+    path.join(dir, 'manifest.json'),
+    JSON.stringify({
+      schemaVersion: 3,
+      contracts: ['union.spec.json'],
+      defaultError: ['union.spec.json'],
+    })
+  );
+  return dir;
+}
+
+test('ALL triggers relaxing is a full fix: one rule-level version-scope finding', () => {
+  const legs = {
+    '3.7.0': writeLeg({
+      version: '3.7.0',
+      cases: {
+        triggerA: { detector: 1, rejected: false },
+        triggerB: { detector: 1, rejected: false },
+        control: { detector: 0, rejected: false },
+      },
+    }),
+  };
+  const { status, report } = run({ contracts: writeTwoTriggerContracts(), legs });
+  assert.equal(status, 1);
+  // Exactly ONE finding, not one per trigger: the decision is per rule.
+  assert.equal(report.drifts.length, 1);
+  const drift = report.drifts[0];
+  assert.equal(drift.driftClass, 'engine-relaxed');
+  assert.equal(drift.remediation.action, 'version-scope-rule');
+  assert.deepEqual(drift.scope.relaxed.sort(), ['triggerA', 'triggerB']);
+  assert.deepEqual(drift.scope.holding, []);
+});
+
+test('SOME triggers relaxing is a partial fix: narrow the detector, do NOT scope', () => {
+  // The regression this pins: acting on the per-query view would advise
+  // maxVersion < 3.7, dropping the diagnostic for triggerB which the engine STILL
+  // rejects — converting a partial engine fix into a shipped false negative.
+  const legs = {
+    '3.7.0': writeLeg({
+      version: '3.7.0',
+      cases: {
+        triggerA: { detector: 1, rejected: false },
+        triggerB: { detector: 1, rejected: true },
+        control: { detector: 0, rejected: false },
+      },
+    }),
+  };
+  const { status, report, stdout } = run({ contracts: writeTwoTriggerContracts(), legs });
+  assert.equal(status, 1);
+  const partial = report.drifts.find((d) => d.driftClass === 'engine-partially-relaxed');
+  assert.ok(partial, 'a partial relaxation must be classified as such');
+  assert.equal(partial.remediation.action, 'update-detector');
+  assert.deepEqual(partial.scope.relaxed, ['triggerA']);
+  assert.deepEqual(partial.scope.holding, ['triggerB']);
+  // No finding may survive that tells the engineer to version-scope this rule.
+  assert.equal(
+    report.drifts.filter((d) => d.remediation.action === 'version-scope-rule').length,
+    0,
+    'a partial fix must never advise version-scoping'
+  );
+  assert.match(stdout, /Do NOT scope/);
+});
+
+test('an unobserved trigger does not fake a partial fix', () => {
+  // If the unobserved trigger were counted as "still rejects", this would classify
+  // as partial and send someone to narrow a detector on the strength of a leg that
+  // never answered.
+  const legs = {
+    '3.7.0': writeLegWithTransportError({
+      version: '3.7.0',
+      erroredQuery: 'triggerB',
+      cases: {
+        triggerA: { detector: 1, rejected: false },
+        triggerB: { detector: 1, rejected: true },
+        control: { detector: 0, rejected: false },
+      },
+    }),
+  };
+  const { report } = run({ contracts: writeTwoTriggerContracts(), legs });
+  assert.equal(
+    report.drifts.filter((d) => d.driftClass === 'engine-partially-relaxed').length,
+    0,
+    'an unobserved trigger must not be counted as holding'
+  );
+  const relaxed = report.drifts.find((d) => d.driftClass === 'engine-relaxed');
+  assert.ok(relaxed);
+  assert.deepEqual(relaxed.scope.unobserved, ['triggerB']);
+  assert.match(relaxed.remediation.detail, /produced no verdict/);
+});
+
 test('a rule out of scope on an older engine that accepts is not drift', () => {
   const legs = healthyLegs();
   // 3.6 predates the rule's minVersion and accepts the query: intended silence.
