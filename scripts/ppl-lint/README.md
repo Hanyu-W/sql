@@ -489,7 +489,7 @@ The report also prints per-rule trigger counts and whether each rule has enough
 question above: a rule showing **1 trigger** cannot distinguish the two, and a rule
 showing **0** was not observed at all.
 
-Against OSD `main` on the compiled surface this currently yields **41 triggers with
+Measured on the compiled surface against OSD `main`, this yields **41 triggers with
 9 of 12 rules at ≥2**. The three that remain at one trigger are at the ceiling of
 what OSD's tests contain — `agg-on-text`, `wildcard-source-zero-match` and
 `unsupported-window-function-in-eventstats` each have exactly one trigger written
@@ -497,6 +497,19 @@ there, and their other queries are genuine controls (`stats avg(balance)` on a
 numeric field is valid; `row_number` is the one window function eventstats
 supports). Raising those needs queries nobody has written yet — the point where
 generation, rather than harvesting, is what adds coverage.
+
+The job prefers the **runtime-bundle** surface, exporting the engine's grammar via
+`GET /_plugins/_ppl/_grammar` and falling back to the compiled surface (with a
+warning) if that fails. The runtime surface matters because `lint_runner` SKIPS the
+four `runtimeOnly` rules on the compiled grammar — the productions they walk do not
+exist there — and three of those ship at error severity.
+
+Those four are nonetheless still at **zero** harvested queries, and no surface fixes
+that: OSD's lint tests contain no trigger for `union-min-datasets`,
+`multisearch-min-subsearch` or `replace-wildcard-asymmetry` at all. The only place
+they appear is a negative assertion that they no-op on the compiled surface
+(`analyzer_lint.test.ts`, "runtime-only rules no-op"). Harvesting cannot invent what
+was never written, so these are generation's job, not the harvester's.
 
 This job is `continue-on-error: true` and the labeler always exits zero. A finding
 here is a lead, not a proven defect; failing unrelated PRs on an auto-generated

@@ -830,14 +830,58 @@ jobs:
             -H 'content-type: application/json' \
             -d '{"account_number":1,"balance":39225,"age":32,"status":"ok","firstname":"Amber","lastname":"Duke","msg":"took 42ms","body":"INFO started"}'
 
-      - name: Run the detectors over the discovery corpus
-        working-directory: .ci/OpenSearch-Dashboards
+      # Export this engine's grammar bundle so the detector pass can run on the
+      # RUNTIME surface. That surface matters more than the compiled one here: the
+      # four `runtimeOnly` rules (union/multisearch/replace arity) are SKIPPED by
+      # lint_runner on the compiled grammar because the productions they walk do not
+      # exist there — so a compiled-only discovery run cannot observe them at all,
+      # and three of the four ship at error severity.
+      - name: Export the engine grammar bundle
+        id: bundle
         run: |
           set -uo pipefail
+          if curl -sf --max-time 60 "http://localhost:9200/_plugins/_ppl/_grammar" \
+               -o "$GITHUB_WORKSPACE/discovery-bundle.json"; then
+            hash=$(python3 -c "
+          import json
+          print(json.load(open('$GITHUB_WORKSPACE/discovery-bundle.json')).get('grammarHash',''))
+          ")
+            python3 -c "
+          import json
+          json.dump({'engineVersion': '${{ needs.plan.outputs.discovery_engine }}',
+                     'grammarHash': '$hash'},
+                    open('$GITHUB_WORKSPACE/discovery-target.json','w'))
+          "
+            echo "surface=runtime-bundle" >> "$GITHUB_OUTPUT"
+          else
+            # Not fatal. Discovery is best-effort, and the compiled surface still
+            # covers 12 of the rules — a lead-generator that produces nothing because
+            # one endpoint was unavailable is worse than one with narrower coverage.
+            # The surface is recorded in the report, so a reader can see which ran.
+            echo "::warning::_grammar export failed; falling back to the compiled surface (runtimeOnly rules will not be observed)."
+            echo "surface=compiled-simplified" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run the detectors over the discovery corpus
+        working-directory: .ci/OpenSearch-Dashboards
+        env:
+          SURFACE: ${{ steps.bundle.outputs.surface }}
+        run: |
+          set -uo pipefail
+          # Seeded with a harmless assignment rather than left empty: under `set -u`,
+          # expanding an empty array as "${a[@]}" is an unbound-variable error in bash
+          # before 4.4, which would crash the compiled-surface fallback — the very
+          # path that only runs when something else already went wrong.
+          extra=(PPL_LINT_DISCOVERY=1)
+          if [ "$SURFACE" = 'runtime-bundle' ]; then
+            extra+=(PPL_LINT_GRAMMAR_BUNDLE="$GITHUB_WORKSPACE/discovery-bundle.json"
+                    PPL_LINT_TARGET_MANIFEST="$GITHUB_WORKSPACE/discovery-target.json")
+          fi
           # A non-zero exit is EXPECTED and ignored: the generated specs carry
           # placeholder expectations, so the runner reports a "failure" for every
           # query whose real diagnostic count differs. Only the report is read.
-          PPL_LINT_SURFACE=compiled-simplified \
+          env "${extra[@]}" \
+          PPL_LINT_SURFACE="$SURFACE" \
           PPL_LINT_CONTRACT_DIR="$GITHUB_WORKSPACE/discovery-specs" \
           PPL_LINT_SCHEDULE=nightly \
           PPL_LINT_REPORT="$GITHUB_WORKSPACE/discovery-detector-report.json" \
