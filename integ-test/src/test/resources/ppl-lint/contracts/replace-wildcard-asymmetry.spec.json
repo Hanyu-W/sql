@@ -37,6 +37,10 @@
       "role": "trigger",
       "query": "source={{index}} | replace \"*_a\" with \"b_*_*\" in firstname"
     },
+    "replace-wildcard-count-mismatch-reverse": {
+      "role": "trigger",
+      "query": "source={{index}} | replace \"*_a_*\" with \"b_*\" in firstname"
+    },
     "replace-symmetric-control": {
       "role": "control",
       "query": "source={{index}} | replace \"*_a\" with \"b_*\" in firstname | head 1"
@@ -48,6 +52,21 @@
       "engine": "calcite",
       "queries": {
         "replace-wildcard-count-mismatch": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Invalid Query"
+              }
+            }
+          }
+        },
+        "replace-wildcard-count-mismatch-reverse": {
           "detectorCount": 1,
           "severity": "error",
           "backend": {
@@ -89,6 +108,21 @@
               "error": {
                 "type": "IllegalArgumentException",
                 "reason": "Error in 'replace' command: Wildcard count mismatch - pattern has 1 wildcard(s), replacement has 2. Replacement must have same number of wildcards or none."
+              }
+            }
+          }
+        },
+        "replace-wildcard-count-mismatch-reverse": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Error in 'replace' command: Wildcard count mismatch - pattern has 2 wildcard(s), replacement has 1. Replacement must have same number of wildcards or none."
               }
             }
           }

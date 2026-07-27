@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
   "ruleId": "division-by-zero",
-  "note": "The detector deliberately flags only `/`: division_by_zero.ts pins DIVISION_OPERATOR to \"/\" because modulo-by-zero was never verified live. `modulo-by-zero-not-flagged` is therefore a CONTROL — it documents that boundary rather than asserting a gap.",
+  "note": "The detector deliberately flags only `/`: division_by_zero.ts pins DIVISION_OPERATOR to \"/\" because modulo-by-zero was never verified live. `modulo-by-zero-not-flagged` is therefore a CONTROL \u2014 it documents that boundary rather than asserting a gap.",
   "grammarSurface": "both",
   "schedule": "nightly",
   "wiring": {
@@ -14,8 +14,13 @@
     "appliesTo": {}
   },
   "backendFixture": {
-    "indices": ["ACCOUNT"],
-    "clusterSettings": { "calcite": true, "calciteFallback": false }
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
   },
   "frontendContext": {
     "isCalcite": true
@@ -25,6 +30,10 @@
     "divide-by-zero-literal": {
       "role": "trigger",
       "query": "source={{index}} | eval ratio = balance / 0 | fields ratio | head 1"
+    },
+    "divide-by-decimal-zero-literal": {
+      "role": "trigger",
+      "query": "source={{index}} | eval ratio = balance / 0.0 | fields ratio | head 1"
     },
     "divide-by-nonzero-control": {
       "role": "control",
@@ -42,15 +51,44 @@
         "divide-by-zero-literal": {
           "detectorCount": 1,
           "severity": "warning",
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "ratio" } }
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "columnAllNull": "ratio"
+            }
+          }
+        },
+        "divide-by-decimal-zero-literal": {
+          "detectorCount": 1,
+          "severity": "warning",
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "columnAllNull": "ratio"
+            }
+          }
         },
         "divide-by-nonzero-control": {
           "detectorCount": 0,
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "datarowsNonEmpty": true
+            }
+          }
         },
         "modulo-by-zero-not-flagged": {
           "detectorCount": 0,
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "m" } }
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "columnAllNull": "m"
+            }
+          }
         }
       }
     }

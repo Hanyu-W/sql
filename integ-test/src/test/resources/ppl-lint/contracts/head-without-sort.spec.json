@@ -13,8 +13,13 @@
     "appliesTo": {}
   },
   "backendFixture": {
-    "indices": ["ACCOUNT"],
-    "clusterSettings": { "calcite": true, "calciteFallback": false }
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
   },
   "frontendContext": {
     "isCalcite": true
@@ -24,6 +29,10 @@
     "head-without-sort": {
       "role": "trigger",
       "query": "source={{index}} | head 5"
+    },
+    "head-without-sort-after-where": {
+      "role": "trigger",
+      "query": "source={{index}} | where age > 20 | head 5"
     },
     "head-with-sort-control": {
       "role": "control",
@@ -37,11 +46,34 @@
         "head-without-sort": {
           "detectorCount": 1,
           "severity": "info",
-          "backend": { "kind": "advisory", "httpStatus": 200, "expect": { "accepted": true } }
+          "backend": {
+            "kind": "advisory",
+            "httpStatus": 200,
+            "expect": {
+              "accepted": true
+            }
+          }
+        },
+        "head-without-sort-after-where": {
+          "detectorCount": 1,
+          "severity": "info",
+          "backend": {
+            "kind": "advisory",
+            "httpStatus": 200,
+            "expect": {
+              "accepted": true
+            }
+          }
         },
         "head-with-sort-control": {
           "detectorCount": 0,
-          "backend": { "kind": "advisory", "httpStatus": 200, "expect": { "accepted": true } }
+          "backend": {
+            "kind": "advisory",
+            "httpStatus": 200,
+            "expect": {
+              "accepted": true
+            }
+          }
         }
       }
     }
