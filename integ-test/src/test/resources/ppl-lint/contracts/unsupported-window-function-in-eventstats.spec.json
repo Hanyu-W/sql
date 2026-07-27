@@ -117,7 +117,7 @@
               "status": 500,
               "error": {
                 "type": "UnsupportedOperationException",
-                "reason": "There was internal problem at backend"
+                "reason": "Unexpected window function: dense_rank"
               }
             }
           }
