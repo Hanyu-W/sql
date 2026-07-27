@@ -103,6 +103,14 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
   private String engineVersionRaw;
 
   /**
+   * Whether this cluster recognizes the Calcite settings at all. False on a pre-Calcite (2.x)
+   * engine, where every {@code plugins.calcite.*} write is rejected as "not recognized".
+   * Established once in {@code init()} and honored by {@code applyClusterSettings}, so the whole
+   * family is skipped rather than retried and failed once per contract.
+   */
+  private boolean calciteSettingsSupported = true;
+
+  /**
    * Index fixtures that could not be created on this engine (observe-only mode only). Contracts
    * that need one are reported as {@code outcome: "error"} instead of as engine behavior, because
    * an IndexNotFoundException from a missing fixture is not a verdict about the query.
@@ -127,8 +135,9 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       if (!observeOnly || !isUnrecognizedCalciteSetting(e)) {
         throw e;
       }
+      calciteSettingsSupported = false;
       System.err.println(
-          "[ppl-lint] engine does not support the Calcite setting; observing without it: "
+          "[ppl-lint] engine does not support the Calcite settings; observing without them: "
               + e.getMessage());
       // super.init() aborted partway, so redo the part that is version-independent.
       increaseMaxCompilationsRate();
@@ -736,6 +745,13 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
     }
     JSONObject settings = fixture.optJSONObject("clusterSettings");
     if (settings == null) {
+      return applied;
+    }
+    // Every setting below is Calcite-family, and a pre-Calcite engine rejects all of
+    // them the same way. `init()` already established whether this cluster knows
+    // them, so skip the whole block rather than fail per contract — otherwise the
+    // tolerance added there is undone here, once per contract.
+    if (!calciteSettingsSupported) {
       return applied;
     }
     if (settings.has("calcite")) {
