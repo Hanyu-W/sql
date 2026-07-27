@@ -411,6 +411,33 @@ function main() {
     const appliesTo = (spec.wiring && spec.wiring.appliesTo) || {};
 
     for (const leg of legs) {
+      // A contract only speaks for the surface(s) it declares. Judge it on any
+      // other leg and every verdict is meaningless: a runtime-bundle contract on a
+      // compiled leg yields "the engine rejects but the rule is scoped away"
+      // (version-scope-too-narrow) and "no expectation covers this engine"
+      // (coverage hole) — both about a surface the contract never claimed to
+      // describe. Checked FIRST, before scope, grammar and coverage, because all
+      // three of those produce confident findings from an irrelevant comparison.
+      const contractSurface = spec.grammarSurface || 'runtime-bundle';
+      const legSurface = leg.surface || 'runtime-bundle';
+      if (contractSurface !== 'both' && contractSurface !== legSurface) {
+        notApplicable.push({
+          ruleId,
+          version: leg.version,
+          leg: leg.label,
+          surface: legSurface,
+          reason: `contract declares grammarSurface "${contractSurface}"`,
+        });
+        matrix.push({
+          ruleId,
+          version: leg.version,
+          leg: leg.label,
+          status: 'not-applicable',
+          drifts: 0,
+        });
+        continue;
+      }
+
       const inScope = versionInAppliesTo(appliesTo, leg.version);
 
       // A parser rule that vanished from the grammar is one fact about this

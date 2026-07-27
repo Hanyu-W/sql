@@ -505,6 +505,9 @@ function main() {
 
   const contracts = loadContracts();
   const failures = [];
+  // Contracts this surface did not score, recorded so the report says a rule was
+  // skipped for surface rather than leaving its absence unexplained.
+  const skippedForSurface = [];
   const report = {
     osdRoot,
     schedule,
@@ -514,6 +517,9 @@ function main() {
     // `runtimeOnly` rules, and mixing the two surfaces under one label would
     // report a deliberately-inert rule as a regression.
     surface,
+    // Contracts whose declared `grammarSurface` excludes this run, so a reader can
+    // see WHY a rule has no scored cases here.
+    skippedForSurface,
     grammarHash: target.grammarHash || '',
     differential: !!backendReport,
     // Census of the rules that ship enabled at ERROR severity, read from the OSD
@@ -544,6 +550,35 @@ function main() {
     const contractSchedule = spec.schedule || 'pr';
     if (schedule === 'pr' && contractSchedule !== 'pr') {
       log(`SKIP ${ruleId} (schedule=${contractSchedule}, running ${schedule}) — ${path.basename(file)}`);
+      continue;
+    }
+
+    // A contract declares the surface its expectations were verified against.
+    // Until now that field was decorative; honoring it keeps a runtime-bundle
+    // contract from being scored on a compiled leg, where its rule may legitimately
+    // behave differently. `both` opts into being checked on either surface.
+    const contractSurface = spec.grammarSurface || 'runtime-bundle';
+    if (contractSurface !== 'both' && contractSurface !== surface) {
+      log(
+        `SKIP ${ruleId} (grammarSurface=${contractSurface}, running ${surface}) — ` +
+          `${path.basename(file)}`
+      );
+      skippedForSurface.push({ ruleId, contractSurface });
+      // Emit an explicit not-applicable row per query rather than dropping the rule.
+      // Dropping it leaves the aggregator with no rows at all, which it correctly
+      // reads as `inconclusive` — "we could not check" — and fails on. But nothing
+      // went wrong here and there is nothing to re-run: this contract simply does
+      // not describe this surface.
+      for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
+        report.results.push({
+          ruleId,
+          queryName,
+          role: queryDef.role || 'trigger',
+          query: (queryDef.query || '').split('{{index}}').join(index),
+          surface,
+          notApplicable: `contract declares grammarSurface "${contractSurface}"`,
+        });
+      }
       continue;
     }
 

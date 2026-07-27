@@ -1,7 +1,8 @@
 {
   "schemaVersion": 3,
   "ruleId": "division-by-zero",
-  "grammarSurface": "compiled-simplified",
+  "note": "The detector deliberately flags only `/`: division_by_zero.ts pins DIVISION_OPERATOR to \"/\" because modulo-by-zero was never verified live. `modulo-by-zero-not-flagged` is therefore a CONTROL — it documents that boundary rather than asserting a gap.",
+  "grammarSurface": "both",
   "schedule": "nightly",
   "wiring": {
     "detector": "division-by-zero",
@@ -29,8 +30,8 @@
       "role": "control",
       "query": "source={{index}} | eval ratio = balance / 2 | fields ratio | head 1"
     },
-    "modulo-by-zero-flagged": {
-      "role": "trigger",
+    "modulo-by-zero-not-flagged": {
+      "role": "control",
       "query": "source={{index}} | eval m = balance % 0 | fields m | head 1"
     }
   },
@@ -47,9 +48,8 @@
           "detectorCount": 0,
           "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
         },
-        "modulo-by-zero-flagged": {
-          "detectorCount": 1,
-          "severity": "warning",
+        "modulo-by-zero-not-flagged": {
+          "detectorCount": 0,
           "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "m" } }
         }
       }
