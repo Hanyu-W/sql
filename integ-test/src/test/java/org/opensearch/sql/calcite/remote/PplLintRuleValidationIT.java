@@ -606,6 +606,13 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
   private void exportGrammarArtifacts(List<String> failures) {
     String bundlePath = System.getProperty("ppl.lint.grammar.bundle");
     if (bundlePath == null || bundlePath.isEmpty()) {
+      // No bundle requested. That is a compiled-surface leg (an engine predating
+      // GET /_plugins/_ppl/_grammar) or a local run. The target manifest still has
+      // to be written: it carries the engine version every consumer keys on, and
+      // the multi-version aggregator treats a leg without one as fatal. Writing it
+      // only alongside the bundle silently produced legs the aggregator could not
+      // read.
+      writeTargetManifest("", failures);
       return;
     }
     try {
@@ -615,20 +622,38 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
 
       JSONObject bundle = new JSONObject(bundleBody);
       String grammarHash = bundle.optString("grammarHash", "");
-
-      String targetPath = System.getProperty("ppl.lint.target");
-      if (targetPath != null && !targetPath.isEmpty()) {
-        JSONObject target =
-            new JSONObject()
-                .put("engineVersion", engineVersionRaw == null ? "" : engineVersionRaw)
-                .put("grammarHash", grammarHash)
-                .put("grammarBundle", Paths.get(bundlePath).getFileName().toString());
-        Files.write(Paths.get(targetPath), target.toString(2).getBytes(StandardCharsets.UTF_8));
-      }
+      writeTargetManifest(grammarHash, Paths.get(bundlePath).getFileName().toString(), failures);
       log("_grammar", "export", "wrote candidate bundle (" + grammarHash + ") to " + bundlePath);
     } catch (Exception e) {
       failures.add(
           "[grammar-export] failed to fetch/write " + GRAMMAR_API_ENDPOINT + ": " + e.getMessage());
+    }
+  }
+
+  /** Target manifest for a leg with no grammar bundle (compiled surface / local run). */
+  private void writeTargetManifest(String grammarHash, List<String> failures) {
+    writeTargetManifest(grammarHash, "", failures);
+  }
+
+  /**
+   * Write {@code ppl.lint.target}: the engine version, the grammar hash when there is one, and the
+   * bundle filename when one was exported. Every consumer keys on {@code engineVersion}, so this is
+   * written whether or not a bundle exists.
+   */
+  private void writeTargetManifest(String grammarHash, String bundleName, List<String> failures) {
+    String targetPath = System.getProperty("ppl.lint.target");
+    if (targetPath == null || targetPath.isEmpty()) {
+      return;
+    }
+    try {
+      JSONObject target =
+          new JSONObject()
+              .put("engineVersion", engineVersionRaw == null ? "" : engineVersionRaw)
+              .put("grammarHash", grammarHash)
+              .put("grammarBundle", bundleName);
+      Files.write(Paths.get(targetPath), target.toString(2).getBytes(StandardCharsets.UTF_8));
+    } catch (Exception e) {
+      failures.add("[grammar-export] failed to write " + targetPath + ": " + e.getMessage());
     }
   }
 
