@@ -18,6 +18,7 @@ import java.util.Optional;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.hc.client5.http.auth.AuthScope;
 import org.apache.hc.client5.http.auth.UsernamePasswordCredentials;
+import org.apache.hc.client5.http.impl.async.HttpAsyncClientBuilder;
 import org.apache.hc.client5.http.impl.auth.BasicCredentialsProvider;
 import org.apache.hc.client5.http.impl.nio.PoolingAsyncClientConnectionManagerBuilder;
 import org.apache.hc.client5.http.ssl.ClientTlsStrategyBuilder;
@@ -28,6 +29,7 @@ import org.apache.hc.core5.http.ParseException;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 import org.apache.hc.core5.http.message.BasicHeader;
 import org.apache.hc.core5.http.nio.ssl.TlsStrategy;
+import org.apache.hc.core5.http2.HttpVersionPolicy;
 import org.apache.hc.core5.ssl.SSLContextBuilder;
 import org.apache.hc.core5.util.Timeout;
 import org.apache.logging.log4j.LogManager;
@@ -255,10 +257,37 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
             credentialsProvider.setCredentials(
                 new AuthScope(null, -1),
                 new UsernamePasswordCredentials(userName, password.toCharArray()));
-            return httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider);
+            return forceHttp11(
+                httpClientBuilder.setDefaultCredentialsProvider(credentialsProvider));
           });
+    } else {
+      builder.setHttpClientConfigCallback(OpenSearchSQLRestTestCase::forceHttp11);
     }
     OpenSearchRestTestCase.configureClient(builder, settings);
+  }
+
+  /**
+   * Pin a client to HTTP/1.1.
+   *
+   * <p>{@code RestClientBuilder} builds its async client with no version policy, which in
+   * HttpClient 5.x means "negotiate h2". Against a server that supports h2 that is fine; against
+   * one that does not, the async I/O reactor stalls instead of falling back, so every request fails
+   * with {@code SocketTimeoutException} after the full response timeout — thrown from {@code
+   * AbstractSingleCoreIOReactor.execute} before a single test runs.
+   *
+   * <p>Live-verified on the PPL lint multi-version matrix: an {@code --http2} probe against engine
+   * 3.5.0 negotiated HTTP/2 and that leg PASSED, while the same probe against 2.19.0 reported
+   * HTTP/1.1 and the leg timed out at exactly 60s. curl falls back cleanly; this client does not.
+   * These tests never need h2, so asking for 1.1 up front removes the negotiation and works across
+   * every supported engine line.
+   *
+   * <p>Applied INSIDE each config callback rather than as its own {@code
+   * setHttpClientConfigCallback} call, because that setter replaces rather than accumulates: a
+   * separate call would silently drop the credentials or TLS configuration set here, and only on
+   * the paths where it matters.
+   */
+  private static HttpAsyncClientBuilder forceHttp11(HttpAsyncClientBuilder httpClientBuilder) {
+    return httpClientBuilder.setVersionPolicy(HttpVersionPolicy.FORCE_HTTP_1);
   }
 
   protected static void configureHttpsClient(
@@ -292,12 +321,13 @@ public abstract class OpenSearchSQLRestTestCase extends OpenSearchRestTestCase {
                     .setHostnameVerifier(NoopHostnameVerifier.INSTANCE)
                     .build();
 
-            return httpClientBuilder
-                .setDefaultCredentialsProvider(credentialsProvider)
-                .setConnectionManager(
-                    PoolingAsyncClientConnectionManagerBuilder.create()
-                        .setTlsStrategy(tlsStrategy)
-                        .build());
+            return forceHttp11(
+                httpClientBuilder
+                    .setDefaultCredentialsProvider(credentialsProvider)
+                    .setConnectionManager(
+                        PoolingAsyncClientConnectionManagerBuilder.create()
+                            .setTlsStrategy(tlsStrategy)
+                            .build()));
           } catch (Exception e) {
             throw new RuntimeException(e);
           }
