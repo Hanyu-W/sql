@@ -280,32 +280,36 @@ public class TestUtils {
         boolean terminalNewline = i == lines.length - 1 && trimmed.isEmpty();
         if (!terminalNewline) {
           if (trimmed.isEmpty()) {
-            throw new IllegalArgumentException(
-                "analytics bulk payload contains a blank NDJSON line");
-          }
-
-          JSONObject json = new JSONObject(trimmed);
-          if (expectSource) {
-            boolean removedAny = false;
-            for (List<String> path : droppedPaths) {
-              removedAny |= removePath(json, path, 0);
-            }
-            // Only rewrite the line if we actually removed something; otherwise leave it verbatim
-            // so untouched docs stay byte-for-byte identical to the fixture.
-            if (removedAny) {
-              line = json.toString();
-            }
-            expectSource = false;
-          } else {
-            String operation = bulkOperation(json);
-            if ("update".equals(operation) || "delete".equals(operation)) {
+            if (expectSource) {
               throw new IllegalArgumentException(
-                  "analytics append-only bulk payload does not support " + operation + " actions");
+                  "analytics bulk action is missing its source document");
             }
-            if ("index".equals(operation) && removeCustomDocumentId(json, operation)) {
-              line = json.toString();
+          } else {
+            JSONObject json = new JSONObject(trimmed);
+            if (expectSource) {
+              boolean removedAny = false;
+              for (List<String> path : droppedPaths) {
+                removedAny |= removePath(json, path, 0);
+              }
+              // Only rewrite the line if we actually removed something; otherwise leave it
+              // verbatim so untouched docs stay byte-for-byte identical to the fixture.
+              if (removedAny) {
+                line = json.toString();
+              }
+              expectSource = false;
+            } else {
+              String operation = bulkOperation(json);
+              if ("update".equals(operation) || "delete".equals(operation)) {
+                throw new IllegalArgumentException(
+                    "analytics append-only bulk payload does not support "
+                        + operation
+                        + " actions");
+              }
+              if ("index".equals(operation) && removeCustomDocumentId(json, operation)) {
+                line = json.toString();
+              }
+              expectSource = true;
             }
-            expectSource = true;
           }
         }
         out.append(line);
