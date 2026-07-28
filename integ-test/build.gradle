@@ -300,6 +300,7 @@ def getGeoSpatialPlugin() {
 ext.pluginVersion = opensearch_version.tokenize('-')[0]
 ext.featureBuildBase = project.findProperty('analyticsFeatureBuildBase') ?:
         "https://ci.opensearch.org/ci/dbc/feature-build-opensearch/feature-datafusion/latest/linux/x64/tar/builds/opensearch/plugins"
+ext.featureBuildArtifactRoot = featureBuildBase.replaceFirst('/plugins/?$', '')
 ext.analyticsEngineZipDest = "${buildDir}/distributions/analytics-engine-${pluginVersion}-SNAPSHOT.zip"
 ext.arrowFlightRpcZipDest = "${buildDir}/distributions/arrow-flight-rpc-${pluginVersion}-SNAPSHOT.zip"
 ext.arrowBaseZipDest = "${buildDir}/distributions/arrow-base-${pluginVersion}-SNAPSHOT.zip"
@@ -308,6 +309,16 @@ ext.analyticsBackendLuceneZipDest = "${buildDir}/distributions/analytics-backend
 ext.parquetDataFormatZipDest = "${buildDir}/distributions/parquet-data-format-${pluginVersion}-SNAPSHOT.zip"
 ext.compositeEngineZipDest = "${buildDir}/distributions/composite-engine-${pluginVersion}-SNAPSHOT.zip"
 ext.analyticsBackendDatafusionZipDest = "${buildDir}/distributions/analytics-backend-datafusion-${pluginVersion}-SNAPSHOT.zip"
+ext.analyticsNativeLibUrl = project.findProperty('analyticsNativeLibUrl') ?:
+        "${featureBuildArtifactRoot}/dist/libopensearch_native.so"
+ext.analyticsNativeLibDest = "${buildDir}/native/${pluginVersion}/release/libopensearch_native.so"
+ext.analyticsNativeLibDir = project.findProperty('nativeLibPath') ?
+        rootProject.file(project.findProperty('nativeLibPath')).canonicalFile :
+        file(analyticsNativeLibDest).parentFile.canonicalFile
+ext.analyticsJavaLibraryPath = [
+        analyticsNativeLibDir.absolutePath,
+        System.getProperty('java.library.path')
+].findAll { it != null && !it.isEmpty() }.join(File.pathSeparator)
 
 task downloadAnalyticsEngineZip(type: Download) {
     src "${featureBuildBase}/1-analytics-engine-${pluginVersion}.zip"
@@ -371,6 +382,50 @@ task downloadAnalyticsBackendDatafusionZip(type: Download) {
     overwrite false
     onlyIfModified true
     onlyIf { !project.findProperty('analyticsBackendDatafusionZip') }
+}
+
+task downloadAnalyticsNativeLib(type: Download) {
+    src analyticsNativeLibUrl
+    dest analyticsNativeLibDest
+    // The mutable observation URL can publish another build under the same
+    // product version. Revalidate an existing file and never expose a partial
+    // download to the test cluster.
+    overwrite true
+    onlyIfModified true
+    tempAndMove true
+    retries 3
+    onlyIf { !project.findProperty('nativeLibPath') }
+    doFirst {
+        def osName = System.getProperty('os.name', '').toLowerCase(Locale.ROOT)
+        def osArch = System.getProperty('os.arch', '').toLowerCase(Locale.ROOT)
+        if (!osName.contains('linux') || !(osArch in ['amd64', 'x86_64'])) {
+            throw new GradleException(
+                    "The default analytics native artifact is Linux/x64 only " +
+                    "(detected ${osName}/${osArch}); pass -PnativeLibPath=<compatible-release-directory>.")
+        }
+    }
+}
+
+task validateAnalyticsNativeLib {
+    dependsOn downloadAnalyticsNativeLib
+    doLast {
+        File nativeLib = new File(analyticsNativeLibDir, 'libopensearch_native.so')
+        if (!nativeLib.isFile() || !nativeLib.canRead() || nativeLib.length() == 0) {
+            throw new GradleException(
+                    "Expected a readable non-empty native library at ${nativeLib}. " +
+                    "Pass -PnativeLibPath=<directory-containing-libopensearch_native.so> " +
+                    "or -PanalyticsNativeLibUrl=<artifact-url>.")
+        }
+        byte[] magic = new byte[4]
+        int bytesRead
+        nativeLib.withInputStream { stream -> bytesRead = stream.read(magic) }
+        if (bytesRead != magic.length ||
+                (magic[0] & 0xff) != 0x7f || (magic[1] & 0xff) != 0x45 ||
+                (magic[2] & 0xff) != 0x4c || (magic[3] & 0xff) != 0x46) {
+            throw new GradleException(
+                    "Analytics native library ${nativeLib} is not an ELF shared object.")
+        }
+    }
 }
 
 def getAnalyticsEnginePlugin() {
@@ -479,10 +534,9 @@ testClusters {
         systemProperty 'io.netty.tryReflectionSetAccessible', 'true'
         systemProperty 'opensearch.experimental.feature.pluggable.dataformat.enabled', 'true'
         systemProperty 'opensearch.experimental.feature.transport.stream.enabled', 'true'
-        // Native library path for DataFusion/parquet -- pass via -PnativeLibPath=/path/to/release/
-        if (project.findProperty('nativeLibPath')) {
-            systemProperty 'java.library.path', project.findProperty('nativeLibPath')
-        }
+        // DataFusion/parquet loads libopensearch_native.so at cluster startup. Use the
+        // matching feature-build artifact unless a local release directory is supplied.
+        systemProperty 'java.library.path', analyticsJavaLibraryPath
     }
 }
 
@@ -547,7 +601,8 @@ task analyticsEnginePplLintIT(type: RestIntegTestTask) {
     useCluster testClusters.analyticsEnginePplLintIT
     dependsOn downloadArrowBaseZip, downloadArrowFlightRpcZip, downloadAnalyticsEngineZip,
             downloadCompositeEngineZip, downloadParquetDataFormatZip,
-            downloadAnalyticsBackendLuceneZip, downloadAnalyticsBackendDatafusionZip
+            downloadAnalyticsBackendLuceneZip, downloadAnalyticsBackendDatafusionZip,
+            validateAnalyticsNativeLib
     dependsOn ':opensearch-sql-plugin:bundlePlugin'
 
     systemProperty 'tests.analytics.parquet_indices', 'true'

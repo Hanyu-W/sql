@@ -63,10 +63,16 @@ function assertBackendOracle(oracle, ruleId, executionBackend) {
   if (!Number.isInteger(oracle.httpStatus) || oracle.httpStatus < 100 || oracle.httpStatus > 599) {
     throw new TypeError(`${label}.httpStatus must be an integer from 100 through 599.`);
   }
+  if ((kind === 'result-shape' || kind === 'advisory') && oracle.httpStatus !== 200) {
+    throw new TypeError(`${label}.httpStatus must be 200.`);
+  }
   if (kind === 'rejection') {
     const body = requireObject(oracle.body, `${label}.body`);
     if (!Number.isInteger(body.status)) {
       throw new TypeError(`${label}.body.status must be an integer.`);
+    }
+    if (body.status !== oracle.httpStatus) {
+      throw new TypeError(`${label}.httpStatus must equal ${label}.body.status.`);
     }
     if (body.error !== undefined) {
       const error = requireObject(body.error, `${label}.body.error`);

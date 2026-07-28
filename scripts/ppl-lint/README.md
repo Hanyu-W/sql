@@ -89,6 +89,8 @@ OSD_REF=<osdSha> ./scripts/ppl-lint-rule-validation.sh
 PPL_LINT_SCHEDULE=nightly ./scripts/ppl-lint-rule-validation.sh
 
 # Run the corpus through the full composite/Parquet + DataFusion stack.
+# The published default stack is Linux/x64; other platforms need compatible
+# local plugin artifacts and -PnativeLibPath.
 RUN_ANALYTICS=1 ./scripts/ppl-lint-rule-validation.sh
 
 # Use locally built analytics plugins (all trailing arguments pass to Gradle).

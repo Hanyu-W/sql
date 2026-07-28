@@ -557,6 +557,8 @@ jobs:
     needs: Get-CI-Image-Tag
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      ANALYTICS_FEATURE_BUILD_LATEST: https://ci.opensearch.org/ci/dbc/feature-build-opensearch/feature-datafusion/latest/linux/x64/tar/builds/opensearch
     container:
       image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
       options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
@@ -573,18 +575,133 @@ jobs:
           distribution: 'temurin'
           java-version: 25
 
-      - name: Run analytics contract observation against the PR build
+      - name: Resolve analytics feature build
+        id: analytics-build
         run: |
           set -euo pipefail
           mkdir -p leg
+          requested_manifest="${ANALYTICS_FEATURE_BUILD_LATEST}/manifest.yml"
+          resolved_manifest=$(curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors \
+            --output leg/analytics-feature-manifest.yml \
+            --write-out '%{url_effective}' \
+            "$requested_manifest")
+          artifact_root="${resolved_manifest%/manifest.yml}"
+          plugin_base="${artifact_root}/plugins"
+          native_url="${artifact_root}/dist/libopensearch_native.so"
+          {
+            echo "artifact_root=$artifact_root"
+            echo "plugin_base=$plugin_base"
+            echo "native_url=$native_url"
+          } >> "$GITHUB_OUTPUT"
+          ANALYTICS_ARTIFACT_ROOT="$artifact_root" \
+          ANALYTICS_PLUGIN_BASE="$plugin_base" \
+          ANALYTICS_NATIVE_URL="$native_url" \
+          ANALYTICS_RESOLVED_MANIFEST="$resolved_manifest" \
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          manifest = Path("leg/analytics-feature-manifest.yml")
+          context = {
+              "schemaVersion": 1,
+              "stage": "feature-build-resolved",
+              "sqlSha": os.environ["GITHUB_SHA"],
+              "executionBackend": "analytics",
+              "storage": "composite-parquet",
+              "artifactRoot": os.environ["ANALYTICS_ARTIFACT_ROOT"],
+              "pluginBase": os.environ["ANALYTICS_PLUGIN_BASE"],
+              "nativeLibraryUrl": os.environ["ANALYTICS_NATIVE_URL"],
+              "resolvedManifestUrl": os.environ["ANALYTICS_RESOLVED_MANIFEST"],
+              "manifestSha256": "sha256:" + hashlib.sha256(manifest.read_bytes()).hexdigest(),
+          }
+          Path("leg/analytics-bootstrap.json").write_text(
+              json.dumps(context, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Run analytics contract observation against the PR build
+        id: analytics-observation
+        env:
+          ANALYTICS_FEATURE_BUILD_BASE: ${{ steps.analytics-build.outputs.plugin_base }}
+          ANALYTICS_NATIVE_LIB_URL: ${{ steps.analytics-build.outputs.native_url }}
+        run: |
+          set -euo pipefail
           chown -R 1000:1000 "$(pwd)"
           su "$(id -un 1000)" -c "./gradlew :integ-test:analyticsEnginePplLintIT \
+            -PanalyticsFeatureBuildBase=${ANALYTICS_FEATURE_BUILD_BASE} \
+            -PanalyticsNativeLibUrl=${ANALYTICS_NATIVE_LIB_URL} \
             -Dppl.lint.schedule=nightly \
             -Dppl.lint.observe.only=true \
             -Dppl.lint.sql_sha=${GITHUB_SHA} \
             -Dppl.lint.report=$(pwd)/leg/backend-report.json \
             -Dppl.lint.grammar.bundle=$(pwd)/leg/ppl-grammar-bundle.json \
             -Dppl.lint.target=$(pwd)/leg/target.json"
+
+      - name: Record analytics bootstrap provenance
+        if: ${{ always() }}
+        env:
+          OBSERVATION_OUTCOME: ${{ steps.analytics-observation.outcome }}
+          ANALYTICS_ARTIFACT_ROOT: ${{ steps.analytics-build.outputs.artifact_root }}
+          ANALYTICS_PLUGIN_BASE: ${{ steps.analytics-build.outputs.plugin_base }}
+          ANALYTICS_NATIVE_URL: ${{ steps.analytics-build.outputs.native_url }}
+        run: |
+          mkdir -p leg
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+
+          context_file = Path("leg/analytics-bootstrap.json")
+          if context_file.exists():
+              context = json.loads(context_file.read_text(encoding="utf-8"))
+          else:
+              context = {
+                  "schemaVersion": 1,
+                  "sqlSha": os.environ["GITHUB_SHA"],
+                  "executionBackend": "analytics",
+                  "storage": "composite-parquet",
+                  "artifactRoot": os.environ.get("ANALYTICS_ARTIFACT_ROOT") or None,
+                  "pluginBase": os.environ.get("ANALYTICS_PLUGIN_BASE") or None,
+                  "nativeLibraryUrl": os.environ.get("ANALYTICS_NATIVE_URL") or None,
+              }
+
+          def describe(file):
+              digest = hashlib.sha256()
+              with file.open("rb") as stream:
+                  for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return {
+                  "path": str(file),
+                  "size": file.stat().st_size,
+                  "sha256": "sha256:" + digest.hexdigest(),
+              }
+
+          distributions = Path("integ-test/build/distributions")
+          native_libraries = sorted(
+              Path("integ-test/build/native").glob(
+                  "*/release/libopensearch_native.so"
+              )
+          )
+          artifacts = (
+              [describe(file) for file in sorted(distributions.glob("*.zip"))]
+              if distributions.is_dir()
+              else []
+          )
+          artifacts.extend(describe(file) for file in native_libraries)
+          context["stage"] = "observation-finished"
+          context["outcome"] = os.environ.get("OBSERVATION_OUTCOME") or "not-run"
+          context["effectiveJavaLibraryPaths"] = [
+              str(file.parent) for file in native_libraries
+          ]
+          context["downloadedArtifacts"] = artifacts
+          context_file.write_text(
+              json.dumps(context, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
 
       - name: Upload analytics leg artifacts
         if: ${{ always() }}
@@ -628,6 +745,22 @@ jobs:
     steps:
       - name: Checkout SQL pull request
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Download all leg artifacts
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          pattern: ppl-lint-leg-*
+          path: legs
+
+      - name: Validate PR-build target identity
+        run: |
+          node scripts/ppl-lint/validate-pr-build-targets.mjs \
+            --standard legs/ppl-lint-leg-pr-build/target.json \
+            --analytics legs/ppl-lint-leg-pr-build-analytics/target.json \
+            --standard-report legs/ppl-lint-leg-pr-build/backend-report.json \
+            --analytics-report legs/ppl-lint-leg-pr-build-analytics/backend-report.json \
+            --contracts integ-test/src/test/resources/ppl-lint/contracts \
+            --schedule nightly
 
       - name: Checkout OpenSearch-Dashboards
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -673,12 +806,6 @@ jobs:
             sleep 10
           done
           exit 1
-
-      - name: Download all leg artifacts
-        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
-        with:
-          pattern: ppl-lint-leg-*
-          path: legs
 
       # One detector pass per leg, each against THAT engine's grammar bundle. The
       # runner is the same SQL-owned script the single-version workflow uses, so
@@ -783,6 +910,7 @@ jobs:
             --contracts "$GITHUB_WORKSPACE/integ-test/src/test/resources/ppl-lint/contracts" \
             --out "$GITHUB_WORKSPACE/drift-report.json" \
             --summary "$GITHUB_STEP_SUMMARY" \
+            --all-rules \
             --observe-analytics \
             "${args[@]}"
 
@@ -797,6 +925,8 @@ jobs:
             legs/**/detector-report.json
             legs/**/detector.log
             legs/**/target.json
+            legs/**/analytics-bootstrap.json
+            legs/**/analytics-feature-manifest.yml
 
   # Discovery: harvest queries from OSD's own lint tests, run both halves over them,
   # and report detector/engine disagreements as LEADS.
