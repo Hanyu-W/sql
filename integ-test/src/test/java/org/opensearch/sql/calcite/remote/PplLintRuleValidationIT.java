@@ -169,6 +169,8 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       // super.init() aborted partway, so redo the part that is version-independent.
       increaseMaxCompilationsRate();
     }
+    clusterVersion = fetchClusterVersion();
+
     // Fall through to fixture seeding either way.
     // Seed the union of every index every scheduled contract needs, once.
     for (String indexEnum : requiredIndexEnums()) {
@@ -194,7 +196,6 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
             "[ppl-lint] could not seed index " + indexEnum + " on this engine: " + e.getMessage());
       }
     }
-    clusterVersion = fetchClusterVersion();
   }
 
   @Test
@@ -221,6 +222,8 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
         String ruleId = contract.getString("ruleId");
         runContract(contract, ruleId, failures, report);
       }
+    } else {
+      recordUnattestedRouteContracts(contracts, report);
     }
 
     try {
@@ -362,6 +365,52 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       }
     } finally {
       resetClusterSettings(applied);
+    }
+  }
+
+  /**
+   * Route attestation failure prevents query execution, but it must not produce a misleadingly
+   * empty report. Emit one non-verdict row per query; explicit, complete non-applicable rows remain
+   * non-applicable because they do not depend on the unavailable fixture.
+   */
+  private void recordUnattestedRouteContracts(List<JSONObject> contracts, JSONArray report) {
+    for (JSONObject contract : contracts) {
+      String ruleId = contract.getString("ruleId");
+      String index = contract.getString("index");
+      JSONObject queries = contract.getJSONObject("queries");
+      JSONObject fixture = contract.optJSONObject("backendFixture");
+      List<JSONObject> matches =
+          matchingExpectations(
+              contract.getJSONArray("expectations"), fixtureCalciteEnabled(fixture));
+      JSONObject expectedQueries =
+          matches.size() == 1 ? matches.get(0).optJSONObject("queries") : null;
+
+      for (String queryName : queries.keySet()) {
+        JSONObject queryDef = queries.getJSONObject(queryName);
+        String role = queryDef.optString("role", "trigger");
+        String query = queryDef.getString("query").replace("{{index}}", index);
+        JSONObject expected =
+            expectedQueries == null ? null : expectedQueries.optJSONObject(queryName);
+        JSONObject backend = null;
+        int schemaVersion = contract.optInt("schemaVersion");
+        if (expected != null && (schemaVersion == 3 || schemaVersion == 4)) {
+          try {
+            backend = resolveBackendOracle(schemaVersion, expected);
+          } catch (RuntimeException ignored) {
+            // Malformed contracts are still failures; keep this report row as a non-verdict.
+          }
+        }
+        JSONObject entry = reportEntry(ruleId, queryName, role, query, "route-attestation-failed");
+        if (isCompleteNotApplicableOracle(backend)) {
+          entry.put("kind", "not-applicable");
+          recordNotApplicable(ruleId, queryName, backend, entry, report);
+        } else {
+          report.put(
+              entry
+                  .put("outcome", "error")
+                  .put("error", "analytics route attestation failed before contract execution"));
+        }
+      }
     }
   }
 
@@ -1283,15 +1332,25 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       requireIndexSetting(
           indexName, settings, "index.number_of_shards", Integer.toString(expectedShards));
 
-      Response countResponse =
-          client().performRequest(new Request("GET", "/" + indexName + "/_count"));
-      long count = new JSONObject(getResponseBody(countResponse, true)).getLong("count");
+      long count = analyticsDocumentCount(indexName);
       documentCounts.put(indexName, count);
       fixtureEvidence.put("documentCount", count);
       requireAttestation(
           count > 0,
           "fixture " + indexName + " contains no documents; fixture ingestion did not complete");
     }
+  }
+
+  private long analyticsDocumentCount(String indexName) throws IOException {
+    JSONObject response =
+        executeQuery("source=" + indexName + " | stats count() as document_count");
+    JSONArray rows = response.getJSONArray("datarows");
+    requireAttestation(rows.length() == 1, "fixture " + indexName + " count returned " + rows);
+    JSONArray row = rows.getJSONArray(0);
+    requireAttestation(
+        row.length() == 1 && row.get(0) instanceof Number,
+        "fixture " + indexName + " count did not return one numeric value: " + rows);
+    return ((Number) row.get(0)).longValue();
   }
 
   private String canonicalJson(Object value) {
@@ -1803,10 +1862,19 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
     return names;
   }
 
-  /** Union of index enums required by the contracts scheduled to run this session. */
+  /**
+   * Union of index enums required by the contracts scheduled to run this session.
+   *
+   * <p>A schema-v4 contract whose selected analytics oracle marks every query explicitly
+   * non-applicable does not need its unrepresentable fixture. Missing or malformed oracles remain
+   * fixture-requiring so they cannot turn into an implicit skip.
+   */
   private Set<String> requiredIndexEnums() throws IOException {
     Set<String> indices = new LinkedHashSet<>();
     for (JSONObject contract : loadScheduledContracts()) {
+      if (!contractRequiresFixture(contract)) {
+        continue;
+      }
       JSONObject fixture = contract.optJSONObject("backendFixture");
       if (fixture == null) {
         continue;
@@ -1823,6 +1891,50 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       indices.add("ACCOUNT");
     }
     return indices;
+  }
+
+  private boolean contractRequiresFixture(JSONObject contract) {
+    if (executionBackend != ExecutionBackend.ANALYTICS || contract.optInt("schemaVersion") != 4) {
+      return true;
+    }
+
+    JSONObject fixture = contract.optJSONObject("backendFixture");
+    List<JSONObject> matches =
+        matchingExpectations(contract.getJSONArray("expectations"), fixtureCalciteEnabled(fixture));
+    if (matches.size() != 1) {
+      return true;
+    }
+
+    JSONObject declaredQueries = contract.optJSONObject("queries");
+    JSONObject expectedQueries = matches.get(0).optJSONObject("queries");
+    if (declaredQueries == null
+        || declaredQueries.length() == 0
+        || expectedQueries == null
+        || !declaredQueries.keySet().equals(expectedQueries.keySet())) {
+      return true;
+    }
+
+    for (String queryName : declaredQueries.keySet()) {
+      JSONObject expected = expectedQueries.optJSONObject(queryName);
+      JSONObject backend = expected == null ? null : resolveBackendOracle(4, expected);
+      if (!isCompleteNotApplicableOracle(backend)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean isCompleteNotApplicableOracle(JSONObject backend) {
+    return backend != null
+        && "not-applicable".equals(backend.optString("kind"))
+        && hasNonBlankString(backend, "reason")
+        && hasNonBlankString(backend, "owner")
+        && hasNonBlankString(backend, "issue");
+  }
+
+  private boolean hasNonBlankString(JSONObject object, String key) {
+    Object value = object.opt(key);
+    return value instanceof String && !((String) value).trim().isEmpty();
   }
 
   private JSONObject loadContractFile(String resourcePath) throws IOException {

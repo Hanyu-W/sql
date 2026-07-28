@@ -807,9 +807,9 @@ function main() {
       }
 
       if (oracleSelection.status === 'not-applicable') {
-        resultEntry.outcome = 'not-applicable';
-        resultEntry.reason = oracleSelection.reason;
-        resultEntry.notApplicable = oracleSelection.reason;
+        // Only the backend fixture is non-applicable. The detector still ran above and its
+        // count/severity/message assertions remain ordinary, comparable frontend evidence.
+        resultEntry.backendOracleReason = oracleSelection.reason;
       } else if (oracleSelection.status === 'coverage-missing') {
         resultEntry.outcome = 'coverage-missing';
         resultEntry.coverage = 'missing';

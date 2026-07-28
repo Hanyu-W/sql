@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "ruleId": "flat-object-subfield",
   "grammarSurface": "runtime-bundle",
   "schedule": "pr",
@@ -7,7 +7,7 @@
     "qualifiedName",
     "wcQualifiedName"
   ],
-  "notes": "Live-verified on OpenSearch 3.8 with Calcite on: a flat_object field cannot be referenced by PPL at all. BOTH a dotted subfield (`fields attributes.service`) AND the bare root (`fields attributes`) fail with IllegalArgumentException 'Field [...] not found.', and the same holds in a where clause. NOTE the rejection reason is byte-identical to the one field-validation produces for a genuinely absent field, so the backend reason alone cannot attribute a diagnostic to a rule — attribution comes from the detector's ruleId, which is why every case here pins detectorCount for THIS ruleId only. The detector self-suppresses without a typeMap, hence the deriveFromMapping block below (needsContext: true).",
+  "notes": "Live-verified on OpenSearch 3.8 with Calcite on: a flat_object field cannot be referenced by PPL at all. BOTH a dotted subfield (`fields attributes.service`) AND the bare root (`fields attributes`) fail with IllegalArgumentException 'Field [...] not found.', and the same holds in a where clause. NOTE the rejection reason is byte-identical to the one field-validation produces for a genuinely absent field, so the backend reason alone cannot attribute a diagnostic to a rule — attribution comes from the detector's ruleId, which is why every case here pins detectorCount for THIS ruleId only. The detector self-suppresses without a typeMap, hence the deriveFromMapping block below (needsContext: true). The analytics feature build cannot create flat_object in composite/Parquet storage, so every analytics backend oracle is explicitly non-applicable while the frontend detector assertions still run.",
   "wiring": {
     "detector": "flat-object-subfield",
     "enabled": true,
@@ -61,55 +61,87 @@
         "flat-object-dotted-subfield": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Invalid Query"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
               }
+            },
+            "analytics": {
+              "kind": "not-applicable",
+              "reason": "flat_object fields cannot be represented by the analytics composite/Parquet fixture",
+              "owner": "@Hanyu-W",
+              "issue": "https://github.com/Hanyu-W/sql/pull/3"
             }
           }
         },
         "flat-object-bare-root": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Invalid Query"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
               }
+            },
+            "analytics": {
+              "kind": "not-applicable",
+              "reason": "flat_object fields cannot be represented by the analytics composite/Parquet fixture",
+              "owner": "@Hanyu-W",
+              "issue": "https://github.com/Hanyu-W/sql/pull/3"
             }
           }
         },
         "flat-object-in-where": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Invalid Query"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
               }
+            },
+            "analytics": {
+              "kind": "not-applicable",
+              "reason": "flat_object fields cannot be represented by the analytics composite/Parquet fixture",
+              "owner": "@Hanyu-W",
+              "issue": "https://github.com/Hanyu-W/sql/pull/3"
             }
           }
         },
         "non-flat-field-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "not-applicable",
+              "reason": "flat_object fields cannot be represented by the analytics composite/Parquet fixture",
+              "owner": "@Hanyu-W",
+              "issue": "https://github.com/Hanyu-W/sql/pull/3"
             }
           }
         }
@@ -122,55 +154,87 @@
         "flat-object-dotted-subfield": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Field [attributes.service] not found."
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Field [attributes.service] not found."
+                }
               }
+            },
+            "analytics": {
+              "kind": "not-applicable",
+              "reason": "flat_object fields cannot be represented by the analytics composite/Parquet fixture",
+              "owner": "@Hanyu-W",
+              "issue": "https://github.com/Hanyu-W/sql/pull/3"
             }
           }
         },
         "flat-object-bare-root": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Field [attributes] not found."
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Field [attributes] not found."
+                }
               }
+            },
+            "analytics": {
+              "kind": "not-applicable",
+              "reason": "flat_object fields cannot be represented by the analytics composite/Parquet fixture",
+              "owner": "@Hanyu-W",
+              "issue": "https://github.com/Hanyu-W/sql/pull/3"
             }
           }
         },
         "flat-object-in-where": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Field [attributes.service] not found."
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Field [attributes.service] not found."
+                }
               }
+            },
+            "analytics": {
+              "kind": "not-applicable",
+              "reason": "flat_object fields cannot be represented by the analytics composite/Parquet fixture",
+              "owner": "@Hanyu-W",
+              "issue": "https://github.com/Hanyu-W/sql/pull/3"
             }
           }
         },
         "non-flat-field-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "not-applicable",
+              "reason": "flat_object fields cannot be represented by the analytics composite/Parquet fixture",
+              "owner": "@Hanyu-W",
+              "issue": "https://github.com/Hanyu-W/sql/pull/3"
             }
           }
         }
