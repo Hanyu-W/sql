@@ -1,7 +1,8 @@
 {
   "schemaVersion": 3,
   "ruleId": "unsupported-window-function-in-eventstats",
-  "grammarSurface": "compiled-simplified",
+  "detectorPath": "packages/osd-monaco/src/ppl/lint/rules/unsupported_window_function.ts",
+  "grammarSurface": "both",
   "schedule": "pr",
   "wiring": {
     "detector": "unsupported-window-function-in-eventstats",
@@ -10,11 +11,18 @@
     "runtimeOnly": false,
     "needsContext": false,
     "needsExplain": false,
-    "appliesTo": { "minVersion": "3.4.0" }
+    "appliesTo": {
+      "minVersion": "3.4.0"
+    }
   },
   "backendFixture": {
-    "indices": ["ACCOUNT"],
-    "clusterSettings": { "calcite": true, "calciteFallback": false }
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
   },
   "frontendContext": {
     "isCalcite": true
@@ -25,14 +33,109 @@
       "role": "trigger",
       "query": "source={{index}} | eventstats rank() as rank_value"
     },
+    "eventstats-dense-rank": {
+      "role": "trigger",
+      "query": "source={{index}} | eventstats dense_rank() as rank_value"
+    },
     "eventstats-avg-control": {
       "role": "control",
       "query": "source={{index}} | eventstats avg(age) as avg_age"
     }
   },
+  "notes": "The DETECTOR verdict is identical on 3.6/3.7/3.8 (1 diagnostic on the trigger, 0 on the control, live-observed). Only the engine's rejection shape moves, in three epochs: 3.6 masks the cause entirely (HTTP 500 UnsupportedOperationException / 'There was internal problem at backend'); 3.7 keeps the 500 but names the function; 3.8 turned it into a proper HTTP 400 CalciteUnsupportedException. Each epoch is pinned separately so the multi-version check proves the rule still fires on older engines instead of reporting the wording difference as drift. A 500 is a poor rejection oracle (it cannot distinguish this failure from an unrelated crash), which is why the <3.8 entries additionally rely on the detector count for discrimination.",
   "expectations": [
     {
-      "version": ">=3.4.0",
+      "version": ">=3.4.0 <3.7.0",
+      "queries": {
+        "eventstats-rank": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 500,
+            "body": {
+              "status": 500,
+              "error": {
+                "type": "UnsupportedOperationException",
+                "reason": "There was internal problem at backend"
+              }
+            }
+          }
+        },
+        "eventstats-dense-rank": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 500,
+            "body": {
+              "status": 500,
+              "error": {
+                "type": "UnsupportedOperationException",
+                "reason": "There was internal problem at backend"
+              }
+            }
+          }
+        },
+        "eventstats-avg-control": {
+          "detectorCount": 0,
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "datarowsNonEmpty": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "version": ">=3.7.0 <3.8.0",
+      "queries": {
+        "eventstats-rank": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 500,
+            "body": {
+              "status": 500,
+              "error": {
+                "type": "UnsupportedOperationException",
+                "reason": "Unexpected window function: rank"
+              }
+            }
+          }
+        },
+        "eventstats-dense-rank": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 500,
+            "body": {
+              "status": 500,
+              "error": {
+                "type": "UnsupportedOperationException",
+                "reason": "Unexpected window function: dense_rank"
+              }
+            }
+          }
+        },
+        "eventstats-avg-control": {
+          "detectorCount": 0,
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "datarowsNonEmpty": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "version": ">=3.8.0",
       "queries": {
         "eventstats-rank": {
           "detectorCount": 1,
@@ -42,13 +145,37 @@
             "httpStatus": 400,
             "body": {
               "status": 400,
-              "error": { "type": "CalciteUnsupportedException", "reason": "Unexpected window function: rank" }
+              "error": {
+                "type": "CalciteUnsupportedException",
+                "reason": "Unexpected window function: rank"
+              }
+            }
+          }
+        },
+        "eventstats-dense-rank": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "CalciteUnsupportedException",
+                "reason": "Unexpected window function: dense_rank"
+              }
             }
           }
         },
         "eventstats-avg-control": {
           "detectorCount": 0,
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "datarowsNonEmpty": true
+            }
+          }
         }
       }
     }

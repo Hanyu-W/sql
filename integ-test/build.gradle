@@ -169,18 +169,25 @@ tasks.withType(licenseHeaders.class) {
 }
 
 // Forward the PPL lint rule validation contract knobs to every integ test JVM
-// (PplLintRuleValidationIT reads them): which schedule to run (pr|nightly), an
-// optional path to write the observed backend report, and — while the cluster is
-// alive — optional paths to export the candidate runtime grammar bundle and its
-// target manifest for the detector-validation job. Applied globally so every
+// (PplLintRuleValidationIT reads them): which schedule to run (pr|nightly),
+// whether to observe rather than assert (the multi-version matrix), an optional
+// path to write the observed backend report, and — while the cluster is alive —
+// optional paths to export the candidate runtime grammar bundle and its target
+// manifest for the detector-validation job. Applied globally so every
 // RestIntegTestTask that runs the class picks it up without per-task edits.
+//
+// Forwarded by PREFIX rather than by an explicit list. A hand-maintained list is
+// a silent trap: a property the IT reads but the list omits simply never reaches
+// the test JVM, with no error anywhere. That already cost one CI run —
+// `ppl.lint.observe.only` was added to the IT and the workflow but not to the
+// list, so a multi-version leg asserted expectations pinned for a DIFFERENT
+// engine version and failed instead of observing. Forwarding every `ppl.lint.*`
+// property the invoker set means adding a knob to the IT is enough.
 tasks.withType(Test).configureEach {
     systemProperty "ppl.lint.schedule", System.getProperty("ppl.lint.schedule", "pr")
-    ["ppl.lint.report", "ppl.lint.grammar.bundle", "ppl.lint.target"].each { prop ->
-        if (System.getProperty(prop) != null) {
-            systemProperty prop, System.getProperty(prop)
-        }
-    }
+    System.properties.stringPropertyNames()
+            .findAll { it.startsWith("ppl.lint.") && it != "ppl.lint.schedule" }
+            .each { prop -> systemProperty prop, System.getProperty(prop) }
 }
 
 validateNebulaPom.enabled = false
@@ -287,9 +294,13 @@ def getGeoSpatialPlugin() {
     }
 }
 
-// fetch from the feature-build artifact for now (linux/x64 only; for local dev pass -PanalyticsEngineZip=/path instead).
+// Fetch from the mutable feature-build artifact for observation (linux/x64 only). CI can
+// select a specific build with -PanalyticsFeatureBuildBase, and local development can pass
+// individual plugin ZIP overrides such as -PanalyticsEngineZip=/path.
 ext.pluginVersion = opensearch_version.tokenize('-')[0]
-ext.featureBuildBase = "https://ci.opensearch.org/ci/dbc/feature-build-opensearch/feature-datafusion/latest/linux/x64/tar/builds/opensearch/plugins"
+ext.featureBuildBase = project.findProperty('analyticsFeatureBuildBase') ?:
+        "https://ci.opensearch.org/ci/dbc/feature-build-opensearch/feature-datafusion/latest/linux/x64/tar/builds/opensearch/plugins"
+ext.featureBuildArtifactRoot = featureBuildBase.replaceFirst('/plugins/?$', '')
 ext.analyticsEngineZipDest = "${buildDir}/distributions/analytics-engine-${pluginVersion}-SNAPSHOT.zip"
 ext.arrowFlightRpcZipDest = "${buildDir}/distributions/arrow-flight-rpc-${pluginVersion}-SNAPSHOT.zip"
 ext.arrowBaseZipDest = "${buildDir}/distributions/arrow-base-${pluginVersion}-SNAPSHOT.zip"
@@ -298,6 +309,16 @@ ext.analyticsBackendLuceneZipDest = "${buildDir}/distributions/analytics-backend
 ext.parquetDataFormatZipDest = "${buildDir}/distributions/parquet-data-format-${pluginVersion}-SNAPSHOT.zip"
 ext.compositeEngineZipDest = "${buildDir}/distributions/composite-engine-${pluginVersion}-SNAPSHOT.zip"
 ext.analyticsBackendDatafusionZipDest = "${buildDir}/distributions/analytics-backend-datafusion-${pluginVersion}-SNAPSHOT.zip"
+ext.analyticsNativeLibUrl = project.findProperty('analyticsNativeLibUrl') ?:
+        "${featureBuildArtifactRoot}/dist/libopensearch_native.so"
+ext.analyticsNativeLibDest = "${buildDir}/native/${pluginVersion}/release/libopensearch_native.so"
+ext.analyticsNativeLibDir = project.findProperty('nativeLibPath') ?
+        rootProject.file(project.findProperty('nativeLibPath')).canonicalFile :
+        file(analyticsNativeLibDest).parentFile.canonicalFile
+ext.analyticsJavaLibraryPath = [
+        analyticsNativeLibDir.absolutePath,
+        System.getProperty('java.library.path')
+].findAll { it != null && !it.isEmpty() }.join(File.pathSeparator)
 
 task downloadAnalyticsEngineZip(type: Download) {
     src "${featureBuildBase}/1-analytics-engine-${pluginVersion}.zip"
@@ -332,7 +353,7 @@ task downloadTestPplFrontendZip(type: Download) {
 }
 
 task downloadAnalyticsBackendLuceneZip(type: Download) {
-    src "${featureBuildBase}/1-analytics-backend-lucene-${pluginVersion}.zip"
+    src "${featureBuildBase}/analytics-backend-lucene-${pluginVersion}.zip"
     dest analyticsBackendLuceneZipDest
     overwrite false
     onlyIfModified true
@@ -340,7 +361,7 @@ task downloadAnalyticsBackendLuceneZip(type: Download) {
 }
 
 task downloadParquetDataFormatZip(type: Download) {
-    src "${featureBuildBase}/1-parquet-data-format-${pluginVersion}.zip"
+    src "${featureBuildBase}/parquet-data-format-${pluginVersion}.zip"
     dest parquetDataFormatZipDest
     overwrite false
     onlyIfModified true
@@ -348,7 +369,7 @@ task downloadParquetDataFormatZip(type: Download) {
 }
 
 task downloadCompositeEngineZip(type: Download) {
-    src "${featureBuildBase}/1-composite-engine-${pluginVersion}.zip"
+    src "${featureBuildBase}/2-composite-engine-${pluginVersion}.zip"
     dest compositeEngineZipDest
     overwrite false
     onlyIfModified true
@@ -356,11 +377,55 @@ task downloadCompositeEngineZip(type: Download) {
 }
 
 task downloadAnalyticsBackendDatafusionZip(type: Download) {
-    src "${featureBuildBase}/1-analytics-backend-datafusion-${pluginVersion}.zip"
+    src "${featureBuildBase}/analytics-backend-datafusion-${pluginVersion}.zip"
     dest analyticsBackendDatafusionZipDest
     overwrite false
     onlyIfModified true
     onlyIf { !project.findProperty('analyticsBackendDatafusionZip') }
+}
+
+task downloadAnalyticsNativeLib(type: Download) {
+    src analyticsNativeLibUrl
+    dest analyticsNativeLibDest
+    // The mutable observation URL can publish another build under the same
+    // product version. Revalidate an existing file and never expose a partial
+    // download to the test cluster.
+    overwrite true
+    onlyIfModified true
+    tempAndMove true
+    retries 3
+    onlyIf { !project.findProperty('nativeLibPath') }
+    doFirst {
+        def osName = System.getProperty('os.name', '').toLowerCase(Locale.ROOT)
+        def osArch = System.getProperty('os.arch', '').toLowerCase(Locale.ROOT)
+        if (!osName.contains('linux') || !(osArch in ['amd64', 'x86_64'])) {
+            throw new GradleException(
+                    "The default analytics native artifact is Linux/x64 only " +
+                    "(detected ${osName}/${osArch}); pass -PnativeLibPath=<compatible-release-directory>.")
+        }
+    }
+}
+
+task validateAnalyticsNativeLib {
+    dependsOn downloadAnalyticsNativeLib
+    doLast {
+        File nativeLib = new File(analyticsNativeLibDir, 'libopensearch_native.so')
+        if (!nativeLib.isFile() || !nativeLib.canRead() || nativeLib.length() == 0) {
+            throw new GradleException(
+                    "Expected a readable non-empty native library at ${nativeLib}. " +
+                    "Pass -PnativeLibPath=<directory-containing-libopensearch_native.so> " +
+                    "or -PanalyticsNativeLibUrl=<artifact-url>.")
+        }
+        byte[] magic = new byte[4]
+        int bytesRead
+        nativeLib.withInputStream { stream -> bytesRead = stream.read(magic) }
+        if (bytesRead != magic.length ||
+                (magic[0] & 0xff) != 0x7f || (magic[1] & 0xff) != 0x45 ||
+                (magic[2] & 0xff) != 0x4c || (magic[3] & 0xff) != 0x46) {
+            throw new GradleException(
+                    "Analytics native library ${nativeLib} is not an ELF shared object.")
+        }
+    }
 }
 
 def getAnalyticsEnginePlugin() {
@@ -445,6 +510,34 @@ testClusters {
         // Composite-default cluster: PPL queries route to the analytics engine unless excluded.
         setting 'cluster.pluggable.dataformat', 'composite'
     }
+    analyticsEnginePplLintIT {
+        testDistribution = 'archive'
+        plugin(getJobSchedulerPlugin())
+        plugin(getArrowBasePlugin())
+        plugin(getArrowFlightRpcPlugin())
+        plugin(getAnalyticsEnginePlugin())
+        plugin(getCompositeEnginePlugin())
+        plugin(getParquetDataFormatPlugin())
+        plugin(getAnalyticsBackendLucenePlugin())
+        plugin(getAnalyticsBackendDatafusionPlugin())
+        plugin ":opensearch-sql-plugin"
+        setting 'cluster.pluggable.dataformat.enabled', 'true'
+        setting 'cluster.pluggable.dataformat', 'composite'
+        setting 'cluster.composite.primary_data_format', 'parquet'
+        setting 'cluster.composite.secondary_data_formats', '[lucene]'
+        // Arrow Flight / streaming transport requirements
+        jvmArgs '--add-opens=java.base/java.nio=ALL-UNNAMED'
+        jvmArgs '--enable-native-access=ALL-UNNAMED'
+        systemProperty 'io.netty.allocator.numDirectArenas', '1'
+        systemProperty 'io.netty.noUnsafe', 'false'
+        systemProperty 'io.netty.tryUnsafe', 'true'
+        systemProperty 'io.netty.tryReflectionSetAccessible', 'true'
+        systemProperty 'opensearch.experimental.feature.pluggable.dataformat.enabled', 'true'
+        systemProperty 'opensearch.experimental.feature.transport.stream.enabled', 'true'
+        // DataFusion/parquet loads libopensearch_native.so at cluster startup. Use the
+        // matching feature-build artifact unless a local release directory is supplied.
+        systemProperty 'java.library.path', analyticsJavaLibraryPath
+    }
 }
 
 def isPrometheusRunning() {
@@ -501,6 +594,26 @@ task analyticsEngineCompatIT(type: RestIntegTestTask) {
     systemProperty 'tests.security.manager', 'false'
     filter {
         includeTestsMatching 'org.opensearch.sql.plugin.AnalyticsEngineCompatIT'
+    }
+}
+
+task analyticsEnginePplLintIT(type: RestIntegTestTask) {
+    useCluster testClusters.analyticsEnginePplLintIT
+    dependsOn downloadArrowBaseZip, downloadArrowFlightRpcZip, downloadAnalyticsEngineZip,
+            downloadCompositeEngineZip, downloadParquetDataFormatZip,
+            downloadAnalyticsBackendLuceneZip, downloadAnalyticsBackendDatafusionZip,
+            validateAnalyticsNativeLib
+    dependsOn ':opensearch-sql-plugin:bundlePlugin'
+
+    systemProperty 'tests.analytics.parquet_indices', 'true'
+    systemProperty 'tests.analytics.num_shards', '1'
+    systemProperty 'ppl.lint.execution_backend', 'analytics'
+    systemProperty 'ppl.lint.analytics.stack.source', featureBuildBase
+    systemProperty 'tests.security.manager', 'false'
+    systemProperty 'project.root', project.projectDir.absolutePath
+
+    filter {
+        includeTestsMatching 'org.opensearch.sql.calcite.remote.PplLintRuleValidationIT'
     }
 }
 

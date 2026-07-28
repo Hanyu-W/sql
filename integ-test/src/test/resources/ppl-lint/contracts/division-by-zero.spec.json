@@ -1,8 +1,9 @@
 {
   "schemaVersion": 3,
   "ruleId": "division-by-zero",
-  "grammarSurface": "compiled-simplified",
-  "schedule": "nightly",
+  "note": "The detector flags both division and modulo by a literal zero because both operations return null silently. The backend result-shape oracle verifies that behavior independently for each operator.",
+  "grammarSurface": "both",
+  "schedule": "pr",
   "wiring": {
     "detector": "division-by-zero",
     "enabled": true,
@@ -13,8 +14,13 @@
     "appliesTo": {}
   },
   "backendFixture": {
-    "indices": ["ACCOUNT"],
-    "clusterSettings": { "calcite": true, "calciteFallback": false }
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
   },
   "frontendContext": {
     "isCalcite": true
@@ -25,11 +31,15 @@
       "role": "trigger",
       "query": "source={{index}} | eval ratio = balance / 0 | fields ratio | head 1"
     },
+    "divide-by-decimal-zero-literal": {
+      "role": "trigger",
+      "query": "source={{index}} | eval ratio = balance / 0.0 | fields ratio | head 1"
+    },
     "divide-by-nonzero-control": {
       "role": "control",
       "query": "source={{index}} | eval ratio = balance / 2 | fields ratio | head 1"
     },
-    "modulo-by-zero-flagged": {
+    "modulo-by-zero-literal": {
       "role": "trigger",
       "query": "source={{index}} | eval m = balance % 0 | fields m | head 1"
     }
@@ -41,16 +51,45 @@
         "divide-by-zero-literal": {
           "detectorCount": 1,
           "severity": "warning",
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "ratio" } }
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "columnAllNull": "ratio"
+            }
+          }
+        },
+        "divide-by-decimal-zero-literal": {
+          "detectorCount": 1,
+          "severity": "warning",
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "columnAllNull": "ratio"
+            }
+          }
         },
         "divide-by-nonzero-control": {
           "detectorCount": 0,
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "datarowsNonEmpty": true
+            }
+          }
         },
-        "modulo-by-zero-flagged": {
+        "modulo-by-zero-literal": {
           "detectorCount": 1,
           "severity": "warning",
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "columnAllNull": "m" } }
+          "backend": {
+            "kind": "result-shape",
+            "httpStatus": 200,
+            "expect": {
+              "columnAllNull": "m"
+            }
+          }
         }
       }
     }

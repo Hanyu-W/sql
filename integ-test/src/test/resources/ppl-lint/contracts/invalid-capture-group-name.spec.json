@@ -1,10 +1,14 @@
 {
   "schemaVersion": 3,
-  "ruleId": "field-validation",
-  "grammarSurface": "both",
+  "ruleId": "invalid-capture-group-name",
+  "grammarSurface": "runtime-bundle",
   "schedule": "pr",
+  "requiredParserRules": [
+    "rexCommand",
+    "stringLiteral"
+  ],
   "wiring": {
-    "detector": "field-validation",
+    "detector": "invalid-capture-group-name",
     "enabled": true,
     "severity": "error",
     "runtimeOnly": false,
@@ -23,81 +27,31 @@
   },
   "frontendContext": {
     "isCalcite": true,
-    "visibleIndices": [
-      "{{index}}"
-    ],
     "deriveFromMapping": {
-      "account_number": "long",
-      "balance": "long",
-      "age": "long",
-      "firstname": "text",
-      "lastname": "text",
-      "gender": "text",
-      "address": "text",
-      "employer": "text",
-      "email": "text",
-      "city": "text",
-      "state": "text"
+      "email": "text"
     }
   },
   "index": "opensearch-sql_test_index_account",
   "queries": {
-    "unknown-field-existence": {
+    "rex-capture-name-underscore": {
       "role": "trigger",
-      "query": "source={{index}} | where nonexistent_field > 3"
+      "query": "source={{index}} | rex field=email \"(?<user_name>[^@]+)@(?<domain>.+)\" | fields email"
     },
-    "grok-field-slot-shape-typo": {
+    "rex-capture-name-hyphen": {
       "role": "trigger",
-      "query": "source={{index}} | grok field=firstname \"%{WORD:w}\""
+      "query": "source={{index}} | rex field=email \"(?<user-name>[^@]+)@(?<domain>.+)\" | fields email"
     },
-    "known-field-control": {
+    "rex-capture-name-alphanumeric-control": {
       "role": "control",
-      "query": "source={{index}} | where age > 30 | head 1"
+      "query": "source={{index}} | rex field=email \"(?<username>[^@]+)@(?<domain>.+)\" | fields email, username, domain | head 1"
     }
   },
   "expectations": [
     {
-      "version": "<3.4.0",
-      "note": "This rule has an empty appliesTo, so it ships to users on EVERY engine, including pre-3.4. Detector behavior is live-verified identical from 2.19 up (1/1/0 on the compiled surface at 2.19.0, 3.0.0, 3.5.0, 3.7.0). The backend oracle deliberately omits error.type/reason: this engine's wording for an unknown field has not been observed live, and inventing one would either fail spuriously or get 'fixed' by pinning whatever CI first happened to see. A compiled-surface leg records the real wording; pin it then.",
-      "queries": {
-        "unknown-field-existence": {
-          "detectorCount": 1,
-          "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400
-            }
-          }
-        },
-        "grok-field-slot-shape-typo": {
-          "detectorCount": 1,
-          "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400
-            }
-          }
-        },
-        "known-field-control": {
-          "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
-            }
-          }
-        }
-      }
-    },
-    {
       "version": ">=3.4.0 <3.7.0",
+      "engine": "calcite",
       "queries": {
-        "unknown-field-existence": {
+        "rex-capture-name-underscore": {
           "detectorCount": 1,
           "severity": "error",
           "backend": {
@@ -112,7 +66,7 @@
             }
           }
         },
-        "grok-field-slot-shape-typo": {
+        "rex-capture-name-hyphen": {
           "detectorCount": 1,
           "severity": "error",
           "backend": {
@@ -127,7 +81,7 @@
             }
           }
         },
-        "known-field-control": {
+        "rex-capture-name-alphanumeric-control": {
           "detectorCount": 0,
           "backend": {
             "kind": "result-shape",
@@ -141,24 +95,9 @@
     },
     {
       "version": ">=3.7.0",
+      "engine": "calcite",
       "queries": {
-        "unknown-field-existence": {
-          "detectorCount": 1,
-          "severity": "error",
-          "matchMessage": "nonexistent_field",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Field [nonexistent_field] not found."
-              }
-            }
-          }
-        },
-        "grok-field-slot-shape-typo": {
+        "rex-capture-name-underscore": {
           "detectorCount": 1,
           "severity": "error",
           "backend": {
@@ -168,12 +107,27 @@
               "status": 400,
               "error": {
                 "type": "IllegalArgumentException",
-                "reason": "Field [field] not found."
+                "reason": "Invalid capture group name 'user_name'."
               }
             }
           }
         },
-        "known-field-control": {
+        "rex-capture-name-hyphen": {
+          "detectorCount": 1,
+          "severity": "error",
+          "backend": {
+            "kind": "rejection",
+            "httpStatus": 400,
+            "body": {
+              "status": 400,
+              "error": {
+                "type": "IllegalArgumentException",
+                "reason": "Invalid capture group name 'user-name'."
+              }
+            }
+          }
+        },
+        "rex-capture-name-alphanumeric-control": {
           "detectorCount": 0,
           "backend": {
             "kind": "result-shape",

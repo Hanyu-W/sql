@@ -1,0 +1,15 @@
+{
+  "mappings": {
+    "properties": {
+      "name": {
+        "type": "keyword"
+      },
+      "status": {
+        "type": "integer"
+      },
+      "attributes": {
+        "type": "flat_object"
+      }
+    }
+  }
+}

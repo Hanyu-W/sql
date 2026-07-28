@@ -7,6 +7,7 @@ package org.opensearch.sql.legacy;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
 
 import java.util.List;
@@ -168,7 +169,7 @@ public class AnalyticsFieldStripTests {
   public void bulkStrip_removesDroppedPathsFromSourceLinesOnly() {
     enable();
     String bulk =
-        "{\"index\":{\"_id\":\"1\"}}\n"
+        "{\"index\":{\"_index\":\"one\",\"_id\":\"1\",\"routing\":\"r1\"}}\n"
             + "{\"keep_text\":\"x\",\"geo_point_value\":{\"lat\":1,\"lon\":2},\"geo_shape_value\":\"POINT(1"
             + " 2)\"}\n"
             + "{\"index\":{\"_id\":\"2\"}}\n"
@@ -178,9 +179,12 @@ public class AnalyticsFieldStripTests {
             bulk, Set.of(path("geo_point_value"), path("geo_shape_value"), path("nested_value")));
 
     String[] lines = out.split("\n");
-    // action lines untouched
-    assertTrue(lines[0].contains("\"index\""));
-    assertTrue(lines[2].contains("\"index\""));
+    // Append-only analytics indices require generated IDs, but all other action metadata remains.
+    JSONObject firstAction = new JSONObject(lines[0]).getJSONObject("index");
+    assertFalse(firstAction.has("_id"));
+    assertEquals("one", firstAction.getString("_index"));
+    assertEquals("r1", firstAction.getString("routing"));
+    assertFalse(new JSONObject(lines[2]).getJSONObject("index").has("_id"));
     // source lines stripped, supported field retained
     JSONObject doc1 = new JSONObject(lines[1]);
     assertTrue(doc1.has("keep_text"));
@@ -213,12 +217,52 @@ public class AnalyticsFieldStripTests {
   }
 
   @Test
-  public void bulkStrip_noopWhenDisabledOrEmptyDropSet() {
-    String bulk = "{\"index\":{}}\n{\"geo_point_value\":{\"lat\":1}}\n";
+  public void bulkStrip_emptyDropSet_onlyRemovesAnalyticsCustomIds() {
+    String indexSource = "{\"index\":\"source-value\",\"spacing\":  2}";
+    String createSource = "{\"delete\":\"also-a-source-value\"}";
+    String bulk =
+        "{\"index\":{\"_index\":\"fixture\",\"_id\":\"1\"}}\n"
+            + indexSource
+            + "\n\n"
+            + "{\"create\":{\"_index\":\"fixture\",\"_id\":\"2\",\"routing\":\"r2\"}}\n"
+            + createSource
+            + "\n";
     // disabled -> unchanged even with a drop set
     assertEquals(bulk, AnalyticsIndexConfig.stripBulkFields(bulk, Set.of(path("geo_point_value"))));
-    // enabled but empty drop set -> unchanged
+
+    // enabled with no dropped fields -> generated IDs for append-only writes, source unchanged
     enable();
-    assertEquals(bulk, AnalyticsIndexConfig.stripBulkFields(bulk, Set.of()));
+    String out = AnalyticsIndexConfig.stripBulkFields(bulk, Set.of());
+    String[] lines = out.split("\n", -1);
+    JSONObject index = new JSONObject(lines[0]).getJSONObject("index");
+    assertFalse(index.has("_id"));
+    assertEquals("fixture", index.getString("_index"));
+    assertEquals(indexSource, lines[1]);
+    assertEquals("", lines[2]);
+    JSONObject create = new JSONObject(lines[3]).getJSONObject("create");
+    assertEquals("2", create.getString("_id"));
+    assertEquals("fixture", create.getString("_index"));
+    assertEquals("r2", create.getString("routing"));
+    assertEquals(createSource, lines[4]);
+    // split(..., -1) proves the original terminal newline survived.
+    assertEquals("", lines[5]);
+  }
+
+  @Test
+  public void bulkStrip_rejectsActionsThatAppendOnlyStorageCannotRepresent() {
+    enable();
+    IllegalArgumentException update =
+        assertThrows(
+            IllegalArgumentException.class,
+            () ->
+                AnalyticsIndexConfig.stripBulkFields(
+                    "{\"update\":{\"_id\":\"1\"}}\n{\"doc\":{\"value\":1}}\n", Set.of()));
+    assertTrue(update.getMessage().contains("does not support update"));
+
+    IllegalArgumentException delete =
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> AnalyticsIndexConfig.stripBulkFields("{\"delete\":{\"_id\":\"1\"}}\n", Set.of()));
+    assertTrue(delete.getMessage().contains("does not support delete"));
   }
 }

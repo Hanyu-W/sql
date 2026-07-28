@@ -248,40 +248,67 @@ public class TestUtils {
     }
 
     /**
-     * Strip the given dropped <em>paths</em> from every source document of a bulk NDJSON payload.
-     * Bulk format alternates an action line ({@code {"index":{...}}}) with a source line; only
-     * source lines (those without a bulk action key) are rewritten. No-op when disabled or {@code
-     * droppedPaths} is empty.
+     * Prepare a bulk NDJSON payload for an analytics-engine append-only index.
+     *
+     * <p>Custom document IDs are not supported for {@code index} operations when {@code
+     * index.append_only.enabled} is active, so {@code _id} is removed from that action metadata
+     * while preserving metadata such as {@code _index} and {@code routing}. Create actions retain
+     * their semantics; update/delete actions fail locally because they are incompatible with
+     * append-only storage.
+     *
+     * <p>The given dropped <em>paths</em> are also removed from every source document. Bulk format
+     * alternates an action line ({@code {"index":{...}}}) with a source line; only source lines
+     * (those without a bulk action key) have mapped fields removed. No-op when analytics mode is
+     * disabled.
      *
      * <p>Each path is removed recursively: it descends through nested objects <em>and arrays of
      * objects</em> (so a {@code nested}/object array has the field stripped from every element),
      * leaving unaffected siblings intact. A source line is re-serialized <em>only when removing a
-     * path actually changed it</em>; every other line (action lines and docs that never had the
-     * dropped path) is appended byte-for-byte unchanged, so untouched docs match the fixture
-     * exactly.
+     * path actually changed it</em>. Action lines are re-serialized only when removing {@code _id};
+     * every other line is appended byte-for-byte unchanged.
      */
     static String stripBulkFields(String bulkBody, Set<List<String>> droppedPaths) {
-      if (!isEnabled() || droppedPaths.isEmpty()) {
+      if (!isEnabled()) {
         return bulkBody;
       }
       String[] lines = bulkBody.split("\n", -1);
       StringBuilder out = new StringBuilder(bulkBody.length());
+      boolean expectSource = false;
       for (int i = 0; i < lines.length; i++) {
         String line = lines[i];
         String trimmed = line.trim();
-        if (!trimmed.isEmpty() && trimmed.charAt(0) == '{') {
-          JSONObject doc = new JSONObject(trimmed);
-          boolean isActionLine =
-              doc.has("index") || doc.has("create") || doc.has("update") || doc.has("delete");
-          if (!isActionLine) {
-            boolean removedAny = false;
-            for (List<String> path : droppedPaths) {
-              removedAny |= removePath(doc, path, 0);
+        boolean terminalNewline = i == lines.length - 1 && trimmed.isEmpty();
+        if (!terminalNewline) {
+          if (trimmed.isEmpty()) {
+            if (expectSource) {
+              throw new IllegalArgumentException(
+                  "analytics bulk action is missing its source document");
             }
-            // Only rewrite the line if we actually removed something; otherwise leave it verbatim
-            // so untouched docs stay byte-for-byte identical to the fixture.
-            if (removedAny) {
-              line = doc.toString();
+          } else {
+            JSONObject json = new JSONObject(trimmed);
+            if (expectSource) {
+              boolean removedAny = false;
+              for (List<String> path : droppedPaths) {
+                removedAny |= removePath(json, path, 0);
+              }
+              // Only rewrite the line if we actually removed something; otherwise leave it
+              // verbatim so untouched docs stay byte-for-byte identical to the fixture.
+              if (removedAny) {
+                line = json.toString();
+              }
+              expectSource = false;
+            } else {
+              String operation = bulkOperation(json);
+              if ("update".equals(operation) || "delete".equals(operation)) {
+                throw new IllegalArgumentException(
+                    "analytics append-only bulk payload does not support "
+                        + operation
+                        + " actions");
+              }
+              if ("index".equals(operation) && removeCustomDocumentId(json, operation)) {
+                line = json.toString();
+              }
+              expectSource = true;
             }
           }
         }
@@ -290,7 +317,38 @@ public class TestUtils {
           out.append('\n');
         }
       }
+      if (expectSource) {
+        throw new IllegalArgumentException(
+            "analytics bulk payload ended before the final action's source document");
+      }
       return out.toString();
+    }
+
+    private static String bulkOperation(JSONObject action) {
+      List<String> operations =
+          List.of("index", "create", "update", "delete").stream()
+              .filter(action::has)
+              .collect(Collectors.toList());
+      if (operations.size() != 1 || action.length() != 1) {
+        throw new IllegalArgumentException(
+            "analytics bulk action line must contain exactly one index/create/update/delete"
+                + " action");
+      }
+      String operation = operations.get(0);
+      if (!(action.opt(operation) instanceof JSONObject)) {
+        throw new IllegalArgumentException(
+            "analytics bulk " + operation + " action metadata must be an object");
+      }
+      return operation;
+    }
+
+    private static boolean removeCustomDocumentId(JSONObject action, String operation) {
+      JSONObject metadata = action.optJSONObject(operation);
+      if (metadata == null || !metadata.has("_id")) {
+        return false;
+      }
+      metadata.remove("_id");
+      return true;
     }
 
     /**
@@ -429,8 +487,9 @@ public class TestUtils {
   /**
    * Same as {@link #loadDataByRestClient(RestClient, String, String)} but strips {@code
    * droppedPaths} (the exact field paths removed from the mapping on the analytics-engine route)
-   * from every bulk source doc, so the index mapping and the data agree. When AE is disabled or
-   * {@code droppedPaths} is empty this is byte-for-byte identical to the 3-arg form.
+   * from every bulk source doc, so the index mapping and the data agree. Analytics append-only
+   * {@code index} operations also discard custom document IDs. When analytics mode is disabled this
+   * is byte-for-byte identical to the 3-arg form.
    */
   public static void loadDataByRestClient(
       RestClient client, String indexName, String dataSetFilePath, Set<List<String>> droppedPaths)
@@ -520,6 +579,11 @@ public class TestUtils {
 
   public static String getAccountExtendedIndexMapping() {
     String mappingFile = "account_extended_index_mapping.json";
+    return getMappingFile(mappingFile);
+  }
+
+  public static String getFlatObjectIndexMapping() {
+    String mappingFile = "flat_object_index_mapping.json";
     return getMappingFile(mappingFile);
   }
 

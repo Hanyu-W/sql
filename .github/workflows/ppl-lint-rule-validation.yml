@@ -1,5 +1,12 @@
 name: PPL lint rule validation
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ppl-lint-rule-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 # Cross-repository check: the OpenSearch-Dashboards (OSD) PPL lint detectors and
 # the SQL backend must agree on the SAME candidate runtime grammar. A shared,
 # reviewed corpus of contract files pins each rule's OSD detector diagnostic
@@ -134,6 +141,8 @@ jobs:
           su "$(id -un 1000)" -c "./gradlew :integ-test:integTest \
             --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT \
             -Dppl.lint.schedule=${{ steps.schedule.outputs.value }} \
+            -Dppl.lint.execution_backend=standard \
+            -Dppl.lint.sql_sha=${GITHUB_SHA} \
             -Dppl.lint.report=$(pwd)/backend-report.json \
             -Dppl.lint.grammar.bundle=$(pwd)/ppl-grammar-bundle.json \
             -Dppl.lint.target=$(pwd)/target.json"
