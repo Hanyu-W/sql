@@ -562,6 +562,29 @@ test('analytics coverage gaps cannot hide missing raw observations', () => {
   assert.match(report.inconclusive[0].reasons.join(' '), /no engine verdict/);
 });
 
+test('--all-rules makes incomplete non-default observations fail as infrastructure', () => {
+  const contracts = writeContracts();
+  const manifestFile = path.join(contracts, 'manifest.json');
+  const manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+  manifest.defaultError = [];
+  fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+  const leg = writeLeg({
+    version: '3.8.0',
+    defaultErrorRules: [],
+    cases: { control: { detector: 0, rejected: false } },
+  });
+
+  const { status, report } = run({
+    contracts,
+    legs: [['3.8.0', leg]],
+    extraArgs: ['--all-rules'],
+  });
+
+  assert.equal(status, 1);
+  assert.equal(report.result.enforcedInconclusive, 1);
+  assert.equal(report.matrix[0].status, 'inconclusive');
+});
+
 test('paired detector reports must be identical across execution backends', () => {
   const grammarHash = 'sha256:shared-runtime-grammar';
   const standard = writeLeg({

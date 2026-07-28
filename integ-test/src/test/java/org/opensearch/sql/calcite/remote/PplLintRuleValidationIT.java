@@ -1205,7 +1205,9 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
   private void verifyAnalyticsClusterSettings() throws IOException {
     Response nodesResponse =
         client().performRequest(new Request("GET", "/_nodes/settings?flat_settings=true"));
-    JSONObject nodes = new JSONObject(getResponseBody(nodesResponse, true)).getJSONObject("nodes");
+    JSONObject nodesBody = new JSONObject(getResponseBody(nodesResponse, true));
+    analyticsRouteAttestation.put("nodeSettings", nodesBody);
+    JSONObject nodes = nodesBody.getJSONObject("nodes");
     requireAttestation(nodes.length() > 0, "node settings response contained no nodes");
     for (String nodeId : nodes.keySet()) {
       String startupDataFormat =
@@ -1239,12 +1241,12 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
             .performRequest(
                 new Request("GET", "/_cluster/settings?flat_settings=true&include_defaults=true"));
     JSONObject settings = new JSONObject(getResponseBody(response, true));
+    analyticsRouteAttestation.put("clusterSettings", settings);
 
     requireEffectiveSetting(settings, "cluster.pluggable.dataformat", "composite");
     requireEffectiveSetting(settings, "cluster.pluggable.dataformat.enabled", "true");
     requireEffectiveSetting(settings, "cluster.composite.primary_data_format", "parquet");
     requireEffectiveSettingContains(settings, "cluster.composite.secondary_data_formats", "lucene");
-    analyticsRouteAttestation.put("clusterSettings", settings);
   }
 
   private void verifyAnalyticsFixtureIndices() throws IOException {
@@ -1284,11 +1286,11 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
       Response countResponse =
           client().performRequest(new Request("GET", "/" + indexName + "/_count"));
       long count = new JSONObject(getResponseBody(countResponse, true)).getLong("count");
+      documentCounts.put(indexName, count);
+      fixtureEvidence.put("documentCount", count);
       requireAttestation(
           count > 0,
           "fixture " + indexName + " contains no documents; fixture ingestion did not complete");
-      documentCounts.put(indexName, count);
-      fixtureEvidence.put("documentCount", count);
     }
   }
 
@@ -1346,9 +1348,12 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
   }
 
   private void verifyAnalyticsExplainCanaries() throws IOException {
+    JSONObject explainPlans = new JSONObject();
+    analyticsRouteAttestation.put("explainPlans", explainPlans);
     for (String indexEnum : requiredIndexEnums()) {
       String query = analyticsCanaryQuery(indexEnum);
       String explained = explainQueryToString(query);
+      explainPlans.put(indexEnum, explained);
       requireAttestation(
           explained.contains("LogicalTableScan(table=[[opensearch,"),
           "fixture " + indexEnum + " did not use LogicalTableScan(opensearch): " + explained);
@@ -1360,8 +1365,13 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
 
   private void verifyAnalyticsProfileCanaries() throws IOException {
     JSONArray executionTypes = new JSONArray();
+    JSONObject profiles = new JSONObject();
+    analyticsRouteAttestation
+        .put("profileExecutionTypes", executionTypes)
+        .put("profiles", profiles);
     for (String indexEnum : requiredIndexEnums()) {
       JSONObject response = runProfiledPplQuery(analyticsCanaryQuery(indexEnum));
+      profiles.put(indexEnum, response);
       JSONObject profile = response.getJSONObject("profile");
       JSONArray stages = profile.getJSONObject("plan").getJSONArray("stages");
       requireAttestation(
@@ -1377,7 +1387,6 @@ public class PplLintRuleValidationIT extends PPLIntegTestCase {
         executionTypes.put(stage.getString("execution_type"));
       }
     }
-    analyticsRouteAttestation.put("profileExecutionTypes", executionTypes);
   }
 
   private String analyticsCanaryQuery(String indexEnum) {

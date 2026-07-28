@@ -314,6 +314,28 @@ test('backend oracle payloads fail closed when required shapes are malformed', (
     },
     {
       oracle: {
+        kind: 'rejection',
+        httpStatus: 400,
+        body: { status: 500 },
+      },
+      expected: /\.httpStatus must equal .*\.body\.status/,
+    },
+    {
+      oracle: {
+        kind: 'result-shape',
+        httpStatus: 201,
+      },
+      expected: /\.httpStatus must be 200/,
+    },
+    {
+      oracle: {
+        kind: 'advisory',
+        httpStatus: 204,
+      },
+      expected: /\.httpStatus must be 200/,
+    },
+    {
+      oracle: {
         kind: 'result-shape',
         httpStatus: 200,
         expect: { datarowsNonEmpty: 'yes' },

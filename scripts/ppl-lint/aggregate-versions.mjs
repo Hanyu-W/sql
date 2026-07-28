@@ -1382,7 +1382,11 @@ function main() {
   }
   const enforcedDrifts = drifts.filter((d) => d.blocking);
   const enforcedHoles = coverageHoles.filter((h) => h.blocking);
-  const enforcedInconclusive = inconclusive.filter((i) => i.enforced);
+  // `--all-rules` widens observation to the whole corpus. Semantic drift remains
+  // enforced only for default-error rules, but a missing detector row or backend
+  // verdict is an infrastructure failure for every rule we asked the run to
+  // observe.
+  const enforcedInconclusive = inconclusive.filter((i) => i.enforced || args.allRules);
   for (const row of matrix) {
     row.key = reportItemKey(row, 'matrix');
   }
