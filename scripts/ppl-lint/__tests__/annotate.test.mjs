@@ -129,6 +129,29 @@ test('a non-enforced drift is a warning so it cannot be read as blocking', () =>
   assert.equal(annotations[0].level, 'warning');
 });
 
+test('backend divergence annotations name both execution routes', () => {
+  const annotations = buildAnnotations(
+    {
+      drifts: [
+        {
+          ruleId: 'invalid-capture-group-name',
+          version: '3.8.0',
+          executionBackend: 'analytics',
+          executionBackends: ['standard', 'analytics'],
+          driftClass: 'execution-backend-divergence',
+          enforced: true,
+          contractFile: 'invalid-capture-group-name.spec.json',
+          evidence: 'standard rejected while analytics accepted',
+          remediation: { action: 'align-execution-backends', detail: 'Align route behavior.' },
+        },
+      ],
+    },
+    { contractsDir: '/w/contracts', workspace: '/w', readFile: readStub(CONTRACT) }
+  );
+  assert.match(annotations[0].title, /standard vs analytics/);
+  assert.match(annotations[0].title, /execution-backend-divergence/);
+});
+
 test('an unvalidated rule has no file to point at', () => {
   const annotations = buildAnnotations(
     { missingContracts: [{ ruleId: 'sort-on-eval-field', reason: 'has no contract file' }] },

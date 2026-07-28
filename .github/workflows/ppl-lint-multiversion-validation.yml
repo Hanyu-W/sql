@@ -55,7 +55,10 @@ on:
   # point is to see the multi-version effect of the change.
   pull_request:
     paths:
+      - 'integ-test/build.gradle'
+      - 'integ-test/src/test/java/org/opensearch/sql/calcite/remote/PplLintRuleValidationIT.java'
       - 'integ-test/src/test/resources/ppl-lint/**'
+      - 'scripts/ppl-lint-rule-validation.sh'
       - 'scripts/ppl-lint/**'
       - '.github/workflows/ppl-lint-multiversion-validation.yml'
   workflow_dispatch:
@@ -79,6 +82,10 @@ on:
 
 permissions:
   contents: read
+
+concurrency:
+  group: ppl-lint-multiversion-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   # Released engine versions to validate on the RUNTIME-BUNDLE surface. Each must
@@ -273,6 +280,8 @@ jobs:
             -Dtests.clustername=docker-cluster \
             -Dppl.lint.schedule=nightly \
             -Dppl.lint.observe.only=true \
+            -Dppl.lint.execution_backend=standard \
+            -Dppl.lint.sql_sha="${GITHUB_SHA}" \
             -Dppl.lint.report="$(pwd)/leg/backend-report.json" \
             -Dppl.lint.grammar.bundle="$(pwd)/leg/ppl-grammar-bundle.json" \
             -Dppl.lint.target="$(pwd)/leg/target.json"
@@ -454,6 +463,8 @@ jobs:
             -Dtests.clustername=docker-cluster \
             -Dppl.lint.schedule=nightly \
             -Dppl.lint.observe.only=true \
+            -Dppl.lint.execution_backend=standard \
+            -Dppl.lint.sql_sha="${GITHUB_SHA}" \
             -Dppl.lint.report="$(pwd)/leg/backend-report.json" \
             -Dppl.lint.target="$(pwd)/leg/target.json"
           # Mark the leg so the detect job knows to lint it on the compiled surface.
@@ -513,6 +524,8 @@ jobs:
             --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT \
             -Dppl.lint.schedule=nightly \
             -Dppl.lint.observe.only=true \
+            -Dppl.lint.execution_backend=standard \
+            -Dppl.lint.sql_sha=${GITHUB_SHA} \
             -Dppl.lint.report=$(pwd)/leg/backend-report.json \
             -Dppl.lint.grammar.bundle=$(pwd)/leg/ppl-grammar-bundle.json \
             -Dppl.lint.target=$(pwd)/leg/target.json"
@@ -533,6 +546,63 @@ jobs:
           name: ppl-lint-leg-pr-build-logs
           path: |
             integ-test/build/reports/**
+            integ-test/build/test-results/**
+            integ-test/build/testclusters/*/logs/*
+
+  # The PR build through the full composite/Parquet + DataFusion stack. This is
+  # an observation leg: route/identity/infrastructure failures are fatal, while
+  # backend oracles are promoted only after their captured behavior is reviewed.
+  observe-pr-build-analytics:
+    name: Observe engine pr-build (analytics)
+    needs: Get-CI-Image-Tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
+      options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
+    steps:
+      - name: Run start commands
+        run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
+
+      - name: Checkout SQL pull request
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: 'temurin'
+          java-version: 25
+
+      - name: Run analytics contract observation against the PR build
+        run: |
+          set -euo pipefail
+          mkdir -p leg
+          chown -R 1000:1000 "$(pwd)"
+          su "$(id -un 1000)" -c "./gradlew :integ-test:analyticsEnginePplLintIT \
+            -Dppl.lint.schedule=nightly \
+            -Dppl.lint.observe.only=true \
+            -Dppl.lint.sql_sha=${GITHUB_SHA} \
+            -Dppl.lint.report=$(pwd)/leg/backend-report.json \
+            -Dppl.lint.grammar.bundle=$(pwd)/leg/ppl-grammar-bundle.json \
+            -Dppl.lint.target=$(pwd)/leg/target.json"
+
+      - name: Upload analytics leg artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ppl-lint-leg-pr-build-analytics
+          path: leg
+          if-no-files-found: error
+
+      - name: Upload analytics failure logs
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        continue-on-error: true
+        with:
+          name: ppl-lint-leg-pr-build-analytics-logs
+          path: |
+            integ-test/build/reports/**
+            integ-test/build/test-results/**
             integ-test/build/testclusters/*/logs/*
 
   # Lint each engine's exported grammar with the OSD detectors. Separate from the
@@ -549,6 +619,7 @@ jobs:
       - observe-released
       - observe-compiled
       - observe-pr-build
+      - observe-pr-build-analytics
     if: ${{ always() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 40
@@ -639,7 +710,11 @@ jobs:
               echo "skipping $leg (no grammar bundle and no compiled-surface marker)"
               continue
             fi
-            env "${surface_env[@]}" \
+            observe_env=(PPL_LINT_OBSERVE_ONLY=1)
+            if [ "$(jq -r '.executionBackend // empty' "$leg/target.json")" = 'analytics' ]; then
+              observe_env+=(PPL_LINT_OBSERVE_ANALYTICS=1)
+            fi
+            env "${surface_env[@]}" "${observe_env[@]}" \
             PPL_LINT_CONTRACT_DIR="$GITHUB_WORKSPACE/integ-test/src/test/resources/ppl-lint/contracts" \
             PPL_LINT_SCHEDULE=nightly \
             PPL_LINT_TARGET_MANIFEST="$leg/target.json" \
@@ -693,7 +768,7 @@ jobs:
           import json,sys
           print(' '.join(f'{v}-compiled' for v in json.load(sys.stdin)))
           ")
-          for want in $(echo "$RELEASED" | python3 -c "import json,sys;print(' '.join(json.load(sys.stdin)))") $compiled_wanted pr-build; do
+          for want in $(echo "$RELEASED" | python3 -c "import json,sys;print(' '.join(json.load(sys.stdin)))") $compiled_wanted pr-build pr-build-analytics; do
             found=no
             for have in "${present[@]}"; do
               [ "$have" = "$want" ] && found=yes && break
@@ -708,6 +783,7 @@ jobs:
             --contracts "$GITHUB_WORKSPACE/integ-test/src/test/resources/ppl-lint/contracts" \
             --out "$GITHUB_WORKSPACE/drift-report.json" \
             --summary "$GITHUB_STEP_SUMMARY" \
+            --observe-analytics \
             "${args[@]}"
 
       - name: Upload drift report
@@ -876,8 +952,13 @@ jobs:
           ")
             python3 -c "
           import json
-          json.dump({'engineVersion': '${{ needs.plan.outputs.discovery_engine }}',
-                     'grammarHash': '$hash'},
+          json.dump({'schemaVersion': 2,
+                     'engineVersion': '${{ needs.plan.outputs.discovery_engine }}',
+                     'grammarHash': '$hash',
+                     'grammarBundle': 'discovery-bundle.json',
+                     'executionBackend': 'standard',
+                     'storage': 'lucene',
+                     'shardCount': 1},
                     open('$GITHUB_WORKSPACE/discovery-target.json','w'))
           "
             echo "surface=runtime-bundle" >> "$GITHUB_OUTPUT"
@@ -888,6 +969,17 @@ jobs:
             # The surface is recorded in the report, so a reader can see which ran.
             echo "::warning::_grammar export failed; falling back to the compiled surface (runtimeOnly rules will not be observed)."
             echo "surface=compiled-simplified" >> "$GITHUB_OUTPUT"
+            python3 -c "
+          import json
+          json.dump({'schemaVersion': 2,
+                     'engineVersion': '${{ needs.plan.outputs.discovery_engine }}',
+                     'grammarHash': '',
+                     'grammarBundle': '',
+                     'executionBackend': 'standard',
+                     'storage': 'lucene',
+                     'shardCount': 1},
+                    open('$GITHUB_WORKSPACE/discovery-target.json','w'))
+          "
           fi
 
       - name: Run the detectors over the discovery corpus
@@ -900,10 +992,11 @@ jobs:
           # expanding an empty array as "${a[@]}" is an unbound-variable error in bash
           # before 4.4, which would crash the compiled-surface fallback — the very
           # path that only runs when something else already went wrong.
-          extra=(PPL_LINT_DISCOVERY=1)
+          extra=(PPL_LINT_DISCOVERY=1
+                 PPL_LINT_TARGET_MANIFEST="$GITHUB_WORKSPACE/discovery-target.json")
           if [ "$SURFACE" = 'runtime-bundle' ]; then
             extra+=(PPL_LINT_GRAMMAR_BUNDLE="$GITHUB_WORKSPACE/discovery-bundle.json"
-                    PPL_LINT_TARGET_MANIFEST="$GITHUB_WORKSPACE/discovery-target.json")
+                   )
           fi
           # A non-zero exit is EXPECTED and ignored: the generated specs carry
           # placeholder expectations, so the runner reports a "failure" for every

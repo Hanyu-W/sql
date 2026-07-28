@@ -15,9 +15,9 @@
  * which is what this does, in the same report shape the aggregator and the labeler
  * already read.
  *
- * Emits `[{ ruleId, queryName, rejected, outcome, observed: { httpStatus, type,
- * reason } }]`, matching `backend-report.json` so `label-discovery.mjs` can read
- * either source without a special case.
+ * Emits `[{ ruleId, queryName, executionBackend, rejected, outcome, observed:
+ * { httpStatus, type, reason } }]`, matching `backend-report.json` so
+ * `label-discovery.mjs` can read either source without a special case.
  *
  * The `outcome` field carries the distinction everything downstream depends on:
  *
@@ -172,6 +172,7 @@ async function main() {
       queryName: entry.name || `discovery-${i}`,
       role: 'discovery',
       query: entry.query,
+      executionBackend: 'standard',
       ...verdict,
     };
   });

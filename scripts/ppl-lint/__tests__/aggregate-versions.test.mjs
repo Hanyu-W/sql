@@ -114,12 +114,41 @@ function writeLeg({
   version,
   cases,
   parserRuleNames = ['unionCommand', 'unionDataset'],
-  defaultErrorRules,
+  defaultErrorRules = [SPEC.ruleId],
+  executionBackend = 'standard',
+  grammarHash = `sha256:${version}`,
+  surface = 'runtime-bundle',
+  explicitIdentity = true,
 }) {
   const dir = makeTmp(`ppl-lint-leg-${version}-`);
+  const target = {
+    engineVersion: version,
+    grammarHash,
+    ...(explicitIdentity
+      ? {
+          schemaVersion: 2,
+          sqlSha: 'candidate-sql-sha',
+          executionBackend,
+          storage: executionBackend === 'analytics' ? 'composite-parquet' : 'lucene',
+          shardCount: 1,
+          ...(executionBackend === 'analytics'
+            ? {
+                analyticsStack: { source: 'https://example.test/analytics-build' },
+                routeAttestation: {
+                  pluginsVerified: true,
+                  clusterSettingsVerified: true,
+                  fixtureIndicesVerified: true,
+                  explainVerified: true,
+                  profiledExecutionVerified: true,
+                },
+              }
+            : {}),
+        }
+      : {}),
+  };
   fs.writeFileSync(
     path.join(dir, 'target.json'),
-    JSON.stringify({ engineVersion: version, grammarHash: `sha256:${version}` })
+    JSON.stringify(target)
   );
   fs.writeFileSync(
     path.join(dir, 'ppl-grammar-bundle.json'),
@@ -137,6 +166,9 @@ function writeLeg({
       expected: role === 'trigger' ? 1 : 0,
       actual: c.detector,
       severities: c.severities || (c.detector > 0 ? ['error'] : []),
+      severityMatched: c.severityMatched ?? true,
+      messageMatched: c.messageMatched ?? true,
+      ...(explicitIdentity ? { executionBackend } : {}),
     });
     backend.push({
       ruleId: SPEC.ruleId,
@@ -144,15 +176,31 @@ function writeLeg({
       role,
       rejected: !!c.rejected,
       observed: {
-        httpStatus: c.rejected ? 400 : 200,
+        httpStatus: c.httpStatus || (c.rejected ? 400 : 200),
         rejected: !!c.rejected,
         ...(c.rejected ? { type: c.type || REJECTION.type, reason: c.reason || REJECTION.reason } : {}),
       },
+      ...(c.outcome ? { outcome: c.outcome } : {}),
+      ...(c.error ? { error: c.error } : {}),
+      ...(explicitIdentity ? { executionBackend } : {}),
     });
   }
+  const detectorIdentity = explicitIdentity
+    ? {
+        schemaVersion: 2,
+        executionBackend,
+        engineVersion: version,
+        grammarHash,
+      }
+    : {};
   fs.writeFileSync(
     path.join(dir, 'detector-report.json'),
-    JSON.stringify({ results, ...(defaultErrorRules ? { defaultErrorRules } : {}) })
+    JSON.stringify({
+      ...detectorIdentity,
+      surface,
+      results,
+      ...(defaultErrorRules !== null ? { defaultErrorRules } : {}),
+    })
   );
   fs.writeFileSync(path.join(dir, 'backend-report.json'), JSON.stringify(backend));
   return dir;
@@ -163,7 +211,8 @@ function run({ contracts, legs, extraArgs = [] }) {
   const outDir = makeTmp('ppl-lint-out-');
   const out = path.join(outDir, 'drift-report.json');
   const args = [SCRIPT, '--contracts', contracts, '--out', out];
-  for (const [version, dir] of Object.entries(legs)) {
+  const entries = Array.isArray(legs) ? legs : Object.entries(legs);
+  for (const [version, dir] of entries) {
     args.push('--leg', `${version}=${dir}`);
   }
   args.push(...extraArgs);
@@ -186,6 +235,43 @@ function healthyLegs() {
   };
 }
 
+function writeSchema4Contracts({ includeAnalytics = true } = {}) {
+  const routeOracles = (standard, analytics) => ({
+    standard,
+    ...(includeAnalytics ? { analytics } : {}),
+  });
+  return writeContracts({
+    schemaVersion: 4,
+    expectations: [
+      {
+        version: '>=3.7.0',
+        engine: 'calcite',
+        queries: {
+          trigger: {
+            detectorCount: 1,
+            severity: 'error',
+            backends: routeOracles(
+              {
+                kind: 'rejection',
+                httpStatus: 400,
+                body: { status: 400, error: REJECTION },
+              },
+              { kind: 'result-shape', httpStatus: 200 }
+            ),
+          },
+          control: {
+            detectorCount: 0,
+            backends: routeOracles(
+              { kind: 'result-shape', httpStatus: 200 },
+              { kind: 'result-shape', httpStatus: 200 }
+            ),
+          },
+        },
+      },
+    ],
+  });
+}
+
 test('all versions agreeing exits 0 and reports no drift', () => {
   const { status, report, stdout } = run({ contracts: writeContracts(), legs: healthyLegs() });
   assert.equal(status, 0);
@@ -195,6 +281,460 @@ test('all versions agreeing exits 0 and reports no drift', () => {
   // Every rule/version pair is accounted for in the matrix.
   assert.equal(report.matrix.length, 2);
   assert.ok(report.matrix.every((m) => m.status === 'agree'));
+});
+
+test('same-version standard and analytics verdicts are classified as backend divergence', () => {
+  const grammarHash = 'sha256:shared-runtime-grammar';
+  const standard = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'standard',
+    explicitIdentity: true,
+    grammarHash,
+    cases: {
+      trigger: { detector: 1, rejected: true },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const analytics = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    grammarHash,
+    cases: {
+      trigger: { detector: 1, rejected: false },
+      control: { detector: 0, rejected: false },
+    },
+  });
+
+  const { status, report, stdout } = run({
+    contracts: writeSchema4Contracts(),
+    legs: [
+      ['pr-build', standard],
+      ['pr-build', analytics],
+    ],
+  });
+
+  assert.equal(status, 1);
+  assert.equal(report.schemaVersion, 2);
+  assert.equal(report.legs.length, 2);
+  assert.equal(new Set(report.legs.map((leg) => leg.key)).size, 2);
+  assert.deepEqual(
+    report.legs.map((leg) => leg.executionBackend).sort(),
+    ['analytics', 'standard']
+  );
+  assert.equal(report.backendPairs.length, 1);
+  assert.ok(report.matrix.every((row) => row.status === 'drift'));
+  assert.ok(report.matrix.every((row) => row.key.includes(row.executionBackend)));
+
+  const divergence = report.drifts.find(
+    (drift) => drift.driftClass === 'execution-backend-divergence'
+  );
+  assert.ok(divergence);
+  assert.deepEqual(divergence.executionBackends, ['standard', 'analytics']);
+  assert.match(divergence.key, /standard-vs-analytics/);
+  assert.equal(divergence.remediation.action, 'align-execution-backends');
+  assert.doesNotMatch(divergence.remediation.detail, /maxVersion|minVersion|scope/i);
+  assert.equal(
+    report.drifts.filter(
+      (drift) =>
+        drift.driftClass === 'engine-relaxed' || drift.driftClass === 'engine-tightened'
+    ).length,
+    0,
+    'route differences must not be rendered as product-version drift'
+  );
+  assert.match(stdout, /`3\.8\.0`<br>standard/);
+  assert.match(stdout, /`3\.8\.0`<br>analytics/);
+});
+
+test('schema-v3 analytics has explicit backend-oracle coverage holes', () => {
+  const analytics = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    cases: {
+      trigger: { detector: 1, rejected: false },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const { status, report, stdout } = run({
+    contracts: writeContracts(),
+    legs: [['pr-build-analytics', analytics]],
+  });
+
+  assert.equal(status, 1);
+  assert.equal(report.result.enforcedCoverageHoles, 2);
+  assert.ok(report.coverageHoles.every((hole) => hole.executionBackend === 'analytics'));
+  assert.ok(report.coverageHoles.every((hole) => hole.kind === 'backend-oracle'));
+  assert.ok(report.coverageHoles.every((hole) => /standard-only/.test(hole.reason)));
+  assert.equal(report.matrix[0].status, 'uncovered');
+  assert.equal(report.drifts.length, 0);
+  assert.match(stdout, /schema-v3 backend oracles are standard-only/);
+});
+
+test('analytics observation mode reports schema-v3 coverage without failing', () => {
+  const analytics = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    cases: {
+      trigger: { detector: 1, rejected: false },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const { status, report } = run({
+    contracts: writeContracts(),
+    legs: [['pr-build-analytics', analytics]],
+    extraArgs: ['--observe-analytics'],
+  });
+
+  assert.equal(status, 0);
+  assert.equal(report.result.enforcedCoverageHoles, 0);
+  assert.equal(report.result.observedAnalyticsFindings, 2);
+  assert.ok(report.coverageHoles.every((hole) => hole.blocking === false));
+});
+
+test('schema-v3 raw analytics observations still expose backend divergence', () => {
+  const grammarHash = 'sha256:shared-runtime-grammar';
+  const standard = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'standard',
+    explicitIdentity: true,
+    grammarHash,
+    cases: {
+      trigger: { detector: 1, rejected: true },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const analytics = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    grammarHash,
+    cases: {
+      trigger: { detector: 1, rejected: false },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const backendFile = path.join(analytics, 'backend-report.json');
+  const backend = JSON.parse(fs.readFileSync(backendFile, 'utf8')).map((entry) => ({
+    ...entry,
+    kind: 'coverage-missing',
+    outcome: 'coverage-missing',
+    coverage: 'missing',
+  }));
+  fs.writeFileSync(backendFile, JSON.stringify(backend));
+
+  const { status, report } = run({
+    contracts: writeContracts(),
+    legs: [
+      ['pr-build', standard],
+      ['pr-build-analytics', analytics],
+    ],
+    extraArgs: ['--observe-analytics'],
+  });
+
+  assert.equal(status, 0);
+  assert.equal(
+    report.drifts.filter((drift) => drift.driftClass === 'execution-backend-divergence')
+      .length,
+    1
+  );
+  assert.equal(report.result.observedAnalyticsFindings, 3);
+});
+
+test('backend divergence cannot hide a standard-route regression', () => {
+  const grammarHash = 'sha256:shared-runtime-grammar';
+  const standard = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'standard',
+    grammarHash,
+    cases: {
+      trigger: { detector: 1, rejected: false },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const analytics = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    grammarHash,
+    cases: {
+      trigger: { detector: 1, rejected: true },
+      control: { detector: 0, rejected: false },
+    },
+  });
+
+  const { status, report } = run({
+    contracts: writeSchema4Contracts(),
+    legs: [
+      ['pr-build', standard],
+      ['pr-build-analytics', analytics],
+    ],
+    extraArgs: ['--observe-analytics'],
+  });
+
+  assert.equal(status, 1);
+  assert.ok(
+    report.drifts.some(
+      (drift) =>
+        drift.executionBackend === 'standard' &&
+        drift.driftClass === 'engine-relaxed'
+    ),
+    'the blocking standard-route regression must survive paired-route classification'
+  );
+  assert.ok(
+    report.drifts.some(
+      (drift) => drift.driftClass === 'execution-backend-divergence'
+    )
+  );
+  assert.ok(report.result.enforcedDriftCount > 0);
+});
+
+test('not-applicable cannot waive an enforced analytics backend oracle', () => {
+  const contracts = writeSchema4Contracts();
+  const contractFile = path.join(contracts, 'union.spec.json');
+  const contract = JSON.parse(fs.readFileSync(contractFile, 'utf8'));
+  for (const query of Object.values(contract.expectations[0].queries)) {
+    query.backends.analytics = {
+      kind: 'not-applicable',
+      reason: 'analytics fixture is not supported yet',
+      owner: '@analytics-team',
+      issue: 'https://example.test/issues/42',
+    };
+  }
+  fs.writeFileSync(contractFile, JSON.stringify(contract));
+
+  const analytics = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    cases: {
+      trigger: { detector: 1, rejected: false },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const backendFile = path.join(analytics, 'backend-report.json');
+  const backend = JSON.parse(fs.readFileSync(backendFile, 'utf8')).map((entry) => ({
+    ruleId: entry.ruleId,
+    queryName: entry.queryName,
+    role: entry.role,
+    executionBackend: entry.executionBackend,
+    kind: 'not-applicable',
+    outcome: 'not-applicable',
+  }));
+  fs.writeFileSync(backendFile, JSON.stringify(backend));
+
+  const { status, report } = run({
+    contracts,
+    legs: [['pr-build-analytics', analytics]],
+  });
+
+  assert.equal(status, 1);
+  assert.equal(report.result.enforcedCoverageHoles, 2);
+  assert.ok(report.coverageHoles.every((hole) => hole.issue.endsWith('/42')));
+  assert.equal(report.matrix[0].status, 'uncovered');
+});
+
+test('analytics coverage gaps cannot hide missing raw observations', () => {
+  const analytics = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    cases: {
+      trigger: { detector: 1, rejected: false },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const backendFile = path.join(analytics, 'backend-report.json');
+  const backend = JSON.parse(fs.readFileSync(backendFile, 'utf8')).map((entry) => ({
+    ruleId: entry.ruleId,
+    queryName: entry.queryName,
+    role: entry.role,
+    executionBackend: 'analytics',
+    kind: 'coverage-missing',
+    outcome: 'error',
+    error: 'connect timeout',
+  }));
+  fs.writeFileSync(backendFile, JSON.stringify(backend));
+
+  const { status, report } = run({
+    contracts: writeContracts(),
+    legs: [['pr-build-analytics', analytics]],
+    extraArgs: ['--observe-analytics'],
+  });
+
+  assert.equal(status, 1);
+  assert.equal(report.result.enforcedInconclusive, 1);
+  assert.equal(report.matrix[0].status, 'inconclusive');
+  assert.match(report.inconclusive[0].reasons.join(' '), /no engine verdict/);
+});
+
+test('paired detector reports must be identical across execution backends', () => {
+  const grammarHash = 'sha256:shared-runtime-grammar';
+  const standard = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'standard',
+    explicitIdentity: true,
+    grammarHash,
+    cases: {
+      trigger: { detector: 1, rejected: true },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const analytics = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    grammarHash,
+    cases: {
+      trigger: { detector: 1, rejected: false },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const detectorFile = path.join(analytics, 'detector-report.json');
+  const detector = JSON.parse(fs.readFileSync(detectorFile, 'utf8'));
+  detector.results.find((entry) => entry.queryName === 'trigger').actual = 0;
+  detector.results.find((entry) => entry.queryName === 'trigger').severities = [];
+  fs.writeFileSync(detectorFile, JSON.stringify(detector));
+
+  const { status, stderr } = run({
+    contracts: writeSchema4Contracts(),
+    legs: [
+      ['pr-build', standard],
+      ['pr-build-analytics', analytics],
+    ],
+    extraArgs: ['--observe-analytics'],
+  });
+
+  assert.equal(status, 2);
+  assert.match(stderr, /detector parity failed for union-min-datasets::trigger/);
+});
+
+test('target and detector execution identities must match', () => {
+  const dir = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    cases: { trigger: { detector: 1, rejected: true } },
+  });
+  const detectorFile = path.join(dir, 'detector-report.json');
+  const detector = JSON.parse(fs.readFileSync(detectorFile, 'utf8'));
+  detector.executionBackend = 'standard';
+  fs.writeFileSync(detectorFile, JSON.stringify(detector));
+
+  const { status, stderr } = run({
+    contracts: writeSchema4Contracts(),
+    legs: [['pr-build-analytics', dir]],
+  });
+  assert.equal(status, 2);
+  assert.match(stderr, /detector report executionBackend "standard" does not match target "analytics"/);
+});
+
+test('unknown target execution backends are rejected', () => {
+  const dir = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'standard',
+    explicitIdentity: true,
+    cases: { trigger: { detector: 1, rejected: true } },
+  });
+  const targetFile = path.join(dir, 'target.json');
+  const target = JSON.parse(fs.readFileSync(targetFile, 'utf8'));
+  target.executionBackend = 'experimental';
+  fs.writeFileSync(targetFile, JSON.stringify(target));
+
+  const { status, stderr } = run({
+    contracts: writeContracts(),
+    legs: [['pr-build', dir]],
+  });
+  assert.equal(status, 2);
+  assert.match(stderr, /must be "standard" or "analytics"/);
+});
+
+test('every backend row must match its target execution identity', () => {
+  const dir = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    cases: { trigger: { detector: 1, rejected: true } },
+  });
+  const backendFile = path.join(dir, 'backend-report.json');
+  const backend = JSON.parse(fs.readFileSync(backendFile, 'utf8'));
+  backend[0].executionBackend = 'standard';
+  fs.writeFileSync(backendFile, JSON.stringify(backend));
+
+  const { status, stderr } = run({
+    contracts: writeSchema4Contracts(),
+    legs: [['pr-build-analytics', dir]],
+  });
+  assert.equal(status, 2);
+  assert.match(stderr, /backend report row .* does not match target "analytics"/);
+});
+
+test('duplicate backend row keys are rejected instead of overwritten', () => {
+  const dir = writeLeg({
+    version: '3.8.0',
+    cases: { trigger: { detector: 1, rejected: true } },
+  });
+  const backendFile = path.join(dir, 'backend-report.json');
+  const backend = JSON.parse(fs.readFileSync(backendFile, 'utf8'));
+  backend.push({ ...backend[0] });
+  fs.writeFileSync(backendFile, JSON.stringify(backend));
+
+  const { status, stderr } = run({
+    contracts: writeContracts(),
+    legs: [['3.8.0', dir]],
+  });
+  assert.equal(status, 2);
+  assert.match(stderr, /duplicate backend report key "union-min-datasets::trigger"/);
+});
+
+test('duplicate detector row keys are rejected instead of selecting the first', () => {
+  const dir = writeLeg({
+    version: '3.8.0',
+    cases: { trigger: { detector: 1, rejected: true } },
+  });
+  const detectorFile = path.join(dir, 'detector-report.json');
+  const detector = JSON.parse(fs.readFileSync(detectorFile, 'utf8'));
+  detector.results.push({ ...detector.results[0] });
+  fs.writeFileSync(detectorFile, JSON.stringify(detector));
+
+  const { status, stderr } = run({
+    contracts: writeContracts(),
+    legs: [['3.8.0', dir]],
+  });
+  assert.equal(status, 2);
+  assert.match(stderr, /duplicate detector report key "union-min-datasets::trigger"/);
+});
+
+test('duplicate backend-qualified leg identities are rejected', () => {
+  const dir = writeLeg({
+    version: '3.8.0',
+    cases: { trigger: { detector: 1, rejected: true } },
+  });
+  const { status, stderr } = run({
+    contracts: writeContracts(),
+    legs: [
+      ['3.8.0', dir],
+      ['3.8.0', dir],
+    ],
+  });
+  assert.equal(status, 2);
+  assert.match(stderr, /duplicate leg identity/);
+});
+
+test('paired standard and analytics legs require the same runtime grammar hash', () => {
+  const standard = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'standard',
+    explicitIdentity: true,
+    grammarHash: 'sha256:standard',
+    cases: { trigger: { detector: 1, rejected: true } },
+  });
+  const analytics = writeLeg({
+    version: '3.8.0',
+    executionBackend: 'analytics',
+    grammarHash: 'sha256:analytics',
+    cases: { trigger: { detector: 1, rejected: true } },
+  });
+  const { status, stderr } = run({
+    contracts: writeSchema4Contracts(),
+    legs: [
+      ['pr-build', standard],
+      ['pr-build', analytics],
+    ],
+  });
+  assert.equal(status, 2);
+  assert.match(stderr, /different grammar hashes/);
 });
 
 test('a version where only one engine relaxed is red, and names just that version', () => {
@@ -213,6 +753,54 @@ test('a version where only one engine relaxed is red, and names just that versio
   assert.equal(drift.remediation.action, 'version-scope-rule');
   // The healthy version is still reported as agreeing.
   assert.equal(report.matrix.find((m) => m.version === '3.7.0').status, 'agree');
+});
+
+test('a changed rejection HTTP status is semantic drift, not agreement', () => {
+  const leg = writeLeg({
+    version: '3.8.0',
+    cases: {
+      trigger: { detector: 1, rejected: true, httpStatus: 500 },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const { status, report } = run({
+    contracts: writeContracts(),
+    legs: [['3.8.0', leg]],
+  });
+
+  assert.equal(status, 1);
+  const drift = report.drifts.find(
+    (entry) => entry.driftClass === 'backend-oracle-mismatch'
+  );
+  assert.ok(drift);
+  assert.match(drift.evidence, /HTTP status changed from 400 to 500/);
+  assert.equal(drift.remediation.action, 'review-backend-oracle');
+});
+
+test('a same-verdict result-shape mismatch cannot pass aggregation', () => {
+  const leg = writeLeg({
+    version: '3.8.0',
+    cases: {
+      trigger: { detector: 1, rejected: true },
+      control: {
+        detector: 0,
+        rejected: false,
+        outcome: 'observed-mismatch',
+        error: 'expected non-empty datarows',
+      },
+    },
+  });
+  const { status, report } = run({
+    contracts: writeContracts(),
+    legs: [['3.8.0', leg]],
+  });
+
+  assert.equal(status, 1);
+  const drift = report.drifts.find(
+    (entry) => entry.driftClass === 'backend-oracle-mismatch'
+  );
+  assert.ok(drift);
+  assert.match(drift.evidence, /expected non-empty datarows/);
 });
 
 // --- partial vs full relaxation, end to end ---------------------------------
@@ -460,12 +1048,55 @@ test('a census matching the manifest keeps the check green', () => {
   assert.equal(report.result.missingContractCount, 0);
 });
 
-test('a legacy detector report without a census warns instead of failing', () => {
-  // Older detector builds do not emit defaultErrorRules; the aggregator must say
-  // so out loud rather than quietly reporting full coverage.
-  const { status, stdout } = run({ contracts: writeContracts(), legs: healthyLegs() });
-  assert.equal(status, 0);
-  assert.match(stdout, /no detector leg reported a defaultErrorRules census/);
+test('a schema-v2 detector report without a census fails closed', () => {
+  const dir = writeLeg({
+    version: '3.8.0',
+    defaultErrorRules: null,
+    cases: {
+      trigger: { detector: 1, rejected: true },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const { status, stderr } = run({
+    contracts: writeContracts(),
+    legs: { '3.8.0': dir },
+  });
+  assert.equal(status, 2);
+  assert.match(stderr, /defaultErrorRules must be a JSON array/);
+});
+
+test('a schema-v2 detector report with an unknown grammar surface fails closed', () => {
+  const dir = writeLeg({
+    version: '3.8.0',
+    surface: 'unknown-surface',
+    cases: {
+      trigger: { detector: 1, rejected: true },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const { status, stderr } = run({
+    contracts: writeContracts(),
+    legs: { '3.8.0': dir },
+  });
+  assert.equal(status, 2);
+  assert.match(stderr, /surface must be "runtime-bundle" or "compiled-simplified"/);
+});
+
+test('a schema-v2 detector census rejects duplicate rule identities', () => {
+  const dir = writeLeg({
+    version: '3.8.0',
+    defaultErrorRules: [SPEC.ruleId, SPEC.ruleId],
+    cases: {
+      trigger: { detector: 1, rejected: true },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const { status, stderr } = run({
+    contracts: writeContracts(),
+    legs: { '3.8.0': dir },
+  });
+  assert.equal(status, 2);
+  assert.match(stderr, /defaultErrorRules contains duplicate rule/);
 });
 
 // --- "we don't know" must never render as "it's fine" -------------------------
@@ -478,7 +1109,14 @@ function writeLegWithTransportError({ version, erroredQuery, cases }) {
     entry.queryName === erroredQuery
       ? // Exactly what the IT writes on a transport failure: an `error` outcome and
         // NO `rejected` field, because no verdict was ever received.
-        { ruleId: entry.ruleId, queryName: entry.queryName, role: entry.role, outcome: 'error', error: 'connect timeout' }
+        {
+          ruleId: entry.ruleId,
+          queryName: entry.queryName,
+          role: entry.role,
+          executionBackend: entry.executionBackend,
+          outcome: 'error',
+          error: 'connect timeout',
+        }
       : { ...entry, outcome: 'observed' }
   );
   fs.writeFileSync(file, JSON.stringify(backend));
@@ -523,11 +1161,19 @@ test('losing every trigger is inconclusive even when a control still compares', 
   fs.writeFileSync(
     path.join(dir, 'backend-report.json'),
     JSON.stringify([
-      { ruleId: SPEC.ruleId, queryName: 'trigger', role: 'trigger', outcome: 'error', error: 'timeout' },
+      {
+        ruleId: SPEC.ruleId,
+        queryName: 'trigger',
+        role: 'trigger',
+        executionBackend: 'standard',
+        outcome: 'error',
+        error: 'timeout',
+      },
       {
         ruleId: SPEC.ruleId,
         queryName: 'control',
         role: 'control',
+        executionBackend: 'standard',
         rejected: false,
         outcome: 'observed',
         observed: { httpStatus: 200, rejected: false },
@@ -549,8 +1195,22 @@ test('a leg where nothing could be compared is inconclusive, not agreement', () 
   fs.writeFileSync(
     path.join(dir, 'backend-report.json'),
     JSON.stringify([
-      { ruleId: SPEC.ruleId, queryName: 'trigger', role: 'trigger', outcome: 'error', error: 'timeout' },
-      { ruleId: SPEC.ruleId, queryName: 'control', role: 'control', outcome: 'error', error: 'timeout' },
+      {
+        ruleId: SPEC.ruleId,
+        queryName: 'trigger',
+        role: 'trigger',
+        executionBackend: 'standard',
+        outcome: 'error',
+        error: 'timeout',
+      },
+      {
+        ruleId: SPEC.ruleId,
+        queryName: 'control',
+        role: 'control',
+        executionBackend: 'standard',
+        outcome: 'error',
+        error: 'timeout',
+      },
     ])
   );
   const { status, report, stdout } = run({ contracts: writeContracts(), legs: { '3.7.0': dir } });
@@ -622,18 +1282,29 @@ test('an errored trigger on an out-of-scope rule does not silently pass', () => 
   fs.writeFileSync(
     path.join(dir, 'backend-report.json'),
     JSON.stringify([
-      { ruleId: SPEC.ruleId, queryName: 'trigger', role: 'trigger', outcome: 'error', error: 'timeout' },
+      {
+        ruleId: SPEC.ruleId,
+        queryName: 'trigger',
+        role: 'trigger',
+        executionBackend: 'standard',
+        outcome: 'error',
+        error: 'timeout',
+      },
       {
         ruleId: SPEC.ruleId,
         queryName: 'control',
         role: 'control',
+        executionBackend: 'standard',
         rejected: false,
         outcome: 'observed',
         observed: { httpStatus: 200, rejected: false },
       },
     ])
   );
-  const { report } = run({ contracts: writeContracts(), legs: { '3.6.0': dir } });
+  const { status, report } = run({
+    contracts: writeContracts(),
+    legs: { '3.6.0': dir },
+  });
   // The point is that an unobserved trigger yields no CLAIM either way: it must
   // not be reported as a confident out-of-scope agreement...
   assert.equal(
@@ -643,6 +1314,37 @@ test('an errored trigger on an out-of-scope rule does not silently pass', () => 
   );
   // ...nor may it invent linter advice from a verdict that never arrived.
   assert.equal(report.drifts.length, 0);
+  assert.equal(status, 1);
+  assert.equal(report.matrix[0].status, 'inconclusive');
+  assert.equal(report.result.enforcedInconclusive, 1);
+});
+
+test('a missing detector and backend row is inconclusive even when the rule is out of scope', () => {
+  const dir = writeLeg({
+    version: '3.6.0',
+    cases: {
+      trigger: { detector: 0, rejected: false },
+      control: { detector: 0, rejected: false },
+    },
+  });
+  const detectorFile = path.join(dir, 'detector-report.json');
+  const detector = JSON.parse(fs.readFileSync(detectorFile, 'utf8'));
+  detector.results = detector.results.filter((entry) => entry.queryName !== 'trigger');
+  fs.writeFileSync(detectorFile, JSON.stringify(detector));
+  const backendFile = path.join(dir, 'backend-report.json');
+  const backend = JSON.parse(fs.readFileSync(backendFile, 'utf8')).filter(
+    (entry) => entry.queryName !== 'trigger'
+  );
+  fs.writeFileSync(backendFile, JSON.stringify(backend));
+
+  const { status, report } = run({
+    contracts: writeContracts(),
+    legs: { '3.6.0': dir },
+  });
+
+  assert.equal(status, 1);
+  assert.equal(report.matrix[0].status, 'inconclusive');
+  assert.match(report.inconclusive[0].reasons.join(' '), /trigger \(no detector result\)/);
 });
 
 test('an errored control cannot fail open into "widen appliesTo" advice', () => {
@@ -657,11 +1359,21 @@ test('an errored control cannot fail open into "widen appliesTo" advice', () => 
   const backend = JSON.parse(fs.readFileSync(path.join(dir, 'backend-report.json'), 'utf8')).map(
     (e) =>
       e.role === 'control'
-        ? { ruleId: e.ruleId, queryName: e.queryName, role: e.role, outcome: 'error', error: 'timeout' }
+        ? {
+            ruleId: e.ruleId,
+            queryName: e.queryName,
+            role: e.role,
+            executionBackend: e.executionBackend,
+            outcome: 'error',
+            error: 'timeout',
+          }
         : { ...e, outcome: 'observed' }
   );
   fs.writeFileSync(path.join(dir, 'backend-report.json'), JSON.stringify(backend));
-  const { report, stdout } = run({ contracts: writeContracts(), legs: { '3.6.0': dir } });
+  const { status, report, stdout } = run({
+    contracts: writeContracts(),
+    legs: { '3.6.0': dir },
+  });
   const scoped = report.drifts.filter((d) => d.driftClass === 'version-scope-too-narrow');
   assert.equal(
     scoped.length,
@@ -669,6 +1381,8 @@ test('an errored control cannot fail open into "widen appliesTo" advice', () => 
     'with the control unobserved there is no evidence the command is supported, so no widening advice'
   );
   assert.ok(!/Widen "/.test(stdout));
+  assert.equal(status, 1);
+  assert.equal(report.matrix[0].status, 'inconclusive');
 });
 
 test('a bad --leg argument is rejected', () => {

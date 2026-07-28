@@ -25,7 +25,7 @@
  * regardless of where the entry script lives. That is what lets this SQL-owned
  * `.mjs` load OSD's Node-safe headless lint API without OSD's own Jest.
  *
- * This is the detector half of a schema-v3 cross-repository differential
+ * This is the detector half of a schema-v3/v4 cross-repository differential
  * contract (see integ-test/src/test/resources/ppl-lint/contracts/*.spec.json).
  * Unlike the earlier PoC — which linted with the compiled analyzer or a
  * hand-rolled reparse against OSD `main`'s checked-in grammar — it lints against
@@ -78,6 +78,15 @@ import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
 
+import {
+  assertContractSchema,
+  assertExactQueryCoverage,
+  classifyBackendReportRow,
+  indexBackendReport,
+  normalizeTarget,
+  resolveBackendOracle,
+} from './contract-schema.mjs';
+
 // OSD's Node-safe headless lint API (design §4.3). Deep-path module; resolved
 // against the OSD checkout root, not this script's SQL-repo location.
 const HEADLESS_MODULE = 'src/plugins/data/public/antlr/opensearch_ppl/headless_ppl_lint';
@@ -125,6 +134,37 @@ function fatal(message) {
   process.exit(2);
 }
 
+function loadContractFile(file) {
+  try {
+    const spec = JSON.parse(fs.readFileSync(file, 'utf8'));
+    assertContractSchema(spec);
+    const grammarSurface = spec.grammarSurface || 'runtime-bundle';
+    if (!['runtime-bundle', 'compiled-simplified', 'both'].includes(grammarSurface)) {
+      throw new Error(
+        `[${spec.ruleId}] grammarSurface must be "runtime-bundle", ` +
+          `"compiled-simplified", or "both", got ${JSON.stringify(grammarSurface)}.`
+      );
+    }
+    if (!Array.isArray(spec.expectations) || spec.expectations.length === 0) {
+      throw new TypeError(`[${spec.ruleId}] expectations must be a non-empty array.`);
+    }
+    for (const expectation of spec.expectations) {
+      assertExactQueryCoverage(spec, expectation);
+      for (const queryExpectation of Object.values(expectation.queries)) {
+        // Validate every declared oracle, including ranges not selected by this
+        // target. Missing route coverage is a supported state; malformed route
+        // names and oracle kinds are not.
+        resolveBackendOracle(spec, queryExpectation, 'standard');
+        resolveBackendOracle(spec, queryExpectation, 'analytics');
+      }
+    }
+    return { file, spec };
+  } catch (error) {
+    fatal(`Invalid contract ${file}: ${error.message}`);
+  }
+  return undefined; // unreachable
+}
+
 /** Load every *.spec.json under the contract dir, honoring manifest.json if present. */
 function loadContracts() {
   const dir = process.env.PPL_LINT_CONTRACT_DIR;
@@ -134,7 +174,7 @@ function loadContracts() {
     if (!fs.existsSync(single)) {
       fatal(`Contract file not found: ${single}`);
     }
-    return [{ file: single, spec: JSON.parse(fs.readFileSync(single, 'utf8')) }];
+    return [loadContractFile(single)];
   }
 
   if (!dir) {
@@ -147,7 +187,12 @@ function loadContracts() {
   const manifestPath = path.join(dir, 'manifest.json');
   let files;
   if (fs.existsSync(manifestPath)) {
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    let manifest;
+    try {
+      manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    } catch (error) {
+      fatal(`Invalid contract manifest ${manifestPath}: ${error.message}`);
+    }
     if (!Array.isArray(manifest.contracts)) {
       fatal(`manifest.json must have a "contracts" array of file names.`);
     }
@@ -164,7 +209,7 @@ function loadContracts() {
     if (!fs.existsSync(file)) {
       fatal(`Contract referenced by manifest not found: ${file}`);
     }
-    return { file, spec: JSON.parse(fs.readFileSync(file, 'utf8')) };
+    return loadContractFile(file);
   });
 }
 
@@ -253,7 +298,7 @@ function loadOsd() {
 }
 
 /** Load the candidate grammar bundle + deserialize it once (fail loud; CI has no fallback). */
-function loadCandidateGrammar(osd) {
+function loadCandidateGrammar(osd, target) {
   const bundlePath = process.env.PPL_LINT_GRAMMAR_BUNDLE;
   if (!bundlePath) {
     fatal(
@@ -270,6 +315,18 @@ function loadCandidateGrammar(osd) {
   } catch (error) {
     fatal(`Could not parse grammar bundle ${bundlePath}: ${error.message}`);
   }
+  if (bundle.grammarHash !== target.grammarHash) {
+    fatal(
+      `Candidate grammar hash ${JSON.stringify(bundle.grammarHash)} does not match target ` +
+        `${JSON.stringify(target.grammarHash)}.`
+    );
+  }
+  if (target.grammarBundle && path.basename(bundlePath) !== target.grammarBundle) {
+    fatal(
+      `Candidate grammar filename "${path.basename(bundlePath)}" does not match target ` +
+        `"${target.grammarBundle}".`
+    );
+  }
   try {
     return osd.deserializeBundleOrThrow(bundle);
   } catch (error) {
@@ -278,38 +335,44 @@ function loadCandidateGrammar(osd) {
   return undefined; // unreachable
 }
 
-/** Read the target manifest (engineVersion + grammarHash) written beside the bundle. */
+/** Read and validate the target identity written beside the grammar bundle. */
 function loadTarget() {
   const targetPath = process.env.PPL_LINT_TARGET_MANIFEST;
-  if (targetPath && fs.existsSync(targetPath)) {
-    try {
-      return JSON.parse(fs.readFileSync(targetPath, 'utf8'));
-    } catch (error) {
-      log(`WARN: could not parse target manifest ${targetPath}: ${error.message}`);
-    }
+  if (!targetPath) {
+    fatal('PPL_LINT_TARGET_MANIFEST is required.');
   }
-  // Back-compat / local runs without a target manifest.
-  return { engineVersion: process.env.PPL_SQL_VERSION || '', grammarHash: '' };
+  if (!fs.existsSync(targetPath)) {
+    fatal(`Target manifest not found: ${targetPath}`);
+  }
+  try {
+    return normalizeTarget(JSON.parse(fs.readFileSync(targetPath, 'utf8')));
+  } catch (error) {
+    fatal(`Invalid target manifest ${targetPath}: ${error.message}`);
+  }
+  return undefined; // unreachable
 }
 
 /** Index the backend report by `${ruleId}::${queryName}` for the differential. */
-function loadBackendReport() {
+function loadBackendReport(target) {
   const reportPath = process.env.PPL_LINT_BACKEND_REPORT;
-  if (!reportPath || !fs.existsSync(reportPath)) {
+  if (!reportPath) {
     return undefined;
+  }
+  if (!fs.existsSync(reportPath)) {
+    fatal(`Backend report not found: ${reportPath}`);
   }
   let entries;
   try {
     entries = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
   } catch (error) {
-    log(`WARN: could not parse backend report ${reportPath}: ${error.message}`);
-    return undefined;
+    fatal(`Could not parse backend report ${reportPath}: ${error.message}`);
   }
-  const byKey = new Map();
-  for (const entry of Array.isArray(entries) ? entries : []) {
-    byKey.set(`${entry.ruleId}::${entry.queryName}`, entry);
+  try {
+    return indexBackendReport(entries, target);
+  } catch (error) {
+    fatal(`Invalid backend report ${reportPath}: ${error.message}`);
   }
-  return byKey;
+  return undefined; // unreachable
 }
 
 /** Coerce "3.8.0-SNAPSHOT" / "3.8" to a comparable [major, minor, patch]. */
@@ -372,7 +435,7 @@ function versionMatchesRange(range, version) {
  * Exactly one must match (design §5.3): zero means the rule test does not cover
  * this version; more than one means overlapping ranges. Both fail.
  */
-function selectExpectation(spec, version, isCalcite, failures) {
+function selectExpectation(spec, version, isCalcite, failures, { allowMissing = false } = {}) {
   const expectations = spec.expectations || [];
   const matches = expectations.filter((exp) => {
     if (!versionMatchesRange(exp.version, version)) return false;
@@ -384,10 +447,13 @@ function selectExpectation(spec, version, isCalcite, failures) {
   }
   const label = version || 'unknown';
   if (matches.length === 0) {
-    failures.push(`[${spec.ruleId}] no version expectation matches backend version ${label}.`);
+    if (!allowMissing) {
+      failures.push(`[${spec.ruleId}] no version expectation matches backend version ${label}.`);
+    }
   } else {
-    failures.push(
-      `[${spec.ruleId}] ${matches.length} expectations match backend version ${label} (exactly one required).`
+    fatal(
+      `[${spec.ruleId}] ${matches.length} expectations match backend version ${label} ` +
+        '(exactly one required).'
     );
   }
   return undefined;
@@ -490,6 +556,9 @@ function buildContext(spec, engineVersion) {
 function main() {
   const schedule = process.env.PPL_LINT_SCHEDULE || 'pr';
   const reportPath = process.env.PPL_LINT_REPORT;
+  const target = loadTarget();
+  const backendReport = loadBackendReport(target);
+  const contracts = loadContracts();
 
   const osd = loadOsd();
   const { getBundledCatalog, getDetector, lintQuery, osdRoot, surface } = osd;
@@ -498,17 +567,24 @@ function main() {
   // The compiled surface lints with OSD's own checked-in grammar, so there is no
   // candidate bundle to load. On the runtime surface a missing bundle stays a hard
   // failure — never a quiet downgrade to the compiled grammar.
-  const grammar = surface === 'compiled-simplified' ? undefined : loadCandidateGrammar(osd);
-  const target = loadTarget();
-  const engineVersion = target.engineVersion || process.env.PPL_SQL_VERSION || '';
-  const backendReport = loadBackendReport();
+  const grammar =
+    surface === 'compiled-simplified' ? undefined : loadCandidateGrammar(osd, target);
+  const engineVersion = target.engineVersion;
+  const executionBackend = target.executionBackend;
+  const observeAnalytics = process.env.PPL_LINT_OBSERVE_ANALYTICS === '1';
+  const observeOnly =
+    process.env.PPL_LINT_OBSERVE_ONLY === '1' || observeAnalytics;
+  if (observeAnalytics && executionBackend !== 'analytics') {
+    fatal('PPL_LINT_OBSERVE_ANALYTICS=1 requires an analytics target.');
+  }
 
-  const contracts = loadContracts();
   const failures = [];
   // Contracts this surface did not score, recorded so the report says a rule was
   // skipped for surface rather than leaving its absence unexplained.
   const skippedForSurface = [];
   const report = {
+    schemaVersion: 2,
+    executionBackend,
     osdRoot,
     schedule,
     engineVersion,
@@ -521,6 +597,8 @@ function main() {
     // see WHY a rule has no scored cases here.
     skippedForSurface,
     grammarHash: target.grammarHash || '',
+    observeAnalytics,
+    observeOnly,
     differential: !!backendReport,
     // Census of the rules that ship enabled at ERROR severity, read from the OSD
     // catalog this run linted with. The multi-version aggregator enforces its
@@ -537,7 +615,7 @@ function main() {
 
   log(`OSD root: ${osdRoot}`);
   log(
-    `schedule=${schedule} engineVersion=${engineVersion || '(unset)'} ` +
+    `schedule=${schedule} engineVersion=${engineVersion} executionBackend=${executionBackend} ` +
       `grammarHash=${target.grammarHash || '(unset)'} differential=${!!backendReport} ` +
       `contracts=${contracts.length}`
   );
@@ -576,6 +654,8 @@ function main() {
           role: queryDef.role || 'trigger',
           query: (queryDef.query || '').split('{{index}}').join(index),
           surface,
+          executionBackend,
+          outcome: 'not-applicable',
           notApplicable: `contract declares grammarSurface "${contractSurface}"`,
         });
       }
@@ -588,23 +668,71 @@ function main() {
     }
 
     const context = buildContext(spec, engineVersion);
-    const expectation = selectExpectation(spec, engineVersion, context.isCalcite, failures);
+    const expectation = selectExpectation(spec, engineVersion, context.isCalcite, failures, {
+      allowMissing: observeOnly,
+    });
     if (!expectation) {
+      if (!observeOnly) {
+        continue;
+      }
+      for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
+        const role = queryDef.role || 'trigger';
+        const query = queryDef.query.split('{{index}}').join(index);
+        if (surface === 'compiled-simplified' && entry.runtimeOnly) {
+          report.results.push({
+            ruleId,
+            queryName,
+            role,
+            query,
+            surface,
+            executionBackend,
+            outcome: 'not-applicable',
+            notApplicable: 'runtimeOnly rule does not run on the compiled-simplified surface',
+          });
+          continue;
+        }
+        const result = lintQuery(query, grammar, context);
+        const matches = (result.diagnostics || []).filter((d) => d.ruleId === ruleId);
+        report.results.push({
+          ruleId,
+          queryName,
+          role,
+          query,
+          surface,
+          executionBackend,
+          expected: 0,
+          actual: matches.length,
+          severities: matches.map((m) => m.severity),
+          severityMatched: true,
+          messageMatched: true,
+          backendOracleStatus: 'coverage-missing',
+          expectationStatus: 'coverage-missing',
+        });
+      }
       continue;
     }
 
     const queries = spec.queries || {};
     const expectedQueries = expectation.queries || {};
-    for (const queryName of Object.keys(expectedQueries)) {
+    try {
+      assertExactQueryCoverage(spec, expectation);
+    } catch (error) {
+      fatal(`Invalid contract ${file}: ${error.message}`);
+    }
+    for (const queryName of Object.keys(queries)) {
       const queryDef = queries[queryName];
-      if (!queryDef) {
-        failures.push(`[${ruleId}] expectation references unknown query "${queryName}".`);
-        continue;
-      }
       const role = queryDef.role || 'trigger';
       const query = queryDef.query.split('{{index}}').join(index);
       const expected = expectedQueries[queryName];
-      const expectedCount = expected.detectorCount;
+      let oracleSelection;
+      try {
+        oracleSelection = resolveBackendOracle(spec, expected, executionBackend);
+      } catch (error) {
+        fatal(`Invalid contract ${file} query "${queryName}": ${error.message}`);
+      }
+      const expectedCount = oracleSelection.detector.count;
+      const expectedSeverity = oracleSelection.detector.severity;
+      const expectedMessage = oracleSelection.detector.matchMessage;
 
       // A `runtimeOnly` rule walks grammar productions that exist only in the
       // runtime bundle, so `lint_runner` skips it on the compiled surface. Its
@@ -623,6 +751,8 @@ function main() {
           role,
           query,
           surface,
+          executionBackend,
+          outcome: 'not-applicable',
           notApplicable: 'runtimeOnly rule does not run on the compiled-simplified surface',
         });
         continue;
@@ -639,9 +769,12 @@ function main() {
       );
 
       const severityOk =
-        !expected.severity || actual === 0 || matches.every((m) => m.severity === expected.severity);
+        !expectedSeverity ||
+        actual === 0 ||
+        matches.every((m) => m.severity === expectedSeverity);
       const messageOk =
-        !expected.matchMessage || matches.some((m) => (m.message || '').includes(expected.matchMessage));
+        !expectedMessage ||
+        matches.some((m) => (m.message || '').includes(expectedMessage));
 
       const resultEntry = {
         ruleId,
@@ -651,6 +784,10 @@ function main() {
         expected: expectedCount,
         actual,
         severities: matches.map((m) => m.severity),
+        severityMatched: severityOk,
+        messageMatched: messageOk,
+        executionBackend,
+        backendOracleStatus: oracleSelection.status,
       };
 
       if (!ok) {
@@ -659,10 +796,30 @@ function main() {
         );
       }
       if (!severityOk) {
-        failures.push(`[${ruleId}/${queryName}] expected severity "${expected.severity}" for: ${query}`);
+        failures.push(
+          `[${ruleId}/${queryName}] expected severity "${expectedSeverity}" for: ${query}`
+        );
       }
       if (!messageOk) {
-        failures.push(`[${ruleId}/${queryName}] expected message to contain "${expected.matchMessage}" for: ${query}`);
+        failures.push(
+          `[${ruleId}/${queryName}] expected message to contain "${expectedMessage}" for: ${query}`
+        );
+      }
+
+      if (oracleSelection.status === 'not-applicable') {
+        resultEntry.outcome = 'not-applicable';
+        resultEntry.reason = oracleSelection.reason;
+        resultEntry.notApplicable = oracleSelection.reason;
+      } else if (oracleSelection.status === 'coverage-missing') {
+        resultEntry.outcome = 'coverage-missing';
+        resultEntry.coverage = 'missing';
+        resultEntry.reason = oracleSelection.reason;
+        resultEntry.coverageMissing = oracleSelection.reason;
+        if (!observeAnalytics) {
+          failures.push(
+            `[${ruleId}/${queryName}] ${executionBackend} backend coverage missing: ${oracleSelection.reason}.`
+          );
+        }
       }
 
       // Differential: the observed backend behavior must agree with the observed
@@ -672,56 +829,71 @@ function main() {
       // passes. This catches drift the two halves would otherwise hide by both
       // pinning to the same JSON.
       if (backendReport) {
-        const backendKind = expected.backend && expected.backend.kind;
-        const expectRejected = backendKind === 'rejection';
         const be = backendReport.get(`${ruleId}::${queryName}`);
         if (!be) {
           failures.push(`[${ruleId}/${queryName}] no backend report entry (backend did not run this query).`);
         } else {
-          resultEntry.backendRejected = !!be.rejected;
-          if (!!be.rejected !== expectRejected) {
+          const backendObservation = classifyBackendReportRow(be);
+          if (oracleSelection.status !== 'applicable') {
+            // A missing or non-applicable oracle is never an acceptance claim. Keep
+            // any backend observation visible, but do not coerce a missing verdict
+            // through `!!be.rejected` or score a differential against another route.
+            resultEntry.backendOutcome = backendObservation.status;
+          } else if (backendObservation.status !== 'observed') {
+            resultEntry.backendOutcome = backendObservation.status;
             failures.push(
-              `[${ruleId}/${queryName}] differential: backend ${be.rejected ? 'rejected' : 'accepted'} ` +
-                `but the contract's backend.kind="${backendKind}" expects ${expectRejected ? 'rejection' : 'acceptance'} for: ${query}`
+              `[${ruleId}/${queryName}] backend report has no accepted/rejected verdict ` +
+                `(outcome=${JSON.stringify(backendObservation.status)}).`
             );
-          }
-          // Trigger cross-check: a trigger the detector flags must be one the engine
-          // ALSO objects to — but only where the contract claims the engine objects
-          // at all.
-          //
-          // For a `rejection` rule the two coincide: detector flags <-> engine
-          // rejects, and a disagreement means one side drifted. That is the original
-          // check and it is unchanged.
-          //
-          // An ADVISORY rule is different by design. It flags a query the engine
-          // runs happily: `head-without-sort` marks non-determinism,
-          // `division-by-zero` marks a silent null, `dedup-consecutive` succeeds via
-          // the Calcite-to-v2 fallback. "Detector flagged, backend accepted" is that
-          // rule working, not drift — so pairing the detector against `be.rejected`
-          // failed every advisory trigger unconditionally. That, not runtime cost,
-          // is the structural reason those contracts could only run nightly.
-          //
-          // The contracts already carry the distinction in `backend.kind`, so this
-          // reads data that exists rather than adding a flag. Advisory triggers keep
-          // full coverage from the other two assertions: the backend-kind check above
-          // fires if the engine starts REJECTING a query pinned as accepted, and the
-          // `detectorCount` assertion fires if the detector stops flagging it. Only
-          // the pairing rule is scoped to the rules it makes sense for.
-          const detectorFlagged = actual > 0;
-          if (role === 'trigger' && expectRejected && detectorFlagged !== !!be.rejected) {
-            failures.push(
-              `[${ruleId}/${queryName}] differential: trigger detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
-                `but backend ${be.rejected ? 'rejected' : 'accepted'} for: ${query}`
-            );
-          }
-          // A control must pass on both sides regardless of kind: it is a valid
-          // query the rule has to stay quiet on. Unlike a trigger, that claim does
-          // not vary with `backend.kind`.
-          if (role === 'control' && (detectorFlagged || be.rejected)) {
-            failures.push(
-              `[${ruleId}/${queryName}] differential: control must pass on both sides but detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
-                `and backend ${be.rejected ? 'rejected' : 'accepted'} for: ${query}`
-            );
+          } else {
+            const backendKind = oracleSelection.oracle.kind;
+            const expectRejected = backendKind === 'rejection';
+            const backendRejected = backendObservation.rejected;
+            resultEntry.backendRejected = backendRejected;
+            if (backendRejected !== expectRejected) {
+              failures.push(
+                `[${ruleId}/${queryName}] differential: backend ${backendRejected ? 'rejected' : 'accepted'} ` +
+                  `but the contract's backend.kind="${backendKind}" expects ${expectRejected ? 'rejection' : 'acceptance'} for: ${query}`
+              );
+            }
+            // Trigger cross-check: a trigger the detector flags must be one the engine
+            // ALSO objects to — but only where the contract claims the engine objects
+            // at all.
+            //
+            // For a `rejection` rule the two coincide: detector flags <-> engine
+            // rejects, and a disagreement means one side drifted. That is the original
+            // check and it is unchanged.
+            //
+            // An ADVISORY rule is different by design. It flags a query the engine
+            // runs happily: `head-without-sort` marks non-determinism,
+            // `division-by-zero` marks a silent null, `dedup-consecutive` succeeds via
+            // the Calcite-to-v2 fallback. "Detector flagged, backend accepted" is that
+            // rule working, not drift — so pairing the detector against `be.rejected`
+            // failed every advisory trigger unconditionally. That, not runtime cost,
+            // is the structural reason those contracts could only run nightly.
+            //
+            // The contracts already carry the distinction in `backend.kind`, so this
+            // reads data that exists rather than adding a flag. Advisory triggers keep
+            // full coverage from the other two assertions: the backend-kind check above
+            // fires if the engine starts REJECTING a query pinned as accepted, and the
+            // `detectorCount` assertion fires if the detector stops flagging it. Only
+            // the pairing rule is scoped to the rules it makes sense for.
+            const detectorFlagged = actual > 0;
+            if (role === 'trigger' && expectRejected && detectorFlagged !== backendRejected) {
+              failures.push(
+                `[${ruleId}/${queryName}] differential: trigger detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
+                  `but backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
+              );
+            }
+            // A control must pass on both sides regardless of kind: it is a valid
+            // query the rule has to stay quiet on. Unlike a trigger, that claim does
+            // not vary with `backend.kind`.
+            if (role === 'control' && (detectorFlagged || backendRejected)) {
+              failures.push(
+                `[${ruleId}/${queryName}] differential: control must pass on both sides but detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
+                  `and backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
+              );
+            }
           }
         }
       }
@@ -746,7 +918,7 @@ function main() {
       fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
       log(`wrote report to ${reportPath}`);
     } catch (error) {
-      log(`WARN: could not write report to ${reportPath}: ${error.message}`);
+      fatal(`Could not write detector report ${reportPath}: ${error.message}`);
     }
   }
 

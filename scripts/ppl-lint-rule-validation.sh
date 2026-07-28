@@ -36,6 +36,13 @@
 #
 #   # Run the full nightly corpus (all rules + coverage assertion)
 #   PPL_LINT_SCHEDULE=nightly ./scripts/ppl-lint-rule-validation.sh
+#
+#   # Run the same corpus through composite/Parquet + DataFusion
+#   RUN_ANALYTICS=1 ./scripts/ppl-lint-rule-validation.sh
+#
+#   # Pass local analytics plugin ZIP overrides through to Gradle
+#   RUN_ANALYTICS=1 ./scripts/ppl-lint-rule-validation.sh \
+#     -PanalyticsEngineZip=/path/to/analytics-engine.zip
 
 set -euo pipefail
 
@@ -50,6 +57,7 @@ DETECTOR_SCRIPT="$SQL_ROOT/scripts/ppl-lint/run-frontend-contract.mjs"
 IT_CLASS="org.opensearch.sql.calcite.remote.PplLintRuleValidationIT"
 # pr (fast, blocking subset) or nightly (full corpus + coverage assertion).
 PPL_LINT_SCHEDULE="${PPL_LINT_SCHEDULE:-pr}"
+RUN_ANALYTICS="${RUN_ANALYTICS:-0}"
 
 # Candidate artifacts the backend half exports and the detector half consumes.
 GRAMMAR_BUNDLE="$SQL_ROOT/ppl-grammar-bundle.json"
@@ -60,12 +68,30 @@ DETECTOR_REPORT="$SQL_ROOT/detector-report.json"
 log() { echo "[ppl-lint-rule-validation] $*"; }
 
 run_backend() {
-  log "Running backend integration test: $IT_CLASS (schedule=$PPL_LINT_SCHEDULE)"
-  ./gradlew :integ-test:integTest --tests "$IT_CLASS" \
-    -Dppl.lint.schedule="$PPL_LINT_SCHEDULE" \
-    -Dppl.lint.report="$BACKEND_REPORT" \
-    -Dppl.lint.grammar.bundle="$GRAMMAR_BUNDLE" \
+  local backend="standard"
+  local gradle_args=(
+    :integ-test:integTest
+    --tests "$IT_CLASS"
+  )
+  if [[ "$RUN_ANALYTICS" == "1" ]]; then
+    backend="analytics"
+    gradle_args=(:integ-test:analyticsEnginePplLintIT)
+    # The checked-in schema-v3 contracts intentionally have no analytics
+    # oracles yet. Execute them once and retain their raw observations without
+    # borrowing the standard route's oracle.
+    gradle_args+=(-Dppl.lint.observe.only=true)
+  fi
+
+  log "Running $backend backend integration test: $IT_CLASS (schedule=$PPL_LINT_SCHEDULE)"
+  gradle_args+=(
+    -Dppl.lint.schedule="$PPL_LINT_SCHEDULE"
+    -Dppl.lint.execution_backend="$backend"
+    -Dppl.lint.sql_sha="$(git rev-parse HEAD)"
+    -Dppl.lint.report="$BACKEND_REPORT"
+    -Dppl.lint.grammar.bundle="$GRAMMAR_BUNDLE"
     -Dppl.lint.target="$TARGET_MANIFEST"
+  )
+  ./gradlew "${gradle_args[@]}" "$@"
   log "Backend integration test passed. Exported: $(basename "$GRAMMAR_BUNDLE"), $(basename "$TARGET_MANIFEST")."
 }
 
@@ -93,13 +119,15 @@ run_detector() {
       PPL_LINT_TARGET_MANIFEST="$TARGET_MANIFEST" \
       PPL_LINT_BACKEND_REPORT="$BACKEND_REPORT" \
       PPL_LINT_REPORT="$DETECTOR_REPORT" \
+      PPL_LINT_OBSERVE_ONLY="$RUN_ANALYTICS" \
+      PPL_LINT_OBSERVE_ANALYTICS="$RUN_ANALYTICS" \
       node -r ./src/setup_node_env "$DETECTOR_SCRIPT"
   )
   log "Detector validation passed."
 }
 
 if [[ "${SKIP_BACKEND:-0}" != "1" ]]; then
-  run_backend
+  run_backend "$@"
 else
   log "SKIP_BACKEND=1 — skipping the SQL backend integration test (using existing artifacts)."
 fi

@@ -10,6 +10,7 @@ or a semantic change makes a flagged query valid) without touching OSD. Neither
 repository's own unit tests catch that. This check does.
 
 - **Design:** `ppl-lint-ci-validation-design.md`
+- **Analytics rollout:** [`docs/dev/ppl-lint-analytics-engine-ci-validation.md`](../../docs/dev/ppl-lint-analytics-engine-ci-validation.md)
 - **Workflow:** [`.github/workflows/ppl-lint-rule-validation.yml`](../../.github/workflows/ppl-lint-rule-validation.yml)
 - **Contracts:** [`integ-test/src/test/resources/ppl-lint/contracts/`](../../integ-test/src/test/resources/ppl-lint/contracts)
 
@@ -26,8 +27,8 @@ backend-validation ──(target.json, ppl-grammar-bundle.json, backend-report.j
    the Gradle test cluster, runs each contract's trigger/control queries against
    `POST /_plugins/_ppl`, and — while the cluster is alive — exports:
    - `ppl-grammar-bundle.json` — the candidate runtime grammar (`GET /_plugins/_ppl/_grammar`);
-   - `target.json` — `{ engineVersion, grammarHash, grammarBundle }`;
-   - `backend-report.json` — the observed HTTP behavior per query.
+   - `target.json` — schema-v2 engine, grammar, execution-backend, storage, and route identity;
+   - `backend-report.json` — the observed HTTP behavior and execution backend per query.
 2. **detector-validation** (`ubuntu-latest`). Checks out and bootstraps OSD as a
    Node code dependency (no OSD server, no Monaco, no browser), then runs
    [`run-frontend-contract.mjs`](run-frontend-contract.mjs). That runner
@@ -87,6 +88,14 @@ OSD_REF=<osdSha> ./scripts/ppl-lint-rule-validation.sh
 # Full nightly corpus + coverage assertion.
 PPL_LINT_SCHEDULE=nightly ./scripts/ppl-lint-rule-validation.sh
 
+# Run the corpus through the full composite/Parquet + DataFusion stack.
+RUN_ANALYTICS=1 ./scripts/ppl-lint-rule-validation.sh
+
+# Use locally built analytics plugins (all trailing arguments pass to Gradle).
+RUN_ANALYTICS=1 ./scripts/ppl-lint-rule-validation.sh \
+  -PanalyticsEngineZip=/path/to/analytics-engine.zip \
+  -PnativeLibPath=/path/to/native/release
+
 # Re-run only one half (detector needs the backend artifacts to exist).
 SKIP_DETECTOR=1 ./scripts/ppl-lint-rule-validation.sh
 SKIP_BACKEND=1  ./scripts/ppl-lint-rule-validation.sh
@@ -106,12 +115,12 @@ writes `detector-report.json`.
 | `PPL_LINT_CONTRACT_DIR` | directory of `*.spec.json` + `manifest.json` |
 | `PPL_LINT_SCHEDULE` | `pr` or `nightly` |
 | `PPL_LINT_GRAMMAR_BUNDLE` | candidate `ppl-grammar-bundle.json` (required; no compiled fallback) |
-| `PPL_LINT_TARGET_MANIFEST` | `target.json` (engine version + grammar hash) |
+| `PPL_LINT_TARGET_MANIFEST` | schema-v2 `target.json` (engine, grammar, execution backend, and storage identity) |
 | `PPL_LINT_BACKEND_REPORT` | `backend-report.json` (enables the differential) |
 | `PPL_LINT_REPORT` | where to write `detector-report.json` |
 | `PPL_LINT_CONTRACT_FILE` | (optional) run a single spec instead of the dir |
 
-## Contract format (schema v3)
+## Contract format (schema v3 and v4)
 
 One JSON file per rule under `contracts/`, listed in `manifest.json`. Each file
 has a top-level `queries` map (each `{ role: "trigger"|"control", query }`) and a
@@ -120,7 +129,7 @@ backend version (zero or more than one fails before any query runs).
 
 ```jsonc
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "ruleId": "union-min-datasets",
   "grammarSurface": "runtime-bundle",
   "schedule": "pr",
@@ -139,11 +148,17 @@ backend version (zero or more than one fails before any query runs).
       "queries": {
         "union-single-dataset": {
           "detectorCount": 1, "severity": "error",
-          "backend": { "kind": "rejection", "httpStatus": 400, "body": { "status": 400, "error": { "type": "IllegalArgumentException" } } }
+          "backends": {
+            "standard": { "kind": "rejection", "httpStatus": 400, "body": { "status": 400, "error": { "type": "IllegalArgumentException" } } },
+            "analytics": { "kind": "rejection", "httpStatus": 400, "body": { "status": 400, "error": { "type": "IllegalArgumentException" } } }
+          }
         },
         "union-two-datasets-control": {
           "detectorCount": 0,
-          "backend": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+          "backends": {
+            "standard": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } },
+            "analytics": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
+          }
         }
       }
     }
@@ -151,9 +166,18 @@ backend version (zero or more than one fails before any query runs).
 }
 ```
 
-`backend.kind` is one of `rejection` (contracted 4xx + error type/reason),
+Schema v3's `backend` is read only as `backends.standard`; it is never an
+implicit analytics oracle. Schema v4's `backends` selects the configured
+`standard` or `analytics` execution backend. Missing analytics oracles are
+recorded as unscored coverage during observation, including the raw backend
+response needed to review a schema-v4 oracle, and are fatal before promotion to
+the required check. The selected expectation must contain exactly the same query
+names as the top-level `queries` map.
+
+Each backend `kind` is one of `rejection` (contracted 4xx + error type/reason),
 `result-shape` (200 with datarow expectations), or `advisory` (soft 200-only
-oracle). When a behavior changes in a new version, keep **both** version-scoped
+oracle). `not-applicable` requires a reason, owner, and tracking issue. When a behavior
+changes in a new version, keep **both** version-scoped
 expectations so the nightly matrix proves the rule still fires on the old version
 while the candidate check proves the fix on the new one.
 
@@ -214,7 +238,7 @@ validates every `defaultError` rule against several engine versions at once, and
 reports **what to change in the linter** when one disagrees.
 
 ```
-observe (matrix: 3.6.0, 3.7.0 released images  +  pr-build)
+observe (matrix: released images + pr-build standard + pr-build analytics)
     └── each leg exports the same 4 artifacts as the single-version check
 detect (one OSD bootstrap, one detector pass per leg's grammar)
     └── aggregate-versions.mjs → drift-report.json + remediation report
@@ -222,7 +246,10 @@ detect (one OSD bootstrap, one detector pass per leg's grammar)
 
 Released legs run the official `opensearchproject/opensearch:<version>` image,
 which bundles the matching `opensearch-sql` plugin, so no old branch is built. The
-`pr-build` leg is the same Gradle test cluster the single-version check uses. Both
+`pr-build` leg is the same Gradle test cluster the single-version check uses. The
+`pr-build-analytics` leg installs the full Arrow, analytics, composite, Parquet,
+Lucene-backend, and DataFusion-backend stack and fails unless fixture settings,
+explain output, and a profiled canary attest the route. These legs
 run the **same** contract oracle (`PplLintRuleValidationIT`) with
 `-Dppl.lint.observe.only=true`, which records real behavior instead of asserting
 against expectations — on an older engine a mismatch is the signal being
@@ -263,7 +290,8 @@ cells read `n/a (surface)`, and a rule whose every case is inert is `n/a` — no
 is nothing to re-run).
 
 Two legs may share an engine version while validating different surfaces, so the
-matrix is keyed on the **leg label**, not the version.
+matrix is keyed on the **leg label**, grammar surface, and execution backend, not
+the version alone.
 
 Each contract declares the surface(s) it was verified against, and a contract is
 only scored on a matching leg — `"both"` opts into either. Judged on a surface it
@@ -304,6 +332,7 @@ Every finding names a drift class, the evidence, and one remediation action:
 | `version-scope-rule` | the engine relaxed (or never had) the behavior on some versions | `appliesTo.minVersion` / `maxVersion` in `rules_catalog.json` — or `enabled: false` if no supported engine rejects it any more |
 | `update-detector` | the detector regressed, went too broad, or its grammar anchor was renamed | the rule's detector `.ts` (named in the finding) |
 | `update-contract` | the linter is right and only the pinned expectation is stale | the `expectations[]` entry for that version |
+| `align-execution-backends` | standard and analytics disagree for the same SQL version and grammar | reconcile the detector with both routes or add a reliable backend signal to OSD |
 
 Drift classes: `grammar-rule-missing` (a parser rule the detector walks was
 renamed or removed — the finding names the closest current rule names),
@@ -311,7 +340,9 @@ renamed or removed — the finding names the closest current rule names),
 verdict flipped), `engine-message-changed` (same verdict, reworded error),
 `detector-silent` / `detector-noisy` (false negative / false positive),
 `version-scope-too-narrow` (the engine rejects but the rule is scoped away from
-that version, so users see no diagnostic), and `severity-mismatch`.
+that version, so users see no diagnostic), `execution-backend-divergence` (same
+version, different route verdict), and `severity-mismatch`. Backend divergence
+never recommends changing a version range.
 
 #### Full vs partial relaxation: scope the rule, or narrow the detector?
 
@@ -409,6 +440,14 @@ mkdir -p legs/3.7.0
   -Dppl.lint.report=$PWD/legs/3.7.0/backend-report.json \
   -Dppl.lint.grammar.bundle=$PWD/legs/3.7.0/ppl-grammar-bundle.json \
   -Dppl.lint.target=$PWD/legs/3.7.0/target.json
+
+# Observe the PR build through composite/Parquet + DataFusion.
+mkdir -p legs/pr-build-analytics
+./gradlew :integ-test:analyticsEnginePplLintIT \
+  -Dppl.lint.schedule=nightly -Dppl.lint.observe.only=true \
+  -Dppl.lint.report=$PWD/legs/pr-build-analytics/backend-report.json \
+  -Dppl.lint.grammar.bundle=$PWD/legs/pr-build-analytics/ppl-grammar-bundle.json \
+  -Dppl.lint.target=$PWD/legs/pr-build-analytics/target.json
 
 # Lint each leg's grammar from an OSD checkout (writes detector-report.json),
 # then compare every version at once:

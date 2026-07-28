@@ -31,22 +31,28 @@
 /** Every drift class this module can emit, with a stable one-line meaning. */
 export const DRIFT_CLASSES = {
   GRAMMAR_RULE_MISSING: 'grammar-rule-missing',
+  EXECUTION_BACKEND_DIVERGENCE: 'execution-backend-divergence',
+  BACKEND_ORACLE_MISMATCH: 'backend-oracle-mismatch',
   ENGINE_RELAXED: 'engine-relaxed',
   ENGINE_PARTIALLY_RELAXED: 'engine-partially-relaxed',
   ENGINE_TIGHTENED: 'engine-tightened',
   ENGINE_MESSAGE_CHANGED: 'engine-message-changed',
   DETECTOR_SILENT: 'detector-silent',
   DETECTOR_NOISY: 'detector-noisy',
+  DETECTOR_COUNT_MISMATCH: 'detector-count-mismatch',
+  DETECTOR_MESSAGE_MISMATCH: 'detector-message-mismatch',
   VERSION_SCOPE_TOO_NARROW: 'version-scope-too-narrow',
   SEVERITY_MISMATCH: 'severity-mismatch',
 };
 
 /** Remediation actions, phrased as what the linter engineer changes. */
 export const REMEDIATIONS = {
+  ALIGN_EXECUTION_BACKENDS: 'align-execution-backends',
   DISABLE_RULE: 'disable-rule',
   VERSION_SCOPE_RULE: 'version-scope-rule',
   UPDATE_DETECTOR: 'update-detector',
   UPDATE_CONTRACT: 'update-contract',
+  REVIEW_BACKEND_ORACLE: 'review-backend-oracle',
 };
 
 /** OSD paths an engineer edits, kept in one place so a move is a one-line fix. */
@@ -186,6 +192,119 @@ function describeObservation(observed) {
   return `detector ${detector}, engine ${backend}`;
 }
 
+function describeBackendVerdict(observed) {
+  if (!observed || typeof observed.backendRejected !== 'boolean') {
+    return 'did not produce a verdict';
+  }
+  if (!observed.backendRejected) {
+    return 'ACCEPTED';
+  }
+  const type = observed.backendType ? ` (${observed.backendType})` : '';
+  return `REJECTED${type}`;
+}
+
+function executionBackendRemediation(ruleId, detectorPath) {
+  return {
+    action: REMEDIATIONS.ALIGN_EXECUTION_BACKENDS,
+    target: `analytics backend and ${detectorFile(ruleId, detectorPath)}`,
+    detail:
+      `Keep the OpenSearch version bounds unchanged. Review the route-specific backend oracles, ` +
+      `then either align analytics behavior with standard, narrow the detector to behavior common ` +
+      `to both routes, disable the rule for every route, or add a reliable execution-backend signal ` +
+      `to the lint context before emitting route-specific diagnostics.`,
+  };
+}
+
+/**
+ * Compare the two execution routes for one query on the same engine candidate.
+ * This is deliberately separate from product-version drift: a route difference
+ * cannot justify changing an OpenSearch version range.
+ */
+export function classifyExecutionBackendDivergence({
+  ruleId,
+  version,
+  queryName,
+  role = 'trigger',
+  query,
+  standardObserved,
+  analyticsObserved,
+  standardLeg,
+  analyticsLeg,
+  grammarHash,
+  detectorPath,
+}) {
+  if (
+    !standardObserved ||
+    !analyticsObserved ||
+    typeof standardObserved.backendRejected !== 'boolean' ||
+    typeof analyticsObserved.backendRejected !== 'boolean' ||
+    standardObserved.backendRejected === analyticsObserved.backendRejected
+  ) {
+    return null;
+  }
+
+  const where = `${ruleId} @ ${version} [${queryName}]`;
+  return {
+    ruleId,
+    version,
+    driftVersion: version,
+    queryName,
+    role,
+    query,
+    executionBackend: 'analytics',
+    baselineExecutionBackend: 'standard',
+    executionBackends: ['standard', 'analytics'],
+    driftClass: DRIFT_CLASSES.EXECUTION_BACKEND_DIVERGENCE,
+    evidence:
+      `${where}: standard ${describeBackendVerdict(standardObserved)} while analytics ` +
+      `${describeBackendVerdict(analyticsObserved)} on the same engine candidate and runtime ` +
+      `grammar${grammarHash ? ` (${grammarHash})` : ''}` +
+      `${standardLeg || analyticsLeg ? `; legs ${standardLeg || 'standard'} / ${analyticsLeg || 'analytics'}` : ''}.`,
+    remediation: executionBackendRemediation(ruleId, detectorPath),
+  };
+}
+
+function backendOracleRemediation(executionBackend) {
+  return {
+    action: REMEDIATIONS.REVIEW_BACKEND_ORACLE,
+    target: `${executionBackend} backend and this contract file`,
+    detail:
+      `Review the captured raw response and determine whether the backend regressed or the reviewed ` +
+      `${executionBackend} oracle is stale. Restore the backend behavior when the status/result change ` +
+      `is unintended; update the oracle only after confirming the new behavior is intentional. Keep ` +
+      `the OpenSearch version bounds unchanged.`,
+  };
+}
+
+function classifyAnalyticsOracleMismatch({
+  ruleId,
+  version,
+  queryName,
+  role,
+  query,
+  observed,
+  expectedRejected,
+  detectorPath,
+  reason,
+}) {
+  const expected = expectedRejected ? 'REJECTION' : 'ACCEPTANCE';
+  return {
+    ruleId,
+    version,
+    driftVersion: version,
+    queryName,
+    role,
+    query,
+    executionBackend: 'analytics',
+    executionBackends: ['analytics'],
+    driftClass: DRIFT_CLASSES.BACKEND_ORACLE_MISMATCH,
+    evidence:
+      `${ruleId} @ ${version} [${queryName}]: analytics ${describeBackendVerdict(observed)}, ` +
+      `but ${reason || `its reviewed oracle requires ${expected}`}.`,
+    remediation: backendOracleRemediation('analytics'),
+  };
+}
+
 /**
  * Report a parser rule the detector walks that the candidate grammar no longer
  * defines. Exported so a caller can raise it ONCE per rule/version — the fact is
@@ -203,6 +322,7 @@ export function classifyGrammarDrift({
   role = 'trigger',
   query,
   detectorPath,
+  executionBackend = 'standard',
 }) {
   if (!Array.isArray(requiredParserRules) || !Array.isArray(parserRuleNames)) {
     return null;
@@ -222,9 +342,10 @@ export function classifyGrammarDrift({
     queryName,
     role,
     query,
+    executionBackend,
     driftClass: DRIFT_CLASSES.GRAMMAR_RULE_MISSING,
     evidence:
-      `${ruleId} @ ${version}${at}: the candidate grammar has no parser rule(s) ${missingList}, ` +
+      `${ruleId} @ ${version} (${executionBackend})${at}: the candidate grammar has no parser rule(s) ${missingList}, ` +
       `which this rule's detector walks.` +
       (observed && observed.detectorCount !== undefined ? ` ${describeObservation(observed)}.` : ''),
     remediation: {
@@ -281,6 +402,7 @@ export function classifyRelaxationScope({
   detectorFlagged = false,
   wiring,
   detectorPath,
+  executionBackend = 'standard',
 }) {
   if (relaxedTriggers.length === 0) {
     return null;
@@ -292,6 +414,7 @@ export function classifyRelaxationScope({
     version,
     driftVersion: version,
     role: 'trigger',
+    executionBackend,
     scope: {
       relaxed: [...relaxedTriggers],
       holding: [...holdingTriggers],
@@ -305,6 +428,17 @@ export function classifyRelaxationScope({
   // than the tool quietly presenting 1-of-1 as though it were 5-of-5.
   const observed = relaxedTriggers.length + holdingTriggers.length;
   const basis = `${relaxedTriggers.length} of ${observed} observed trigger(s) relaxed`;
+
+  if (executionBackend === 'analytics') {
+    return {
+      ...base,
+      driftClass: DRIFT_CLASSES.EXECUTION_BACKEND_DIVERGENCE,
+      executionBackends: ['analytics'],
+      evidence:
+        `${where}: analytics accepted ${basis}; this is route-specific behavior, not product-version drift.`,
+      remediation: executionBackendRemediation(ruleId, detectorPath),
+    };
+  }
 
   // --- Partial: some triggers relaxed, others still rejected ------------------
   // The engine fixed part of the condition. Scoping the rule out of this version
@@ -413,13 +547,14 @@ export function classifyDrift(input) {
     expectedBackend,
     detectorPath,
     controlAlsoRejected,
+    executionBackend = 'standard',
   } = input;
 
   const detectorFlagged = (observed.detectorCount || 0) > 0;
   const expectFlagged = (expected.detectorCount || 0) > 0;
   const backendRejected = observed.backendRejected;
-  const where = `${ruleId} @ ${version} [${queryName}]`;
-  const base = { ruleId, version, queryName, role, query, driftVersion: version };
+  const where = `${ruleId} @ ${version} (${executionBackend}) [${queryName}]`;
+  const base = { ruleId, version, queryName, role, query, driftVersion: version, executionBackend };
 
   // --- 1. Did the grammar move out from under the detector? -------------------
   // A detector that walks a parser rule the candidate grammar no longer defines
@@ -435,6 +570,7 @@ export function classifyDrift(input) {
     role,
     query,
     detectorPath,
+    executionBackend,
   });
   if (grammarDrift) {
     return grammarDrift;
@@ -446,6 +582,7 @@ export function classifyDrift(input) {
   // engine rejects the trigger, the version window is too narrow and users on
   // this version get no diagnostic.
   const inScope = versionInAppliesTo(wiring && wiring.appliesTo, version);
+  const expectRejection = expected.backendKind === 'rejection';
   if (!inScope) {
     // A trigger the engine rejects normally means the version window is too
     // narrow. But if the rule's CONTROL — a valid query using the same command —
@@ -455,6 +592,19 @@ export function classifyDrift(input) {
     // what is really "unsupported command", so that case is correctly silent:
     // the version window is doing its job.
     if (role === 'trigger' && backendRejected === true && controlAlsoRejected !== true) {
+      if (executionBackend === 'analytics') {
+        return classifyAnalyticsOracleMismatch({
+          ruleId,
+          version,
+          queryName,
+          role,
+          query,
+          observed,
+          expectedRejected: false,
+          detectorPath,
+          reason: 'the standard product-version rule is inactive for this engine candidate',
+        });
+      }
       return {
         ...base,
         driftClass: DRIFT_CLASSES.VERSION_SCOPE_TOO_NARROW,
@@ -492,7 +642,7 @@ export function classifyDrift(input) {
             `the version context rather than deciding on its own, and remember OSD's version filter runs ` +
             `a rule when the cluster version is unknown — so this also fires for users whose version ` +
             `could not be resolved.` +
-            (backendRejected === true
+            (backendRejected === true && executionBackend === 'standard'
               ? ` The engine does reject this query, so widening appliesTo in ${OSD_PATHS.catalog} may be` +
                 ` the right fix instead.`
               : ''),
@@ -504,13 +654,24 @@ export function classifyDrift(input) {
   }
 
   // --- 3. Behavioral flips: the engine changed its verdict --------------------
-  const expectRejection = expected.backendKind === 'rejection';
 
   // 3a. The engine now ACCEPTS what the contract pinned as a rejection. Any
   // diagnostic the linter still emits is a false positive shipped to users —
   // the single most damaging drift, so it is reported even when the detector
   // count happens to match the stale expectation.
   if (role === 'trigger' && expectRejection && backendRejected === false) {
+    if (executionBackend === 'analytics') {
+      return classifyAnalyticsOracleMismatch({
+        ruleId,
+        version,
+        queryName,
+        role,
+        query,
+        observed,
+        expectedRejected: true,
+        detectorPath,
+      });
+    }
     return {
       ...base,
       // A single relaxed trigger cannot tell a full fix from a partial one, and the
@@ -548,6 +709,18 @@ export function classifyDrift(input) {
   // 3b. The engine now REJECTS what the contract pinned as valid. A control that
   // started failing means the linter is silently missing a real error.
   if (!expectRejection && backendRejected === true) {
+    if (executionBackend === 'analytics') {
+      return classifyAnalyticsOracleMismatch({
+        ruleId,
+        version,
+        queryName,
+        role,
+        query,
+        observed,
+        expectedRejected: false,
+        detectorPath,
+      });
+    }
     return {
       ...base,
       driftClass: DRIFT_CLASSES.ENGINE_TIGHTENED,
@@ -590,6 +763,10 @@ export function classifyDrift(input) {
   const detectorMatches = (observed.detectorCount || 0) === (expected.detectorCount || 0);
   if (backendRejected === true && expectRejection && expectedBackend && detectorMatches) {
     const expectedError = (expectedBackend.body && expectedBackend.body.error) || {};
+    const statusChanged =
+      expectedBackend.httpStatus !== undefined &&
+      observed.backendStatus !== undefined &&
+      expectedBackend.httpStatus !== observed.backendStatus;
     const typeChanged =
       expectedError.type !== undefined &&
       observed.backendType !== undefined &&
@@ -598,6 +775,16 @@ export function classifyDrift(input) {
       expectedError.reason !== undefined &&
       observed.backendReason !== undefined &&
       expectedError.reason !== observed.backendReason;
+    if (statusChanged) {
+      return {
+        ...base,
+        driftClass: DRIFT_CLASSES.BACKEND_ORACLE_MISMATCH,
+        evidence:
+          `${where}: the backend still rejects the query, but its HTTP status changed from ` +
+          `${expectedBackend.httpStatus} to ${observed.backendStatus}.`,
+        remediation: backendOracleRemediation(executionBackend),
+      };
+    }
     if (typeChanged || reasonChanged) {
       const parts = [];
       if (typeChanged) parts.push(`error.type "${expectedError.type}" -> "${observed.backendType}"`);
@@ -618,6 +805,36 @@ export function classifyDrift(input) {
         },
       };
     }
+  }
+
+  // Result-shape assertions and other detailed backend oracles can change while
+  // the coarse accepted/rejected verdict stays the same. The Java observer
+  // records that assertion failure explicitly; it must not be treated as
+  // agreement merely because a boolean verdict is still available.
+  if (observed.backendOutcome === 'observed-mismatch' || observed.backendOutcome === 'fail') {
+    if (executionBackend === 'analytics') {
+      return classifyAnalyticsOracleMismatch({
+        ruleId,
+        version,
+        queryName,
+        role,
+        query,
+        observed,
+        expectedRejected: expectRejection,
+        detectorPath,
+        reason: `its reviewed backend oracle did not match: ${
+          observed.backendMismatch || 'unspecified assertion mismatch'
+        }`,
+      });
+    }
+    return {
+      ...base,
+      driftClass: DRIFT_CLASSES.BACKEND_ORACLE_MISMATCH,
+      evidence:
+        `${where}: the backend kept the same coarse verdict but failed its detailed oracle — ` +
+        `${observed.backendMismatch || 'unspecified assertion mismatch'}.`,
+      remediation: backendOracleRemediation(executionBackend),
+    };
   }
 
   // --- 5. Detector-only disagreements ----------------------------------------
@@ -670,13 +887,31 @@ export function classifyDrift(input) {
     };
   }
 
-  // --- 6. Right verdict, wrong severity --------------------------------------
+  if (observed.detectorCount !== expected.detectorCount) {
+    return {
+      ...base,
+      driftClass: DRIFT_CLASSES.DETECTOR_COUNT_MISMATCH,
+      evidence:
+        `${where}: expected exactly ${expected.detectorCount} diagnostic(s), but the detector ` +
+        `emitted ${observed.detectorCount} while the backend behaved as pinned.`,
+      remediation: {
+        action: REMEDIATIONS.UPDATE_DETECTOR,
+        target: detectorFile(ruleId, detectorPath),
+        detail:
+          `Restore the detector to emit exactly ${expected.detectorCount} diagnostic(s) for this ` +
+          `query, or re-pin detectorCount only after confirming the changed multiplicity is intentional.`,
+      },
+    };
+  }
+
+  // --- 6. Right verdict, wrong severity/message ------------------------------
   if (
     expected.severity &&
     detectorFlagged &&
-    Array.isArray(observed.severities) &&
-    observed.severities.length > 0 &&
-    !observed.severities.every((s) => s === expected.severity)
+    (observed.severityMatched === false ||
+      (Array.isArray(observed.severities) &&
+        observed.severities.length > 0 &&
+        !observed.severities.every((s) => s === expected.severity)))
   ) {
     return {
       ...base,
@@ -690,6 +925,23 @@ export function classifyDrift(input) {
         detail:
           `Restore "${ruleId}".severity to "${expected.severity}" in the catalog, or — if the downgrade was ` +
           `deliberate — re-pin this contract and note that the rule left the enforced default-error set.`,
+      },
+    };
+  }
+
+  if (expected.matchMessage && observed.messageMatched !== true) {
+    return {
+      ...base,
+      driftClass: DRIFT_CLASSES.DETECTOR_MESSAGE_MISMATCH,
+      evidence:
+        `${where}: the detector diagnostic no longer contains the contracted message fragment ` +
+        `${JSON.stringify(expected.matchMessage)}.`,
+      remediation: {
+        action: REMEDIATIONS.UPDATE_DETECTOR,
+        target: detectorFile(ruleId, detectorPath),
+        detail:
+          `Restore the diagnostic message asserted by this contract, or update matchMessage only ` +
+          `after reviewing the new user-facing wording.`,
       },
     };
   }
@@ -720,9 +972,11 @@ export function formatDriftReport(drifts) {
   // Most urgent action first: a false positive already reaching users outranks a
   // stale pinned string.
   const order = [
+    REMEDIATIONS.ALIGN_EXECUTION_BACKENDS,
     REMEDIATIONS.DISABLE_RULE,
     REMEDIATIONS.VERSION_SCOPE_RULE,
     REMEDIATIONS.UPDATE_DETECTOR,
+    REMEDIATIONS.REVIEW_BACKEND_ORACLE,
     REMEDIATIONS.UPDATE_CONTRACT,
   ];
   for (const action of order) {
@@ -730,7 +984,11 @@ export function formatDriftReport(drifts) {
     if (!group || group.length === 0) continue;
     lines.push(`## ${action} (${group.length})`);
     for (const drift of group) {
-      lines.push(`- [${drift.driftClass}] ${drift.evidence}`);
+      const backend =
+        Array.isArray(drift.executionBackends) && drift.executionBackends.length > 1
+          ? drift.executionBackends.join(' vs ')
+          : drift.executionBackend || 'standard';
+      lines.push(`- [${drift.driftClass}] [${backend}] ${drift.evidence}`);
       lines.push(`  FIX (${drift.remediation.target}): ${drift.remediation.detail}`);
       // A rule-level finding (e.g. a grammar rename) has no single query behind it.
       if (drift.query) {
