@@ -23,6 +23,7 @@ import {
   DRIFT_CLASSES,
   REMEDIATIONS,
   classifyDrift,
+  classifyExecutionBackendDivergence,
   classifyRelaxationScope,
   formatDriftReport,
   parseVersion,
@@ -135,6 +136,39 @@ test('grammar-rule check is skipped when the contract declares no required rules
 });
 
 // --- engine behavior flips ----------------------------------------------------
+
+test('same-candidate route differences use backend remediation, never version scoping', () => {
+  const drift = classifyExecutionBackendDivergence({
+    ruleId: 'union-min-datasets',
+    version: '3.8.0',
+    queryName: 'union-single-dataset',
+    role: 'trigger',
+    query: 'union [ source=t ]',
+    standardObserved: { backendRejected: true, backendType: 'IllegalArgumentException' },
+    analyticsObserved: { backendRejected: false },
+    standardLeg: 'pr-build',
+    analyticsLeg: 'pr-build-analytics',
+    grammarHash: 'sha256:same',
+  });
+  assert.equal(drift.driftClass, DRIFT_CLASSES.EXECUTION_BACKEND_DIVERGENCE);
+  assert.equal(drift.remediation.action, REMEDIATIONS.ALIGN_EXECUTION_BACKENDS);
+  assert.deepEqual(drift.executionBackends, ['standard', 'analytics']);
+  assert.doesNotMatch(drift.remediation.detail, /maxVersion|minVersion|scope/i);
+  assert.match(drift.evidence, /standard REJECTED.*analytics ACCEPTED/);
+});
+
+test('analytics oracle flips are not labeled as product-version relaxation', () => {
+  const drift = classifyDrift(
+    agreeingTrigger({
+      executionBackend: 'analytics',
+      observed: { detectorCount: 1, severities: ['error'], backendRejected: false },
+    })
+  );
+  assert.equal(drift.driftClass, DRIFT_CLASSES.BACKEND_ORACLE_MISMATCH);
+  assert.equal(drift.remediation.action, REMEDIATIONS.REVIEW_BACKEND_ORACLE);
+  assert.notEqual(drift.driftClass, DRIFT_CLASSES.ENGINE_RELAXED);
+  assert.doesNotMatch(drift.remediation.detail, /maxVersion|minVersion|scope/i);
+});
 
 test('engine relaxation with a still-firing detector demands version scoping', () => {
   const drift = classifyDrift(
@@ -355,6 +389,46 @@ test('a noisy detector the engine agrees with points at the expectation', () => 
   );
   assert.equal(drift.driftClass, DRIFT_CLASSES.DETECTOR_NOISY);
   assert.equal(drift.remediation.action, REMEDIATIONS.UPDATE_CONTRACT);
+});
+
+test('a nonzero detector count mismatch is not reduced to flagged versus silent', () => {
+  const drift = classifyDrift(
+    agreeingTrigger({
+      expected: {
+        detectorCount: 2,
+        severity: 'error',
+        backendKind: 'rejection',
+      },
+      observed: {
+        ...agreeingTrigger().observed,
+        detectorCount: 1,
+      },
+    })
+  );
+  assert.equal(drift.driftClass, DRIFT_CLASSES.DETECTOR_COUNT_MISMATCH);
+  assert.equal(drift.remediation.action, REMEDIATIONS.UPDATE_DETECTOR);
+  assert.match(drift.evidence, /expected exactly 2.*emitted 1/);
+});
+
+test('a detector message mismatch is classified independently of count and severity', () => {
+  const drift = classifyDrift(
+    agreeingTrigger({
+      expected: {
+        detectorCount: 1,
+        severity: 'error',
+        matchMessage: 'requires at least two datasets',
+        backendKind: 'rejection',
+      },
+      observed: {
+        ...agreeingTrigger().observed,
+        severityMatched: true,
+        messageMatched: false,
+      },
+    })
+  );
+  assert.equal(drift.driftClass, DRIFT_CLASSES.DETECTOR_MESSAGE_MISMATCH);
+  assert.equal(drift.remediation.action, REMEDIATIONS.UPDATE_DETECTOR);
+  assert.match(drift.evidence, /requires at least two datasets/);
 });
 
 // --- severity ----------------------------------------------------------------

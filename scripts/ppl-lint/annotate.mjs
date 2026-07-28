@@ -47,6 +47,12 @@ function escapeData(value) {
   return String(value).replace(/%/g, '%25').replace(/\r/g, '%0D').replace(/\n/g, '%0A');
 }
 
+function backendLabel(entry) {
+  return Array.isArray(entry.executionBackends) && entry.executionBackends.length > 1
+    ? entry.executionBackends.join(' vs ')
+    : entry.executionBackend || 'standard';
+}
+
 /**
  * Line of the `expectations[]` entry whose `version` is `range`, 1-indexed.
  *
@@ -124,10 +130,12 @@ export function buildAnnotations(report, { contractsDir, workspace, readFile = r
       findRuleIdLine(text);
 
     annotations.push({
-      level: drift.enforced ? 'error' : 'warning',
+      level: (drift.blocking ?? drift.enforced) ? 'error' : 'warning',
       file: file ? contractRepoPath(contractsDir, file, workspace) : undefined,
       line,
-      title: `PPL lint drift: ${drift.driftClass} (${drift.ruleId} @ ${drift.version})`,
+      title:
+        `PPL lint drift: ${drift.driftClass} ` +
+        `(${drift.ruleId} @ ${drift.version}, ${backendLabel(drift)})`,
       // Message order matters: the UI truncates, so lead with what moved, then the
       // action, then where. The summary carries the full rationale.
       message: [
@@ -143,15 +151,17 @@ export function buildAnnotations(report, { contractsDir, workspace, readFile = r
   for (const hole of report.coverageHoles || []) {
     const text = contractText(hole.file);
     annotations.push({
-      level: hole.enforced ? 'error' : 'warning',
+      level: (hole.blocking ?? hole.enforced) ? 'error' : 'warning',
       file: hole.file ? contractRepoPath(contractsDir, hole.file, workspace) : undefined,
       line: findRuleIdLine(text),
-      title: `PPL lint coverage hole: ${hole.ruleId} @ ${hole.version}`,
+      title:
+        `PPL lint coverage hole: ${hole.ruleId} @ ${hole.version}, ${backendLabel(hole)}`,
       message:
-        `No expectation in this contract matches engine ${hole.version}, so nothing pins ` +
-        `"${hole.ruleId}" there. Add a reviewed expectation whose version range covers ` +
-        `${hole.version}; do not widen an existing range to absorb it unless the behavior is ` +
-        `genuinely identical.`,
+        (hole.reason
+          ? `${hole.reason}. `
+          : `No expectation in this contract matches engine ${hole.version}. `) +
+        `Nothing pins "${hole.ruleId}" for the ${backendLabel(hole)} route there. Add a reviewed ` +
+        `${backendLabel(hole)} oracle or expectation; never use another route's oracle as fallback.`,
     });
   }
 
@@ -163,9 +173,12 @@ export function buildAnnotations(report, { contractsDir, workspace, readFile = r
       level: 'warning',
       file: entry.file ? contractRepoPath(contractsDir, entry.file, workspace) : undefined,
       line: findRuleIdLine(text),
-      title: `PPL lint inconclusive: ${entry.ruleId} @ ${entry.version} (leg problem)`,
+      title:
+        `PPL lint inconclusive: ${entry.ruleId} @ ${entry.version}, ` +
+        `${backendLabel(entry)} (leg problem)`,
       message:
-        `No case could be compared for "${entry.ruleId}" on engine ${entry.version}` +
+        `No case could be compared for "${entry.ruleId}" on engine ${entry.version} ` +
+        `(${backendLabel(entry)})` +
         (entry.reasons && entry.reasons.length > 0 ? ` — ${entry.reasons.join('; ')}` : '') +
         `. This is NOT a lint finding: the engine or the detector run did not answer, so ` +
         `nothing was validated. Check that leg's job logs and re-run. Do not edit the rule or ` +

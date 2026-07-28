@@ -1,7 +1,7 @@
 {
   "schemaVersion": 3,
   "ruleId": "division-by-zero",
-  "note": "The detector deliberately flags only `/`: division_by_zero.ts pins DIVISION_OPERATOR to \"/\" because modulo-by-zero was never verified live. `modulo-by-zero-not-flagged` is therefore a CONTROL \u2014 it documents that boundary rather than asserting a gap.",
+  "note": "The detector flags both division and modulo by a literal zero because both operations return null silently. The backend result-shape oracle verifies that behavior independently for each operator.",
   "grammarSurface": "both",
   "schedule": "pr",
   "wiring": {
@@ -39,8 +39,8 @@
       "role": "control",
       "query": "source={{index}} | eval ratio = balance / 2 | fields ratio | head 1"
     },
-    "modulo-by-zero-not-flagged": {
-      "role": "control",
+    "modulo-by-zero-literal": {
+      "role": "trigger",
       "query": "source={{index}} | eval m = balance % 0 | fields m | head 1"
     }
   },
@@ -80,8 +80,9 @@
             }
           }
         },
-        "modulo-by-zero-not-flagged": {
-          "detectorCount": 0,
+        "modulo-by-zero-literal": {
+          "detectorCount": 1,
+          "severity": "warning",
           "backend": {
             "kind": "result-shape",
             "httpStatus": 200,
