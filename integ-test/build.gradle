@@ -610,6 +610,7 @@ task analyticsEnginePplLintIT(type: RestIntegTestTask) {
     systemProperty 'ppl.lint.execution_backend', 'analytics'
     systemProperty 'ppl.lint.analytics.stack.source', featureBuildBase
     systemProperty 'tests.security.manager', 'false'
+    systemProperty 'project.root', project.projectDir.absolutePath
 
     filter {
         includeTestsMatching 'org.opensearch.sql.calcite.remote.PplLintRuleValidationIT'
