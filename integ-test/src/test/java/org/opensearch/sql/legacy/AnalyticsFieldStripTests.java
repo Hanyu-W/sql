@@ -223,7 +223,7 @@ public class AnalyticsFieldStripTests {
     String bulk =
         "{\"index\":{\"_index\":\"fixture\",\"_id\":\"1\"}}\n"
             + indexSource
-            + "\n"
+            + "\n\n"
             + "{\"create\":{\"_index\":\"fixture\",\"_id\":\"2\",\"routing\":\"r2\"}}\n"
             + createSource
             + "\n";
@@ -238,13 +238,14 @@ public class AnalyticsFieldStripTests {
     assertFalse(index.has("_id"));
     assertEquals("fixture", index.getString("_index"));
     assertEquals(indexSource, lines[1]);
-    JSONObject create = new JSONObject(lines[2]).getJSONObject("create");
+    assertEquals("", lines[2]);
+    JSONObject create = new JSONObject(lines[3]).getJSONObject("create");
     assertEquals("2", create.getString("_id"));
     assertEquals("fixture", create.getString("_index"));
     assertEquals("r2", create.getString("routing"));
-    assertEquals(createSource, lines[3]);
+    assertEquals(createSource, lines[4]);
     // split(..., -1) proves the original terminal newline survived.
-    assertEquals("", lines[4]);
+    assertEquals("", lines[5]);
   }
 
   @Test
