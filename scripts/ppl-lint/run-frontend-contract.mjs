@@ -44,7 +44,8 @@
  *      backend behavior for each query agrees with the observed detector output
  *      — a trigger the detector flags is one the backend rejected; a control the
  *      detector passes is one the backend accepted (design §3.2, §4.3).
- *   4. Coverage (nightly only): every enabled catalog rule has a contract file.
+ *   4. Coverage census: records whether every enabled catalog rule has a
+ *      contract file. Census drift is report-only unless explicitly enforced.
  *
  * ## Two grammar surfaces
  *
@@ -77,10 +78,12 @@
 import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
 
 import {
   assertContractSchema,
   assertExactQueryCoverage,
+  assertShippingFrontendOracles,
   classifyBackendReportRow,
   contractChannel,
   indexBackendReport,
@@ -169,6 +172,54 @@ function loadContractFile(file) {
   return undefined; // unreachable
 }
 
+export function assertActiveShippingContracts(contracts, { discovery = false } = {}) {
+  if (discovery) {
+    return;
+  }
+  for (const { file, spec } of contracts) {
+    for (const expectation of spec.expectations) {
+      try {
+        assertShippingFrontendOracles(spec, expectation);
+      } catch (error) {
+        throw new Error(`Invalid active shipping contract ${file}: ${error.message}`);
+      }
+    }
+  }
+}
+
+export function selectManifestContractNames(manifest, includeDormant = false) {
+  if (!Array.isArray(manifest.contracts)) {
+    throw new TypeError('manifest.json must have a "contracts" array of file names.');
+  }
+  if (new Set(manifest.contracts).size !== manifest.contracts.length) {
+    throw new Error('manifest.json "contracts" contains duplicate file names.');
+  }
+  const active = manifest.contracts.map((name) => ({ name, reportOnly: false }));
+  if (!includeDormant) {
+    return active;
+  }
+  if (!Array.isArray(manifest.dormantContracts)) {
+    throw new TypeError(
+      'PPL_LINT_INCLUDE_DORMANT=1 requires manifest.json "dormantContracts" to be an array.'
+    );
+  }
+  if (new Set(manifest.dormantContracts).size !== manifest.dormantContracts.length) {
+    throw new Error('manifest.json "dormantContracts" contains duplicate file names.');
+  }
+  const activeNames = new Set(manifest.contracts);
+  for (const name of manifest.dormantContracts) {
+    if (activeNames.has(name)) {
+      throw new Error(
+        `manifest.json contract "${name}" cannot be both active and dormant.`
+      );
+    }
+  }
+  return [
+    ...active,
+    ...manifest.dormantContracts.map((name) => ({ name, reportOnly: true })),
+  ];
+}
+
 /** Load every *.spec.json under the contract dir, honoring manifest.json if present. */
 function loadContracts() {
   const dir = process.env.PPL_LINT_CONTRACT_DIR;
@@ -179,8 +230,16 @@ function loadContracts() {
       fatal(`Contract file not found: ${single}`);
     }
     const contract = loadContractFile(single);
+    try {
+      assertActiveShippingContracts([contract], {
+        discovery: process.env.PPL_LINT_DISCOVERY === '1',
+      });
+    } catch (error) {
+      fatal(error.message);
+    }
     return {
-      contracts: [contract],
+      contracts: [{ ...contract, reportOnly: false }],
+      activeContracts: [contract],
       manifest: { contracts: [path.basename(single)] },
       manifestPath: '',
     };
@@ -195,6 +254,7 @@ function loadContracts() {
 
   const manifestPath = path.join(dir, 'manifest.json');
   let files;
+  let selectedFiles;
   let manifest;
   if (fs.existsSync(manifestPath)) {
     try {
@@ -202,28 +262,52 @@ function loadContracts() {
     } catch (error) {
       fatal(`Invalid contract manifest ${manifestPath}: ${error.message}`);
     }
-    if (!Array.isArray(manifest.contracts)) {
-      fatal(`manifest.json must have a "contracts" array of file names.`);
+    try {
+      selectedFiles = selectManifestContractNames(
+        manifest,
+        process.env.PPL_LINT_INCLUDE_DORMANT === '1'
+      );
+    } catch (error) {
+      fatal(error.message);
     }
-    if (new Set(manifest.contracts).size !== manifest.contracts.length) {
-      fatal(`manifest.json "contracts" contains duplicate file names.`);
-    }
-    files = manifest.contracts.map((name) => path.join(dir, name));
+    files = selectedFiles.map(({ name }) => path.join(dir, name));
   } else {
     files = fs
       .readdirSync(dir)
       .filter((f) => f.endsWith('.spec.json'))
       .sort()
       .map((f) => path.join(dir, f));
+    selectedFiles = files.map((file) => ({
+      name: path.basename(file),
+      reportOnly: false,
+    }));
   }
 
-  const contracts = files.map((file) => {
+  const contracts = files.map((file, index) => {
     if (!fs.existsSync(file)) {
       fatal(`Contract referenced by manifest not found: ${file}`);
     }
-    return loadContractFile(file);
+    return {
+      ...loadContractFile(file),
+      reportOnly: selectedFiles[index].reportOnly,
+    };
   });
-  return { contracts, manifest: manifest || { contracts: files.map(path.basename) }, manifestPath };
+  const activeContracts = contracts
+    .filter(({ reportOnly }) => !reportOnly)
+    .map(({ file, spec }) => ({ file, spec }));
+  try {
+    assertActiveShippingContracts(activeContracts, {
+      discovery: process.env.PPL_LINT_DISCOVERY === '1',
+    });
+  } catch (error) {
+    fatal(error.message);
+  }
+  return {
+    contracts,
+    activeContracts,
+    manifest: manifest || { contracts: files.map(path.basename) },
+    manifestPath,
+  };
 }
 
 function loadOsd() {
@@ -470,7 +554,7 @@ function selectExpectation(spec, version, isCalcite, failures, { allowMissing = 
       failures.push(`[${spec.ruleId}] no version expectation matches backend version ${label}.`);
     }
   } else {
-    fatal(
+    failures.push(
       `[${spec.ruleId}] ${matches.length} expectations match backend version ${label} ` +
         '(exactly one required).'
     );
@@ -486,6 +570,9 @@ function selectExpectation(spec, version, isCalcite, failures, { allowMissing = 
 function checkWiring(spec, catalog, getDetector, failures) {
   const { ruleId, wiring } = spec;
   if (contractChannel(spec) === 'syntax') {
+    if (!wiring) {
+      failures.push(`[${ruleId}] contract.wiring is required for strict syntax wiring.`);
+    }
     return { id: ruleId, syntaxCode: wiring && wiring.code };
   }
   const entry = catalog.find((c) => c.id === ruleId);
@@ -494,7 +581,8 @@ function checkWiring(spec, catalog, getDetector, failures) {
     return undefined;
   }
   if (!wiring) {
-    return entry; // no wiring block to assert
+    failures.push(`[${ruleId}] contract.wiring is required for strict catalog comparison.`);
+    return entry;
   }
 
   let expected;
@@ -564,11 +652,239 @@ function buildContext(spec, engineVersion) {
   return context;
 }
 
+function rangeOffsets(query, range) {
+  const lineStarts = [0];
+  for (let index = 0; index < query.length; index += 1) {
+    if (query[index] === '\n') {
+      lineStarts.push(index + 1);
+    }
+  }
+  const offset = (line, column) => {
+    const lineStart = lineStarts[line - 1];
+    if (lineStart === undefined) {
+      throw new Error(`range line ${line} is outside a ${lineStarts.length}-line query`);
+    }
+    const lineEnd = lineStarts[line] === undefined ? query.length : lineStarts[line] - 1;
+    if (lineStart + column > lineEnd) {
+      throw new Error(`range column ${column} is outside query line ${line}`);
+    }
+    return lineStart + column;
+  };
+  return {
+    start: offset(range.startLine, range.startColumn),
+    end: offset(range.endLine, range.endColumn),
+  };
+}
+
+function materializeDeterministicFix(query, diagnostic) {
+  if (!diagnostic.fix) {
+    return undefined;
+  }
+  const range = diagnostic.fix.range || diagnostic.range;
+  const { start, end } = rangeOffsets(query, range);
+  const sourceText = query.slice(start, end);
+  const expectedTextMatchesSource =
+    diagnostic.fix.expectedText === undefined ||
+    diagnostic.fix.expectedText === sourceText;
+  return {
+    offered: true,
+    title: diagnostic.fix.title,
+    text: diagnostic.fix.text,
+    range: {
+      startLine: range.startLine,
+      startColumn: range.startColumn,
+      endLine: range.endLine,
+      endColumn: range.endColumn,
+    },
+    ...(diagnostic.fix.expectedText !== undefined
+      ? { expectedText: diagnostic.fix.expectedText }
+      : {}),
+    ...(!expectedTextMatchesSource
+      ? { expectedTextMatchesSource: false }
+      : {}),
+    appliedQuery: query.slice(0, start) + diagnostic.fix.text + query.slice(end),
+  };
+}
+
+function exactEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function evaluateFrontendAssertions({
+  channel,
+  query,
+  matches,
+  allFrontendFindings = matches,
+  frontendOracle,
+}) {
+  const assertions = {};
+  const mismatches = [];
+  const record = (field, matched, expected, actual) => {
+    assertions[field] = matched;
+    if (!matched) {
+      mismatches.push({ field, expected, actual });
+    }
+    return matched;
+  };
+
+  const severityMatched =
+    channel === 'syntax' ||
+    !frontendOracle.severity ||
+    matches.length === 0 ||
+    matches.every((finding) => finding.severity === frontendOracle.severity);
+  if (channel === 'lint' && frontendOracle.severity !== undefined) {
+    record(
+      'severity',
+      severityMatched,
+      frontendOracle.severity,
+      matches.map((finding) => finding.severity)
+    );
+  }
+
+  let messageMatched = true;
+  if (frontendOracle.matchMessage !== undefined) {
+    messageMatched = matches.some((finding) =>
+      String(finding.message || '').includes(frontendOracle.matchMessage)
+    );
+    record(
+      'message',
+      messageMatched,
+      { contains: frontendOracle.matchMessage },
+      matches.map((finding) => finding.message)
+    );
+  } else if (frontendOracle.messageEquals !== undefined) {
+    messageMatched =
+      matches.length > 0 &&
+      matches.every((finding) => finding.message === frontendOracle.messageEquals);
+    record(
+      'message',
+      messageMatched,
+      { equals: frontendOracle.messageEquals },
+      matches.map((finding) => finding.message)
+    );
+  }
+
+  let deterministicFixMatched = true;
+  let deterministicFixActual;
+  if (frontendOracle.deterministicFix !== undefined) {
+    const fixes = matches
+      .map((diagnostic) => materializeDeterministicFix(query, diagnostic))
+      .filter(Boolean);
+    deterministicFixActual =
+      fixes.length === 0
+        ? { offered: false }
+        : fixes.length === 1
+          ? fixes[0]
+          : { offered: true, count: fixes.length, fixes };
+    deterministicFixMatched = record(
+      'deterministicFix',
+      exactEqual(frontendOracle.deterministicFix, deterministicFixActual),
+      frontendOracle.deterministicFix,
+      deterministicFixActual
+    );
+  }
+
+  let syntaxFixMatched = true;
+  if (channel === 'syntax' && frontendOracle.fixText !== undefined) {
+    const fixes = allFrontendFindings
+      .filter((finding) => finding.fix)
+      .map((finding) => finding.fix.text);
+    const expected =
+      frontendOracle.fixText === null
+        ? { offered: false }
+        : { offered: true, text: frontendOracle.fixText };
+    const actual =
+      fixes.length === 0
+        ? { offered: false }
+        : fixes.length === 1
+          ? { offered: true, text: fixes[0] }
+          : { offered: true, count: fixes.length, texts: fixes };
+    syntaxFixMatched = record('syntaxFix', exactEqual(expected, actual), expected, actual);
+  }
+
+  let rawMessageMatched = true;
+  if (channel === 'syntax' && frontendOracle.rawMessage !== undefined) {
+    const rawMessages = allFrontendFindings
+      .map((finding) => finding.rawMessage)
+      .filter((message) => typeof message === 'string' && message.length > 0);
+    const actual = rawMessages.length > 0;
+    rawMessageMatched = record(
+      'rawParserError',
+      actual === frontendOracle.rawMessage,
+      frontendOracle.rawMessage,
+      actual
+    );
+  }
+
+  let totalErrorsMatched = true;
+  if (channel === 'syntax' && frontendOracle.totalErrors !== undefined) {
+    totalErrorsMatched = record(
+      'totalErrors',
+      allFrontendFindings.length === frontendOracle.totalErrors,
+      frontendOracle.totalErrors,
+      allFrontendFindings.length
+    );
+  }
+
+  return {
+    assertions,
+    mismatches,
+    severityMatched,
+    messageMatched,
+    deterministicFixMatched,
+    deterministicFixActual,
+    syntaxFixMatched,
+    rawMessageMatched,
+    totalErrorsMatched,
+  };
+}
+
+export function buildFrontendExecutionError({
+  ruleId,
+  channel,
+  queryName,
+  role,
+  query,
+  expected = 0,
+  surface,
+  executionBackend,
+  error,
+  reportOnly = false,
+}) {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    ruleId,
+    channel,
+    queryName,
+    role,
+    query,
+    expected: Number.isInteger(expected) ? expected : 0,
+    actual: 0,
+    severities: [],
+    severityMatched: true,
+    messageMatched: true,
+    assertions: { execution: false },
+    mismatches: [
+      {
+        field: 'execution',
+        expected: 'completed',
+        actual: message,
+      },
+    ],
+    outcome: 'error',
+    error: message,
+    surface,
+    executionBackend,
+    backendOracleStatus: 'error',
+    ...(reportOnly ? { reportOnly: true } : {}),
+  };
+}
+
 function equalSets(left, right) {
   return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
-function buildCensus(contracts, manifest, catalog) {
+export function buildCensus(contracts, manifest, catalog) {
   const problems = [];
   const byFile = new Map(
     contracts.map(({ file, spec }) => [path.basename(file), spec])
@@ -610,6 +926,27 @@ function buildCensus(contracts, manifest, catalog) {
     .filter(({ spec }) => contractChannel(spec) === 'syntax')
     .map(({ spec }) => spec.ruleId)
     .sort();
+  const catalogRuleIds = catalog.map((rule) => rule.id).sort();
+  const duplicateCatalogRuleIds = catalogRuleIds.filter(
+    (ruleId, index) => catalogRuleIds.indexOf(ruleId) !== index
+  );
+  if (duplicateCatalogRuleIds.length > 0) {
+    problems.push(
+      `catalog contains duplicate rule IDs: ${[
+        ...new Set(duplicateCatalogRuleIds),
+      ].join(', ')}.`
+    );
+  }
+  const syntaxRulesInCatalog = activeSyntaxRules.filter((ruleId) =>
+    catalogRuleIds.includes(ruleId)
+  );
+  if (syntaxRulesInCatalog.length > 0) {
+    problems.push(
+      `syntax features must remain outside the detector catalog: ${syntaxRulesInCatalog.join(
+        ', '
+      )}.`
+    );
+  }
   const enabledRules = catalog
     .filter((rule) => rule.enabled)
     .map((rule) => rule.id)
@@ -624,13 +961,14 @@ function buildCensus(contracts, manifest, catalog) {
   if (activeLintRules.length !== 12) {
     problems.push(`expected 12 active lint contracts, found ${activeLintRules.length}.`);
   }
-  if (requiredSyntaxFeatures.length !== 1) {
+  if (requiredSyntaxFeatures.length !== 0) {
     problems.push(
-      `expected one required syntax feature, found ${requiredSyntaxFeatures.length}.`
+      `required syntax features must be empty, found ` +
+        `${JSON.stringify(requiredSyntaxFeatures)}.`
     );
   }
-  if (activeContractRules.length !== 13) {
-    problems.push(`expected 13 active contracts, found ${activeContractRules.length}.`);
+  if (activeContractRules.length !== 12) {
+    problems.push(`expected 12 active contracts, found ${activeContractRules.length}.`);
   }
   if (!equalSets(new Set(activeSyntaxRules), new Set(requiredSyntaxFeatures))) {
     problems.push(
@@ -669,7 +1007,7 @@ function main() {
   const reportPath = process.env.PPL_LINT_REPORT;
   const target = loadTarget();
   const backendReport = loadBackendReport(target);
-  const { contracts, manifest, manifestPath } = loadContracts();
+  const { contracts, activeContracts, manifest, manifestPath } = loadContracts();
 
   const osd = loadOsd();
   const {
@@ -681,7 +1019,7 @@ function main() {
     surface,
   } = osd;
   const catalog = getBundledCatalog();
-  const census = buildCensus(contracts, manifest, catalog);
+  const census = buildCensus(activeContracts, manifest, catalog);
 
   // The compiled surface lints with OSD's own checked-in grammar, so there is no
   // candidate bundle to load. On the runtime surface a missing bundle stays a hard
@@ -698,6 +1036,7 @@ function main() {
   }
 
   const failures = [];
+  const reportOnlyFailures = [];
   // Contracts this surface did not score, recorded so the report says a rule was
   // skipped for surface rather than leaving its absence unexplained.
   const skippedForSurface = [];
@@ -719,12 +1058,12 @@ function main() {
     observeAnalytics,
     observeOnly,
     differential: !!backendReport,
+    includedDormant: process.env.PPL_LINT_INCLUDE_DORMANT === '1',
+    reportOnlyFailures,
     // Census of the rules that ship enabled at ERROR severity, read from the OSD
-    // catalog this run linted with. The multi-version aggregator enforces its
-    // `defaultError` manifest set against this list, so a rule that becomes
-    // default-error in OSD without a contract file cannot slip through
-    // unvalidated — and the aggregator does not need its own OSD checkout to
-    // notice (design: default-error is the set users cannot opt out of).
+    // catalog this run linted with. The multi-version aggregator compares its
+    // `defaultError` manifest set against this list without needing its own OSD
+    // checkout. Drift remains report-only unless census enforcement is enabled.
     defaultErrorRules: catalog
       .filter((rule) => rule.enabled && rule.severity === 'error')
       .map((rule) => rule.id)
@@ -755,18 +1094,62 @@ function main() {
       `contracts=${contracts.length}`
   );
 
-  for (const { file, spec } of contracts) {
+  const recordExecutionError = ({
+    spec,
+    channel,
+    queryName,
+    queryDef,
+    expected,
+    error,
+    reportOnly,
+    scoringFailures,
+  }) => {
+    const query = (queryDef.query || '').split('{{index}}').join(spec.index);
+    const message = error instanceof Error ? error.message : String(error);
+    log(`  FAIL ${spec.ruleId}/${queryName}: execution error — ${message}`);
+    scoringFailures.push(
+      `[${spec.ruleId}/${queryName}] frontend.execution failed: ${message}`
+    );
+    report.results.push(
+      buildFrontendExecutionError({
+        ruleId: spec.ruleId,
+        channel,
+        queryName,
+        role: queryDef.role || 'trigger',
+        query,
+        expected,
+        surface,
+        executionBackend,
+        error: message,
+        reportOnly,
+      })
+    );
+  };
+
+  for (const { file, spec, reportOnly = false } of contracts) {
     const ruleId = spec.ruleId;
     const index = spec.index;
     const channel = contractChannel(spec);
-    const entry = checkWiring(spec, catalog, getDetector, failures);
+    const scoringFailures = reportOnly ? reportOnlyFailures : failures;
+    const entry = checkWiring(spec, catalog, getDetector, scoringFailures);
     if (!entry) {
+      for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
+        recordExecutionError({
+          spec,
+          channel,
+          queryName,
+          queryDef,
+          error: `OSD catalog entry "${ruleId}" is unavailable`,
+          reportOnly,
+          scoringFailures,
+        });
+      }
       continue;
     }
 
     // A contract runs on PR only when scheduled for PR; nightly runs everything.
     const contractSchedule = spec.schedule || 'pr';
-    if (schedule === 'pr' && contractSchedule !== 'pr') {
+    if (!reportOnly && schedule === 'pr' && contractSchedule !== 'pr') {
       log(`SKIP ${ruleId} (schedule=${contractSchedule}, running ${schedule}) — ${path.basename(file)}`);
       continue;
     }
@@ -796,6 +1179,7 @@ function main() {
           query: (queryDef.query || '').split('{{index}}').join(index),
           surface,
           executionBackend,
+          ...(reportOnly ? { reportOnly: true } : {}),
           outcome: 'not-applicable',
           notApplicable: `contract declares grammarSurface "${contractSurface}"`,
         });
@@ -804,11 +1188,22 @@ function main() {
     }
 
     const context = buildContext(spec, engineVersion);
-    const expectation = selectExpectation(spec, engineVersion, context.isCalcite, failures, {
+    const expectation = selectExpectation(spec, engineVersion, context.isCalcite, scoringFailures, {
       allowMissing: observeOnly,
     });
     if (!expectation) {
       if (!observeOnly) {
+        for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
+          recordExecutionError({
+            spec,
+            channel,
+            queryName,
+            queryDef,
+            error: `no unique expectation matches backend version ${engineVersion || 'unknown'}`,
+            reportOnly,
+            scoringFailures,
+          });
+        }
         continue;
       }
       for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
@@ -823,41 +1218,54 @@ function main() {
             query,
             surface,
             executionBackend,
+            ...(reportOnly ? { reportOnly: true } : {}),
             outcome: 'not-applicable',
             notApplicable: 'runtimeOnly rule does not run on the compiled-simplified surface',
           });
           continue;
         }
-        if (channel === 'syntax' && typeof validateSyntax !== 'function') {
-          fatal(
-            `Syntax contract "${ruleId}" requires validateQueryWithBundle from ${SYNTAX_MODULE}. ` +
-              `Validate this SQL branch against the OSD headless-syntax PR.`
-          );
+        try {
+          if (channel === 'syntax' && typeof validateSyntax !== 'function') {
+            throw new Error(
+              `syntax validation requires validateQueryWithBundle from ${SYNTAX_MODULE}`
+            );
+          }
+          const result =
+            channel === 'syntax'
+              ? validateSyntax(query, grammar)
+              : lintQuery(query, grammar, context);
+          const matches =
+            channel === 'syntax'
+              ? result.errors || []
+              : (result.diagnostics || []).filter((d) => d.ruleId === ruleId);
+          report.results.push({
+            ruleId,
+            channel,
+            queryName,
+            role,
+            query,
+            surface,
+            executionBackend,
+            ...(reportOnly ? { reportOnly: true } : {}),
+            expected: 0,
+            actual: matches.length,
+            severities: matches.map((m) => m.severity),
+            severityMatched: true,
+            messageMatched: true,
+            backendOracleStatus: 'coverage-missing',
+            expectationStatus: 'coverage-missing',
+          });
+        } catch (error) {
+          recordExecutionError({
+            spec,
+            channel,
+            queryName,
+            queryDef,
+            error,
+            reportOnly,
+            scoringFailures,
+          });
         }
-        const result =
-          channel === 'syntax'
-            ? validateSyntax(query, grammar)
-            : lintQuery(query, grammar, context);
-        const matches =
-          channel === 'syntax'
-            ? result.errors || []
-            : (result.diagnostics || []).filter((d) => d.ruleId === ruleId);
-        report.results.push({
-          ruleId,
-          channel,
-          queryName,
-          role,
-          query,
-          surface,
-          executionBackend,
-          expected: 0,
-          actual: matches.length,
-          severities: matches.map((m) => m.severity),
-          severityMatched: true,
-          messageMatched: true,
-          backendOracleStatus: 'coverage-missing',
-          expectationStatus: 'coverage-missing',
-        });
       }
       continue;
     }
@@ -867,7 +1275,18 @@ function main() {
     try {
       assertExactQueryCoverage(spec, expectation);
     } catch (error) {
-      fatal(`Invalid contract ${file}: ${error.message}`);
+      for (const [queryName, queryDef] of Object.entries(queries)) {
+        recordExecutionError({
+          spec,
+          channel,
+          queryName,
+          queryDef,
+          error: `invalid contract ${file}: ${error.message}`,
+          reportOnly,
+          scoringFailures,
+        });
+      }
+      continue;
     }
     for (const queryName of Object.keys(queries)) {
       const queryDef = queries[queryName];
@@ -878,12 +1297,19 @@ function main() {
       try {
         oracleSelection = resolveBackendOracle(spec, expected, executionBackend);
       } catch (error) {
-        fatal(`Invalid contract ${file} query "${queryName}": ${error.message}`);
+        recordExecutionError({
+          spec,
+          channel,
+          queryName,
+          queryDef,
+          error: `invalid contract ${file} query "${queryName}": ${error.message}`,
+          reportOnly,
+          scoringFailures,
+        });
+        continue;
       }
       const frontendOracle = oracleSelection.frontend;
       const expectedCount = frontendOracle.count;
-      const expectedSeverity = frontendOracle.severity;
-      const expectedMessage = frontendOracle.matchMessage;
 
       // A `runtimeOnly` rule walks grammar productions that exist only in the
       // runtime bundle, so `lint_runner` skips it on the compiled surface. Its
@@ -904,222 +1330,198 @@ function main() {
           query,
           surface,
           executionBackend,
+          ...(reportOnly ? { reportOnly: true } : {}),
           outcome: 'not-applicable',
           notApplicable: 'runtimeOnly rule does not run on the compiled-simplified surface',
         });
         continue;
       }
 
-      if (channel === 'syntax' && typeof validateSyntax !== 'function') {
-        fatal(
-          `Syntax contract "${ruleId}" requires validateQueryWithBundle from ${SYNTAX_MODULE}. ` +
-            `Validate this SQL branch against the OSD headless-syntax PR.`
-        );
-      }
-      const result =
-        channel === 'syntax'
-          ? validateSyntax(query, grammar)
-          : lintQuery(query, grammar, context);
-      const allFrontendFindings =
-        channel === 'syntax' ? result.errors || [] : result.diagnostics || [];
-      const matches =
-        channel === 'syntax'
-          ? allFrontendFindings.filter((finding) => finding.code === frontendOracle.code)
-          : allFrontendFindings.filter((finding) => finding.ruleId === ruleId);
-      const actual = matches.length;
-      const ok = actual === expectedCount;
-
-      log(
-        `  ${ok ? 'PASS' : 'FAIL'} ${ruleId}/${queryName} (${role}): ` +
-          `expected ${expectedCount}, got ${actual} — ${query}`
-      );
-
-      const severityOk =
-        channel === 'syntax' ||
-        !expectedSeverity ||
-        actual === 0 ||
-        matches.every((m) => m.severity === expectedSeverity);
-      const messageOk =
-        !expectedMessage ||
-        matches.some((m) => (m.message || '').includes(expectedMessage));
-      const fixOk =
-        channel !== 'syntax' ||
-        frontendOracle.fixText === undefined ||
-        matches.some((m) => m.fix && m.fix.text === frontendOracle.fixText);
-      const rawMessageOk =
-        channel !== 'syntax' ||
-        frontendOracle.rawMessage === undefined ||
-        matches.some((m) =>
-          frontendOracle.rawMessage
-            ? typeof m.rawMessage === 'string' && m.rawMessage.length > 0
-            : m.rawMessage === undefined
-        );
-      const totalErrorsOk =
-        channel !== 'syntax' ||
-        frontendOracle.totalErrors === undefined ||
-        allFrontendFindings.length === frontendOracle.totalErrors;
-
-      const resultEntry = {
-        ruleId,
-        channel,
-        queryName,
-        role,
-        query,
-        expected: expectedCount,
-        actual,
-        severities: matches.map((m) => m.severity).filter(Boolean),
-        severityMatched: severityOk,
-        messageMatched: messageOk,
-        fixMatched: fixOk,
-        rawMessageMatched: rawMessageOk,
-        totalErrorsMatched: totalErrorsOk,
-        ...(channel === 'syntax'
-          ? {
-              code: frontendOracle.code,
-              codes: allFrontendFindings.map((finding) => finding.code).filter(Boolean),
-              totalErrors: allFrontendFindings.length,
-            }
-          : {}),
-        executionBackend,
-        backendOracleStatus: oracleSelection.status,
-      };
-
-      if (!ok) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected ${expectedCount} "${ruleId}" diagnostic(s), got ${actual} for: ${query}`
-        );
-      }
-      if (!severityOk) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected severity "${expectedSeverity}" for: ${query}`
-        );
-      }
-      if (!messageOk) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected message to contain "${expectedMessage}" for: ${query}`
-        );
-      }
-      if (!fixOk) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected fix text "${frontendOracle.fixText}" for: ${query}`
-        );
-      }
-      if (!rawMessageOk) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected rawMessage=${frontendOracle.rawMessage} for: ${query}`
-        );
-      }
-      if (!totalErrorsOk) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected ${frontendOracle.totalErrors} total syntax error(s), ` +
-            `got ${allFrontendFindings.length} for: ${query}`
-        );
-      }
-
-      if (oracleSelection.status === 'not-applicable') {
-        // Only the backend fixture is non-applicable. The detector still ran above and its
-        // count/severity/message assertions remain ordinary, comparable frontend evidence.
-        resultEntry.backendOracleReason = oracleSelection.reason;
-      } else if (oracleSelection.status === 'coverage-missing') {
-        resultEntry.outcome = 'coverage-missing';
-        resultEntry.coverage = 'missing';
-        resultEntry.reason = oracleSelection.reason;
-        resultEntry.coverageMissing = oracleSelection.reason;
-        if (!observeAnalytics) {
-          failures.push(
-            `[${ruleId}/${queryName}] ${executionBackend} backend coverage missing: ${oracleSelection.reason}.`
+      try {
+        let result;
+        if (channel === 'syntax' && typeof validateSyntax !== 'function') {
+          throw new Error(
+            `syntax validation requires validateQueryWithBundle from ${SYNTAX_MODULE}`
           );
         }
-      }
+        result =
+          channel === 'syntax'
+            ? validateSyntax(query, grammar)
+            : lintQuery(query, grammar, context);
+        const allFrontendFindings =
+          channel === 'syntax' ? result.errors || [] : result.diagnostics || [];
+        const matches =
+          channel === 'syntax'
+            ? allFrontendFindings.filter((finding) => finding.code === frontendOracle.code)
+            : allFrontendFindings.filter((finding) => finding.ruleId === ruleId);
+        const actual = matches.length;
+        const ok = actual === expectedCount;
 
-      // Differential: the observed backend behavior must agree with the observed
-      // detector output through the shared contract (design §3.2, §4.3). A
-      // rejection-kind query the backend rejected must be one the detector flags;
-      // a success/advisory query the backend accepted must be one the detector
-      // passes. This catches drift the two halves would otherwise hide by both
-      // pinning to the same JSON.
-      if (backendReport) {
-        const be = backendReport.get(`${ruleId}::${queryName}`);
-        if (!be) {
-          failures.push(`[${ruleId}/${queryName}] no backend report entry (backend did not run this query).`);
-        } else {
-          const backendObservation = classifyBackendReportRow(be);
-          if (oracleSelection.status !== 'applicable') {
-            // A missing or non-applicable oracle is never an acceptance claim. Keep
-            // any backend observation visible, but do not coerce a missing verdict
-            // through `!!be.rejected` or score a differential against another route.
-            resultEntry.backendOutcome = backendObservation.status;
-          } else if (backendObservation.status !== 'observed') {
-            resultEntry.backendOutcome = backendObservation.status;
-            failures.push(
-              `[${ruleId}/${queryName}] backend report has no accepted/rejected verdict ` +
-                `(outcome=${JSON.stringify(backendObservation.status)}).`
+        log(
+          `  ${ok ? 'PASS' : 'FAIL'} ${ruleId}/${queryName} (${role}): ` +
+            `expected ${expectedCount}, got ${actual} — ${query}`
+        );
+
+        const evaluated = evaluateFrontendAssertions({
+          channel,
+          query,
+          matches,
+          allFrontendFindings,
+          frontendOracle,
+        });
+        const assertions = { count: ok, ...evaluated.assertions };
+        const mismatches = [
+          ...(ok
+            ? []
+            : [
+                {
+                  field: 'count',
+                  expected: expectedCount,
+                  actual,
+                },
+              ]),
+          ...evaluated.mismatches,
+        ];
+
+        const resultEntry = {
+          ruleId,
+          channel,
+          queryName,
+          role,
+          query,
+          expected: expectedCount,
+          actual,
+          severities: matches.map((m) => m.severity).filter(Boolean),
+          severityMatched: evaluated.severityMatched,
+          messageMatched: evaluated.messageMatched,
+          deterministicFixMatched: evaluated.deterministicFixMatched,
+          fixMatched: evaluated.syntaxFixMatched,
+          rawMessageMatched: evaluated.rawMessageMatched,
+          totalErrorsMatched: evaluated.totalErrorsMatched,
+          assertions,
+          mismatches,
+          ...(evaluated.deterministicFixActual !== undefined
+            ? { deterministicFix: evaluated.deterministicFixActual }
+            : {}),
+          ...(channel === 'syntax'
+            ? {
+                code: frontendOracle.code,
+                codes: allFrontendFindings.map((finding) => finding.code).filter(Boolean),
+                totalErrors: allFrontendFindings.length,
+              }
+            : {}),
+          ...(reportOnly ? { reportOnly: true } : {}),
+          executionBackend,
+          backendOracleStatus: oracleSelection.status,
+        };
+
+        for (const mismatch of mismatches) {
+          scoringFailures.push(
+            `[${ruleId}/${queryName}] frontend.${mismatch.field} mismatch: ` +
+              `expected ${JSON.stringify(mismatch.expected)}, got ` +
+              `${JSON.stringify(mismatch.actual)} for: ${query}`
+          );
+        }
+
+        if (oracleSelection.status === 'not-applicable') {
+          // Only the backend fixture is non-applicable. The detector still ran above and its
+          // count/severity/message assertions remain ordinary, comparable frontend evidence.
+          resultEntry.backendOracleReason = oracleSelection.reason;
+        } else if (oracleSelection.status === 'coverage-missing') {
+          resultEntry.outcome = 'coverage-missing';
+          resultEntry.coverage = 'missing';
+          resultEntry.reason = oracleSelection.reason;
+          resultEntry.coverageMissing = oracleSelection.reason;
+          if (!observeAnalytics) {
+            scoringFailures.push(
+              `[${ruleId}/${queryName}] ${executionBackend} backend coverage missing: ${oracleSelection.reason}.`
+            );
+          }
+        }
+
+        // Differential: the observed backend behavior must agree with the observed
+        // detector output through the shared contract (design §3.2, §4.3). A
+        // rejection-kind query the backend rejected must be one the detector flags;
+        // a success/advisory query the backend accepted must be one the detector
+        // passes. This catches drift the two halves would otherwise hide by both
+        // pinning to the same JSON.
+        if (backendReport) {
+          const be = backendReport.get(`${ruleId}::${queryName}`);
+          if (!be) {
+            scoringFailures.push(
+              `[${ruleId}/${queryName}] no backend report entry (backend did not run this query).`
             );
           } else {
-            const backendKind = oracleSelection.oracle.kind;
-            const expectRejected = backendKind === 'rejection';
-            const backendRejected = backendObservation.rejected;
-            resultEntry.backendRejected = backendRejected;
-            if (backendRejected !== expectRejected) {
-              failures.push(
-                `[${ruleId}/${queryName}] differential: backend ${backendRejected ? 'rejected' : 'accepted'} ` +
-                  `but the contract's backend.kind="${backendKind}" expects ${expectRejected ? 'rejection' : 'acceptance'} for: ${query}`
+            const backendObservation = classifyBackendReportRow(be);
+            if (oracleSelection.status !== 'applicable') {
+              // A missing or non-applicable oracle is never an acceptance claim. Keep
+              // any backend observation visible, but do not coerce a missing verdict
+              // through `!!be.rejected` or score a differential against another route.
+              resultEntry.backendOutcome = backendObservation.status;
+            } else if (backendObservation.status !== 'observed') {
+              resultEntry.backendOutcome = backendObservation.status;
+              scoringFailures.push(
+                `[${ruleId}/${queryName}] backend report has no accepted/rejected verdict ` +
+                  `(outcome=${JSON.stringify(backendObservation.status)}).`
               );
-            }
-            // Trigger cross-check: a trigger the detector flags must be one the engine
-            // ALSO objects to — but only where the contract claims the engine objects
-            // at all.
-            //
-            // For a `rejection` rule the two coincide: detector flags <-> engine
-            // rejects, and a disagreement means one side drifted. That is the original
-            // check and it is unchanged.
-            //
-            // An ADVISORY rule is different by design. It flags a query the engine
-            // runs happily: `head-without-sort` marks non-determinism,
-            // `division-by-zero` marks a silent null, `dedup-consecutive` succeeds via
-            // the Calcite-to-v2 fallback. "Detector flagged, backend accepted" is that
-            // rule working, not drift — so pairing the detector against `be.rejected`
-            // failed every advisory trigger unconditionally. That, not runtime cost,
-            // is the structural reason those contracts could only run nightly.
-            //
-            // The contracts already carry the distinction in `backend.kind`, so this
-            // reads data that exists rather than adding a flag. Advisory triggers keep
-            // full coverage from the other two assertions: the backend-kind check above
-            // fires if the engine starts REJECTING a query pinned as accepted, and the
-            // `detectorCount` assertion fires if the detector stops flagging it. Only
-            // the pairing rule is scoped to the rules it makes sense for.
-            const detectorFlagged = actual > 0;
-            if (role === 'trigger' && expectRejected && detectorFlagged !== backendRejected) {
-              failures.push(
-                `[${ruleId}/${queryName}] differential: trigger detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
-                  `but backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
-              );
-            }
-            // A control must pass on both sides regardless of kind: it is a valid
-            // query the rule has to stay quiet on. Unlike a trigger, that claim does
-            // not vary with `backend.kind`.
-            if (role === 'control' && (detectorFlagged || backendRejected)) {
-              failures.push(
-                `[${ruleId}/${queryName}] differential: control must pass on both sides but detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
-                  `and backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
-              );
-            }
-            if (
-              role === 'suppression-control' &&
-              (detectorFlagged || !backendRejected)
-            ) {
-              failures.push(
-                `[${ruleId}/${queryName}] differential: suppression control must retain a backend ` +
-                  `syntax rejection without a "${frontendOracle.code}" suggestion, but frontend ` +
-                  `${detectorFlagged ? 'suggested a rewrite' : 'did not suggest a rewrite'} and ` +
-                  `backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
-              );
+            } else {
+              const backendKind = oracleSelection.oracle.kind;
+              const expectRejected = backendKind === 'rejection';
+              const backendRejected = backendObservation.rejected;
+              resultEntry.backendRejected = backendRejected;
+              if (backendRejected !== expectRejected) {
+                scoringFailures.push(
+                  `[${ruleId}/${queryName}] differential: backend ${backendRejected ? 'rejected' : 'accepted'} ` +
+                    `but the contract's backend.kind="${backendKind}" expects ${expectRejected ? 'rejection' : 'acceptance'} for: ${query}`
+                );
+              }
+              // Pair detector and backend rejection only for rejection rules.
+              // Advisory rules intentionally flag queries the backend accepts.
+              const detectorFlagged = actual > 0;
+              if (
+                role === 'trigger' &&
+                expectRejected &&
+                detectorFlagged !== backendRejected
+              ) {
+                scoringFailures.push(
+                  `[${ruleId}/${queryName}] differential: trigger detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
+                    `but backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
+                );
+              }
+              if (role === 'control' && (detectorFlagged || backendRejected)) {
+                scoringFailures.push(
+                  `[${ruleId}/${queryName}] differential: control must pass on both sides but detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
+                    `and backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
+                );
+              }
+              if (
+                role === 'suppression-control' &&
+                (detectorFlagged || !backendRejected)
+              ) {
+                scoringFailures.push(
+                  `[${ruleId}/${queryName}] differential: suppression control must retain a backend ` +
+                    `syntax rejection without a "${frontendOracle.code}" suggestion, but frontend ` +
+                    `${detectorFlagged ? 'suggested a rewrite' : 'did not suggest a rewrite'} and ` +
+                    `backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
+                );
+              }
             }
           }
         }
-      }
 
-      report.results.push(resultEntry);
+        report.results.push(resultEntry);
+      } catch (error) {
+        recordExecutionError({
+          spec,
+          channel,
+          queryName,
+          queryDef,
+          expected: expectedCount,
+          error,
+          reportOnly,
+          scoringFailures,
+        });
+      }
     }
   }
 
@@ -1141,7 +1543,15 @@ function main() {
     process.exit(1);
   }
 
+  if (reportOnlyFailures.length > 0) {
+    log(
+      `REPORT-ONLY: ${reportOnlyFailures.length} dormant contract problem(s):\n- ` +
+        reportOnlyFailures.join('\n- ')
+    );
+  }
   log(`PASS: all contracts agreed with the OSD detectors on the candidate bundle (schedule=${schedule}).`);
 }
 
-main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}

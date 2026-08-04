@@ -55,8 +55,14 @@
       "engine": "calcite",
       "queries": {
         "union-single-dataset": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "The union command requires at least two datasets.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -83,8 +89,14 @@
           }
         },
         "union-single-dataset-with-fields": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "The union command requires at least two datasets.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -111,7 +123,12 @@
           }
         },
         "union-two-datasets-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",

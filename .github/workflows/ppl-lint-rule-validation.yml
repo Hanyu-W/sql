@@ -37,8 +37,8 @@ concurrency:
 #
 # Modes (design §3.4, §4.1.1):
 #  - pull_request: SQL PR validation against the resolved OSD target. The ONLY
-#    enforcing mode; this is what branch protection pins to. Runs the fast
-#    schedule:pr subset. The committed default is `main` on the canonical repo;
+#    enforcing mode; this is what branch protection pins to. Runs all 12 active
+#    detector contracts. The committed default is `main` on the canonical repo;
 #    it can be overridden by the OSD_REPO/OSD_REF repo variables — see the
 #    "Resolve OSD ref" step. TEMPORARY: those repo variables are currently set to
 #    the unmerged paired OSD branch that ships the headless lint API this job
@@ -295,6 +295,7 @@ jobs:
           PPL_LINT_TARGET_MANIFEST: ${{ github.workspace }}/artifacts/target.json
           PPL_LINT_BACKEND_REPORT: ${{ github.workspace }}/artifacts/backend-report.json
           PPL_LINT_REPORT: ${{ github.workspace }}/detector-report.json
+          PPL_LINT_INCLUDE_DORMANT: ${{ steps.schedule.outputs.value == 'nightly' && '1' || '0' }}
         run: |
           # pipefail so the runner's non-zero exit propagates through `tee` —
           # otherwise the pipeline takes tee's (success) status and a real

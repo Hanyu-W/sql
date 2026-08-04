@@ -62,8 +62,14 @@
       "note": "This rule has an empty appliesTo, so it ships to users on EVERY engine, including pre-3.4. Detector behavior is live-verified identical from 2.19 up (1/1/0 on the compiled surface at 2.19.0, 3.0.0, 3.5.0, 3.7.0). The backend oracle deliberately omits error.type/reason: this engine's wording for an unknown field has not been observed live, and inventing one would either fail spuriously or get 'fixed' by pinning whatever CI first happened to see. A compiled-surface leg records the real wording; pin it then.",
       "queries": {
         "unknown-field-existence": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "Unknown field \"nonexistent_field\".",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -82,8 +88,23 @@
           }
         },
         "grok-field-slot-shape-typo": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "grok expects a field name here, not an expression.",
+            "deterministicFix": {
+              "offered": true,
+              "title": "Remove \"field=\" (use \"firstname\")",
+              "text": "firstname",
+              "range": {
+                "startLine": 1,
+                "startColumn": 48,
+                "endLine": 1,
+                "endColumn": 63
+              },
+              "appliedQuery": "source=opensearch-sql_test_index_account | grok firstname \"%{WORD:w}\""
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -102,7 +123,12 @@
           }
         },
         "known-field-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",
@@ -126,8 +152,14 @@
       "version": ">=3.4.0 <3.7.0",
       "queries": {
         "unknown-field-existence": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "Unknown field \"nonexistent_field\".",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -154,8 +186,23 @@
           }
         },
         "grok-field-slot-shape-typo": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "grok expects a field name here, not an expression.",
+            "deterministicFix": {
+              "offered": true,
+              "title": "Remove \"field=\" (use \"firstname\")",
+              "text": "firstname",
+              "range": {
+                "startLine": 1,
+                "startColumn": 48,
+                "endLine": 1,
+                "endColumn": 63
+              },
+              "appliedQuery": "source=opensearch-sql_test_index_account | grok firstname \"%{WORD:w}\""
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -182,7 +229,12 @@
           }
         },
         "known-field-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",
@@ -206,9 +258,14 @@
       "version": ">=3.7.0",
       "queries": {
         "unknown-field-existence": {
-          "detectorCount": 1,
-          "severity": "error",
-          "matchMessage": "nonexistent_field",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "Unknown field \"nonexistent_field\".",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -235,8 +292,23 @@
           }
         },
         "grok-field-slot-shape-typo": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "grok expects a field name here, not an expression.",
+            "deterministicFix": {
+              "offered": true,
+              "title": "Remove \"field=\" (use \"firstname\")",
+              "text": "firstname",
+              "range": {
+                "startLine": 1,
+                "startColumn": 48,
+                "endLine": 1,
+                "endColumn": 63
+              },
+              "appliedQuery": "source=opensearch-sql_test_index_account | grok firstname \"%{WORD:w}\""
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -263,7 +335,12 @@
           }
         },
         "known-field-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",

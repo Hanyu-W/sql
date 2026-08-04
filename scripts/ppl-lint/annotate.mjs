@@ -215,6 +215,25 @@ export function buildAnnotations(report, { contractsDir, workspace, readFile = r
     });
   }
 
+  const shippingCensus = report.shippingCensus;
+  if (shippingCensus && shippingCensus.passed === false) {
+    const manifestText = contractText('manifest.json');
+    for (const problem of shippingCensus.problems || []) {
+      const blocking = shippingCensus.blocking !== false;
+      annotations.push({
+        level: blocking ? 'error' : 'warning',
+        file: contractRepoPath(contractsDir, 'manifest.json', workspace),
+        line: findJsonKeyLine(manifestText, manifestKeyFor(problem)),
+        title: 'PPL lint shipping census mismatch',
+        message:
+          `${problem}\n` +
+          (blocking
+            ? 'FIX: align the active SQL manifest with the approved OSD shipping catalog.'
+            : 'REPORT ONLY: align the active SQL manifest with the approved OSD shipping catalog before enabling census enforcement.'),
+      });
+    }
+  }
+
   return annotations;
 }
 

@@ -173,6 +173,42 @@ test('detector severity and message mismatches fail the manifest and summary', (
   }
 });
 
+test('a detector execution error fails with its rule row instead of missing-artifact noise', () => {
+  const dir = makeRun();
+  validArtifacts(dir);
+  const file = path.join(dir, 'artifacts', 'detector-report.json');
+  const detector = JSON.parse(fs.readFileSync(file, 'utf8'));
+  detector.results[0] = {
+    ...detector.results[0],
+    expected: 0,
+    actual: 0,
+    assertions: { execution: false },
+    mismatches: [
+      {
+        field: 'execution',
+        expected: 'completed',
+        actual: 'detector crashed',
+      },
+    ],
+    outcome: 'error',
+    error: 'detector crashed',
+  };
+  detector.failures = [
+    '[advisory-rule/trigger] frontend.execution failed: detector crashed',
+  ];
+  fs.writeFileSync(file, JSON.stringify(detector));
+  const summary = path.join(dir, 'summary.md');
+
+  const result = run(dir, { GITHUB_STEP_SUMMARY: summary });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /advisory-rule::trigger execution failed: detector crashed/);
+  assert.doesNotMatch(result.stderr, /count mismatch/);
+  assert.doesNotMatch(result.stderr, /did not match its execution assertion/);
+  assert.doesNotMatch(result.stderr, /required artifact is missing/);
+  assert.doesNotMatch(result.stderr, /has no matching detector row/);
+  assert.match(fs.readFileSync(summary, 'utf8'), /advisory-rule.*Error.*Fail/);
+});
+
 test('syntax-specific frontend mismatches fail artifact validation', () => {
   for (const field of ['fixMatched', 'rawMessageMatched', 'totalErrorsMatched']) {
     const dir = makeRun();
@@ -184,6 +220,77 @@ test('syntax-specific frontend mismatches fail artifact validation', () => {
 
     const result = run(dir);
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /did not match its (fix|raw-message|total-error) assertion/);
+    assert.match(
+      result.stderr,
+      /did not match its (syntax-fix|raw-parser-error|total-error) assertion/
+    );
   }
+});
+
+test('exact deterministic fix mismatches fail artifacts and summary rows', () => {
+  for (const field of ['deterministicFixMatched']) {
+    const dir = makeRun();
+    validArtifacts(dir);
+    const file = path.join(dir, 'artifacts', 'detector-report.json');
+    const detector = JSON.parse(fs.readFileSync(file, 'utf8'));
+    detector.results[0][field] = false;
+    detector.results[0].assertions = {
+      deterministicFix: false,
+    };
+    detector.results[0].mismatches = [
+      {
+        field: 'deterministicFix',
+        expected: { offered: false },
+        actual: { offered: true },
+      },
+    ];
+    fs.writeFileSync(file, JSON.stringify(detector));
+    const summary = path.join(dir, 'summary.md');
+
+    const result = run(dir, { GITHUB_STEP_SUMMARY: summary });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /did not match its deterministic-fix assertion/);
+    assert.match(fs.readFileSync(summary, 'utf8'), /advisory-rule.*accepted.*Fail/);
+  }
+});
+
+test('report-only dormant rows do not affect the required manifest result or active set', () => {
+  const dir = makeRun();
+  validArtifacts(dir);
+  const file = path.join(dir, 'artifacts', 'detector-report.json');
+  const detector = JSON.parse(fs.readFileSync(file, 'utf8'));
+  detector.results.push({
+    ruleId: 'dormant-rule',
+    queryName: 'trigger',
+    role: 'trigger',
+    expected: 1,
+    actual: 0,
+    severities: [],
+    severityMatched: false,
+    messageMatched: false,
+    assertions: { count: false },
+    mismatches: [{ field: 'count', expected: 1, actual: 0 }],
+    executionBackend: 'standard',
+    reportOnly: true,
+  });
+  fs.writeFileSync(file, JSON.stringify(detector));
+  const backendFile = path.join(dir, 'artifacts', 'backend-report.json');
+  const backend = JSON.parse(fs.readFileSync(backendFile, 'utf8'));
+  backend.push({
+    ruleId: 'dormant-rule',
+    queryName: 'trigger',
+    role: 'trigger',
+    executionBackend: 'standard',
+    outcome: 'error',
+    error: 'report-only observation failed',
+  });
+  fs.writeFileSync(backendFile, JSON.stringify(backend));
+
+  const summary = path.join(dir, 'summary.md');
+  const result = run(dir, { GITHUB_STEP_SUMMARY: summary });
+  assert.equal(result.status, 0, result.stderr);
+  const manifest = JSON.parse(fs.readFileSync(path.join(dir, 'run-manifest.json'), 'utf8'));
+  assert.deepEqual(manifest.validationSet, ['advisory-rule']);
+  assert.equal(manifest.result.passed, true);
+  assert.match(fs.readFileSync(summary, 'utf8'), /dormant-rule.*Report only/);
 });

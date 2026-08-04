@@ -180,6 +180,38 @@ test('an unvalidated rule has no file to point at', () => {
   assert.match(annotations[0].message, /manifest\.defaultError/);
 });
 
+test('shipping census errors point to manifest.json', () => {
+  const annotations = buildAnnotations(
+    {
+      shippingCensus: {
+        passed: false,
+        blocking: true,
+        problems: ['active lint rules do not equal enabled OSD rules'],
+      },
+    },
+    {
+      contractsDir: '/workspace/contracts',
+      workspace: '/workspace',
+      readFile: (_dir, file) =>
+        file === 'manifest.json'
+          ? '{\n  "schemaVersion": 4,\n  "contracts": []\n}\n'
+          : undefined,
+    }
+  );
+
+  assert.deepEqual(annotations, [
+    {
+      level: 'error',
+      file: 'contracts/manifest.json',
+      line: 3,
+      title: 'PPL lint shipping census mismatch',
+      message:
+        'active lint rules do not equal enabled OSD rules\n' +
+        'FIX: align the active SQL manifest with the approved OSD shipping catalog.',
+    },
+  ]);
+});
+
 test('paths are repo-relative so GitHub can render them inline', () => {
   // An absolute path still annotates the run, but never attaches to the diff.
   assert.equal(

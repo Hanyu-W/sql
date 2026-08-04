@@ -55,8 +55,14 @@
       "engine": "calcite",
       "queries": {
         "rex-capture-name-underscore": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "Capture group name \"user_name\" is invalid. Start with a letter and use only letters and numbers.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -83,8 +89,14 @@
           }
         },
         "rex-capture-name-hyphen": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "Capture group name \"user-name\" is invalid. Start with a letter and use only letters and numbers.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -111,7 +123,12 @@
           }
         },
         "rex-capture-name-alphanumeric-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",
@@ -136,8 +153,14 @@
       "engine": "calcite",
       "queries": {
         "rex-capture-name-underscore": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "Capture group name \"user_name\" is invalid. Start with a letter and use only letters and numbers.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -164,8 +187,14 @@
           }
         },
         "rex-capture-name-hyphen": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "Capture group name \"user-name\" is invalid. Start with a letter and use only letters and numbers.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -192,7 +221,12 @@
           }
         },
         "rex-capture-name-alphanumeric-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",

@@ -266,6 +266,35 @@ function normalizeDetectorReport(detector, target) {
       if (typeof entry.messageMatched !== 'boolean') {
         throw new TypeError(`detector report row ${key}.messageMatched must be a boolean`);
       }
+      for (const field of [
+        'deterministicFixMatched',
+        'fixMatched',
+        'rawMessageMatched',
+        'totalErrorsMatched',
+      ]) {
+        if (entry[field] !== undefined && typeof entry[field] !== 'boolean') {
+          throw new TypeError(`detector report row ${key}.${field} must be a boolean`);
+        }
+      }
+      if (entry.assertions !== undefined) {
+        if (
+          !entry.assertions ||
+          typeof entry.assertions !== 'object' ||
+          Array.isArray(entry.assertions)
+        ) {
+          throw new TypeError(`detector report row ${key}.assertions must be a JSON object`);
+        }
+        for (const [field, matched] of Object.entries(entry.assertions)) {
+          if (typeof matched !== 'boolean') {
+            throw new TypeError(
+              `detector report row ${key}.assertions.${field} must be a boolean`
+            );
+          }
+        }
+      }
+      if (entry.mismatches !== undefined && !Array.isArray(entry.mismatches)) {
+        throw new TypeError(`detector report row ${key}.mismatches must be a JSON array`);
+      }
     }
     results.set(key, entry);
   }
@@ -578,6 +607,13 @@ function detectorParityValue(entry) {
       typeof entry.rawMessageMatched === 'boolean' ? entry.rawMessageMatched : undefined,
     totalErrorsMatched:
       typeof entry.totalErrorsMatched === 'boolean' ? entry.totalErrorsMatched : undefined,
+    deterministicFixMatched:
+      typeof entry.deterministicFixMatched === 'boolean'
+        ? entry.deterministicFixMatched
+        : undefined,
+    assertions: entry.assertions,
+    mismatches: entry.mismatches,
+    deterministicFix: entry.deterministicFix,
     code: entry.code,
     codes: entry.codes,
     totalErrors: entry.totalErrors,
@@ -596,6 +632,9 @@ function assertDetectorParity(pair) {
   for (const key of keys) {
     const standardRow = standard.get(key);
     const analyticsRow = analytics.get(key);
+    if (standardRow?.reportOnly === true || analyticsRow?.reportOnly === true) {
+      continue;
+    }
     if (!standardRow || !analyticsRow) {
       fatal(
         `detector parity failed for ${key}: standard row=${!!standardRow}, ` +
@@ -781,11 +820,11 @@ function auditShippingCensus(legs, specs, manifest) {
   if (activeLintRules.size !== 12) {
     problems.push(`expected 12 active lint contracts, found ${activeLintRules.size}`);
   }
-  if (requiredSyntaxRules.size !== 1) {
-    problems.push(`expected one required syntax feature, found ${requiredSyntaxRules.size}`);
+  if (requiredSyntaxRules.size !== 0) {
+    problems.push(`expected no required syntax features, found ${requiredSyntaxRules.size}`);
   }
-  if (activeRules.size !== 13) {
-    problems.push(`expected 13 active contracts, found ${activeRules.size}`);
+  if (activeRules.size !== 12) {
+    problems.push(`expected 12 active contracts, found ${activeRules.size}`);
   }
   if (!setsEqual(activeLintRules, enabledRules)) {
     problems.push(
@@ -838,9 +877,10 @@ function auditShippingCensus(legs, specs, manifest) {
 function readBackendObservation(backendEntry, detectorResult) {
   const verdict = backendVerdict(backendEntry);
   const hasVerdict = typeof verdict.backendRejected === 'boolean';
+  const detectorUsable = !!detectorResult && detectorResult.outcome !== 'error';
 
   return {
-    usable: hasVerdict && !!detectorResult,
+    usable: hasVerdict && detectorUsable,
     observed: {
       detectorCount: detectorResult ? detectorResult.actual : 0,
       severities: detectorResult ? detectorResult.severities || [] : [],
@@ -852,79 +892,71 @@ function readBackendObservation(backendEntry, detectorResult) {
       backendMismatch: verdict.backendMismatch,
       severityMatched: detectorResult ? detectorResult.severityMatched : undefined,
       messageMatched: detectorResult ? detectorResult.messageMatched : undefined,
+      deterministicFixMatched: detectorResult
+        ? detectorResult.deterministicFixMatched
+        : undefined,
+      fixMatched: detectorResult ? detectorResult.fixMatched : undefined,
+      rawMessageMatched: detectorResult ? detectorResult.rawMessageMatched : undefined,
+      totalErrorsMatched: detectorResult
+        ? detectorResult.totalErrorsMatched
+        : undefined,
+      assertions: detectorResult ? detectorResult.assertions : undefined,
+      mismatches: detectorResult ? detectorResult.mismatches : undefined,
     },
   };
 }
 
-/**
- * Check an out-of-scope rule for the one drift that still matters there: the
- * engine rejects a trigger query, but the rule's `appliesTo` excludes this
- * version, so users on it see no diagnostic for a real error. Everything else
- * about an out-of-scope rule is intentional silence.
- *
- * The trigger queries come from the spec's own `queries` map (there is no
- * expectation to read on this path), and the backend observation from this leg's
- * report; `classifyDrift` decides, so the "too narrow" wording stays in one place.
- */
-function classifyOutOfScope({ spec, ruleId, leg, classify, divergentCases }) {
-  const found = [];
-  const unusable = [];
-  const observations = new Map();
+function unusableObservationReason(detectorResult) {
+  if (!detectorResult) {
+    return 'no detector result';
+  }
+  if (detectorResult.outcome === 'error') {
+    const message =
+      typeof detectorResult.error === 'string' && detectorResult.error.length > 0
+        ? detectorResult.error
+        : 'unknown frontend execution error';
+    return `frontend execution failed: ${message}`;
+  }
+  return 'no engine verdict';
+}
 
-  for (const [queryName] of Object.entries(spec.queries || {})) {
-    const rowKey = `${ruleId}::${queryName}`;
-    const backendEntry = leg.backend.get(rowKey);
-    const detectorResult = leg.detector.resultsByKey.get(rowKey);
-    const { observed, usable } = readBackendObservation(backendEntry, detectorResult);
-    if (!usable) {
-      unusable.push(
-        `${queryName} (${!detectorResult ? 'no detector result' : 'no engine verdict'})`
-      );
-      continue;
+function failedExtendedFrontendAssertions(entry, frontendOracle) {
+  if (!entry) {
+    return [];
+  }
+  const failures = new Set();
+  for (const field of [
+    'deterministicFixMatched',
+    'fixMatched',
+    'rawMessageMatched',
+    'totalErrorsMatched',
+  ]) {
+    if (entry[field] === false) {
+      failures.add(field);
     }
-    observations.set(queryName, observed);
   }
-
-  // What did this rule's CONTROL queries — valid uses of the same command — do on
-  // this engine? THREE states, not two, and the difference decides whether a
-  // rejected trigger means anything.
-  const controlVerdicts = Object.entries(spec.queries || {})
-    .filter(([, def]) => (def.role || 'trigger') === 'control')
-    .map(([name]) => observations.get(name)?.backendRejected);
-  const controlAlsoRejected = controlVerdicts.some((v) => v === true);
-  // A rule with controls, none of which produced a verdict, cannot be judged here.
-  const controlUnknown =
-    controlVerdicts.length > 0 && !controlVerdicts.some((v) => typeof v === 'boolean');
-
-  for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
-    if ((queryDef.role || 'trigger') !== 'trigger') continue;
-    const rowKey = `${ruleId}::${queryName}`;
-    const outOfScopeObserved = observations.get(queryName);
-    if (!outOfScopeObserved) continue;
-    const pairedDivergence = divergentCases.has(`${leg.key}::${rowKey}`);
-    if (pairedDivergence && leg.executionBackend === 'analytics') continue;
-    const drift = classify({
-      ruleId,
-      version: leg.version,
-      queryName,
-      role: 'trigger',
-      query: queryDef.query.split('{{index}}').join(spec.index),
-      // Out of scope means the rule is expected to stay silent here.
-      expected: { detectorCount: 0 },
-      observed: outOfScopeObserved,
-      wiring: spec.wiring,
-      detectorPath: spec.detectorPath,
-      executionBackend: leg.executionBackend,
-      // An unknown control verdict is treated the same as a rejected one: both
-      // mean "we cannot claim this engine supports the command", and staying quiet
-      // is the only honest option.
-      controlAlsoRejected: controlAlsoRejected || controlUnknown,
-      // Deliberately no parser-rule check here: a grammar that lacks the rule is
-      // expected on an engine the command predates.
-    });
-    if (drift) found.push(drift);
+  for (const [field, matched] of Object.entries(entry.assertions || {})) {
+    if (
+      matched === false &&
+      field !== 'count' &&
+      field !== 'severity' &&
+      (field !== 'message' || frontendOracle.messageEquals !== undefined)
+    ) {
+      failures.add(field);
+    }
   }
-  return { drifts: found, unusable };
+  for (const mismatch of entry.mismatches || []) {
+    const field = mismatch && mismatch.field;
+    if (
+      typeof field === 'string' &&
+      field !== 'count' &&
+      field !== 'severity' &&
+      (field !== 'message' || frontendOracle.messageEquals !== undefined)
+    ) {
+      failures.add(field);
+    }
+  }
+  return [...failures].sort();
 }
 
 /**
@@ -1036,12 +1068,16 @@ function main() {
   const missingContracts = auditDefaultErrorCensus(legs, specs, enforcedRules);
   const shippingCensus = auditShippingCensus(legs, specs, manifest);
   const blockCensusDrift = !shippingCensus.available || shippingCensus.enforced;
+  shippingCensus.blocking = blockCensusDrift;
+  const blockingShippingCensusProblems = blockCensusDrift
+    ? shippingCensus.problems
+    : [];
   for (const entry of missingContracts) {
     entry.blocking = blockCensusDrift;
   }
   if (!shippingCensus.passed) {
     for (const problem of shippingCensus.problems) {
-      log(`CENSUS REPORT-ONLY: ${problem}`);
+      log(`CENSUS ${blockCensusDrift ? 'ENFORCED' : 'REPORT-ONLY'}: ${problem}`);
     }
   }
 
@@ -1081,6 +1117,22 @@ function main() {
       }
 
       const inScope = versionInAppliesTo(appliesTo, leg.version);
+      if (!inScope) {
+        notApplicable.push({
+          ruleId,
+          ...legFields(leg),
+          surface: legSurface,
+          kind: 'applies-to',
+          reason: `wiring.appliesTo excludes engine ${leg.version}`,
+        });
+        matrix.push({
+          ruleId,
+          ...legFields(leg),
+          status: 'out-of-scope',
+          drifts: 0,
+        });
+        continue;
+      }
 
       // A parser rule that vanished from the grammar is one fact about this
       // rule on this engine, not one per query — raise it once and move on, so
@@ -1104,42 +1156,6 @@ function main() {
 
       const expectation = selectExpectation(spec, leg.version, versionMatchesRange);
       if (!expectation) {
-        if (!inScope) {
-          // Deliberately out of scope on this engine. Still run the classifier
-          // for the one case that matters — an engine that rejects a trigger the
-          // rule has been scoped away from (a missed diagnostic).
-          const outOfScope = classifyOutOfScope({
-            spec,
-            ruleId,
-            leg,
-            classify: classifyDrift,
-            divergentCases,
-          });
-          for (const drift of outOfScope.drifts) {
-            addDrift(drift, leg, { enforced: isEnforced, contractFile: file });
-          }
-          if (outOfScope.unusable.length > 0) {
-            inconclusive.push({
-              ruleId,
-              file,
-              ...legFields(leg),
-              enforced: isEnforced,
-              reasons: outOfScope.unusable,
-            });
-          }
-          matrix.push({
-            ruleId,
-            ...legFields(leg),
-            status:
-              outOfScope.unusable.length > 0
-                ? 'inconclusive'
-                : outOfScope.drifts.length > 0
-                  ? 'drift'
-                  : 'out-of-scope',
-            drifts: outOfScope.drifts.length,
-          });
-          continue;
-        }
         // In scope on this engine but nothing pins its behavior there.
         coverageHoles.push({
           ruleId,
@@ -1223,13 +1239,18 @@ function main() {
             );
           }
         }
+        if (detectorResult && detectorResult.outcome === 'error') {
+          unusable.push(`${queryName} (${unusableObservationReason(detectorResult)})`);
+          if (role === 'trigger') {
+            unobservedTriggers.push(queryName);
+          }
+          continue;
+        }
 
         if (oracleSelection.status === 'coverage-missing') {
           const { usable } = readBackendObservation(backendEntry, detectorResult);
           if (!usable) {
-            unusable.push(
-              `${queryName} (${!detectorResult ? 'no detector result' : 'no engine verdict'})`
-            );
+            unusable.push(`${queryName} (${unusableObservationReason(detectorResult)})`);
             if (role === 'trigger') {
               unobservedTriggers.push(queryName);
             }
@@ -1306,6 +1327,51 @@ function main() {
           ruleNotApplicable++;
           continue;
         }
+        const failedFrontendAssertions = failedExtendedFrontendAssertions(
+          detectorResult,
+          oracleSelection.frontend
+        );
+        if (failedFrontendAssertions.length > 0) {
+          addDrift(
+            {
+              ruleId,
+              version: leg.version,
+              driftVersion: leg.version,
+              queryName,
+              role,
+              query,
+              driftClass: 'frontend-contract-mismatch',
+              evidence:
+                `${ruleId} @ ${leg.version} [${queryName}]: frontend assertion(s) failed: ` +
+                failedFrontendAssertions.join(', '),
+              frontendAssertions: failedFrontendAssertions,
+              frontendMismatches: detectorResult.mismatches || [],
+              remediation: {
+                action: 'update-detector',
+                target:
+                  spec.detectorPath ||
+                  `packages/osd-monaco/src/ppl/lint/rules/${ruleId.replace(/-/g, '_')}.ts`,
+                detail:
+                  `Reproduce this contract query against the reported OSD commit and candidate ` +
+                  `grammar. Restore the exact message/action/fix behavior, or update the contract ` +
+                  `only after confirming an intentional product change.`,
+              },
+            },
+            leg,
+            {
+              enforced: isEnforced,
+              contractFile: file,
+              expectationRange: expectation.version,
+              expectationEngine: expectation.engine,
+            }
+          );
+          ruleDrifts++;
+          compared++;
+          if (role === 'trigger') {
+            triggersCompared++;
+          }
+          continue;
+        }
         const { observed, usable } = readBackendObservation(backendEntry, detectorResult);
         if (!usable) {
           // No comparable pair, so there is nothing to classify. Attempting it
@@ -1313,9 +1379,7 @@ function main() {
           // verdict and no detector row looks exactly like "the detector went
           // silent", and the report would tell the engineer to go fix a detector
           // that is fine. Record it as not compared and move on.
-          unusable.push(
-            `${queryName} (${!detectorResult ? 'no detector result' : 'no engine verdict'})`
-          );
+          unusable.push(`${queryName} (${unusableObservationReason(detectorResult)})`);
           if (role === 'trigger') {
             unobservedTriggers.push(queryName);
           }
@@ -1571,10 +1635,8 @@ function main() {
   }
   const enforcedDrifts = drifts.filter((d) => d.blocking);
   const enforcedHoles = coverageHoles.filter((h) => h.blocking);
-  // `--all-rules` widens observation to the whole corpus. Semantic drift remains
-  // enforced only for default-error rules, but a missing detector row or backend
-  // verdict is an infrastructure failure for every rule we asked the run to
-  // observe.
+  // `--all-rules` makes drift, missing coverage, and inconclusive observations
+  // blocking for every active shipping rule in the manifest.
   const enforcedInconclusive = inconclusive.filter((i) => i.enforced || args.allRules);
   const blockingMissingContracts = missingContracts.filter((entry) => entry.blocking);
   for (const row of matrix) {
@@ -1627,6 +1689,7 @@ function main() {
         coverageHoles.filter((h) => h.enforced && !h.blocking).length,
       missingContractCount: missingContracts.length,
       blockingMissingContractCount: blockingMissingContracts.length,
+      blockingShippingCensusProblems: blockingShippingCensusProblems.length,
       enforcedInconclusive: enforcedInconclusive.length,
       // An inconclusive default-error rule fails too: "we could not check" must
       // never render as "it is fine".
@@ -1634,6 +1697,7 @@ function main() {
         enforcedDrifts.length === 0 &&
         enforcedHoles.length === 0 &&
         blockingMissingContracts.length === 0 &&
+        blockingShippingCensusProblems.length === 0 &&
         enforcedInconclusive.length === 0,
     },
   };
@@ -1652,7 +1716,7 @@ function main() {
     workspace: process.env.GITHUB_WORKSPACE,
   });
 
-  const markdown = renderMarkdown(report, drifts, coverageHoles, legs);
+  const markdown = renderMarkdown(report, drifts, coverageHoles, legs, specs);
   // eslint-disable-next-line no-console
   console.log(markdown);
   if (args.summary) {
@@ -1668,7 +1732,8 @@ function main() {
     console.error(
       `[ppl-lint-multiversion] FAIL: ${enforcedDrifts.length} drift(s), ` +
         `${enforcedHoles.length} coverage hole(s), ${blockingMissingContracts.length} unvalidated ` +
-        `default-error rule(s) and ${enforcedInconclusive.length} inconclusive rule/version pair(s).`
+        `default-error rule(s), ${blockingShippingCensusProblems.length} shipping census problem(s), ` +
+        `and ${enforcedInconclusive.length} inconclusive rule/version pair(s).`
     );
     process.exit(1);
   }
@@ -1680,8 +1745,42 @@ function main() {
   );
 }
 
-/** Rule × version agreement matrix followed by the grouped remediation report. */
-function renderMarkdown(report, drifts, coverageHoles, legs) {
+function expectedCompatibility(spec) {
+  const appliesTo = (spec.wiring && spec.wiring.appliesTo) || {};
+  const scope = [];
+  if (appliesTo.engine) {
+    scope.push(
+      appliesTo.engine === 'calcite'
+        ? 'Calcite'
+        : appliesTo.engine.charAt(0).toUpperCase() + appliesTo.engine.slice(1)
+    );
+  }
+  if (appliesTo.minVersion && appliesTo.maxVersion) {
+    scope.push(`>= ${appliesTo.minVersion}, <= ${appliesTo.maxVersion}`);
+  } else if (appliesTo.minVersion) {
+    scope.push(`>= ${appliesTo.minVersion}`);
+  } else if (appliesTo.maxVersion) {
+    scope.push(`<= ${appliesTo.maxVersion}`);
+  } else {
+    scope.push('all versions');
+  }
+  return scope.join(', ');
+}
+
+function actualCompatibility(row) {
+  if (!row) return 'not evaluated';
+  if (row.status === 'agree') return 'compatible';
+  if (row.status === 'out-of-scope') return 'expected n/a';
+  if (row.status === 'drift') return row.drifts > 1 ? `**drift** (${row.drifts})` : '**drift**';
+  if (row.status === 'uncovered' || row.status === 'inconclusive') {
+    return '**inconclusive**';
+  }
+  if (row.status === 'not-applicable') return 'expected n/a';
+  return `**${row.status}**`;
+}
+
+/** Expected-vs-actual compatibility table followed by the detailed remediation report. */
+function renderMarkdown(report, drifts, coverageHoles, legs, specs) {
   const lines = [];
   lines.push('## PPL lint multi-version validation');
   lines.push('');
@@ -1702,56 +1801,51 @@ function renderMarkdown(report, drifts, coverageHoles, legs) {
   if (report.result.missingContractCount) {
     reasons.push(`${report.result.missingContractCount} unvalidated rule(s)`);
   }
+  if (report.result.blockingShippingCensusProblems) {
+    reasons.push(
+      `${report.result.blockingShippingCensusProblems} shipping census problem(s)`
+    );
+  }
+  const compatibilityLegs = legs.filter(
+    (leg) =>
+      leg.executionBackend === 'standard' &&
+      (leg.surface || 'runtime-bundle') === 'runtime-bundle'
+  );
   lines.push(
-    // Name the surface when a leg is not the default runtime-bundle one, so a
-    // reader knows a column speaks for OSD's compiled grammar rather than the
-    // engine's exported one — the two do not run the same set of rules.
-    `Engine versions: ${legs
-      .map((l) => {
-        const identity =
-          l.label === l.version ? `\`${l.version}\`` : `\`${l.label}\` → \`${l.version}\``;
-        return l.surface && l.surface !== 'runtime-bundle'
-          ? `${identity} (${l.executionBackend}, ${l.surface})`
-          : `${identity} (${l.executionBackend})`;
-      })
-      .join(', ')} — ` + `**${report.result.passed ? 'PASS' : 'FAIL'}** (${reasons.join(', ')})`
+    `Standard runtime-bundle engines: ${
+      compatibilityLegs
+        .map((leg) =>
+          leg.label === leg.version
+            ? `\`${leg.version}\``
+            : `\`${leg.label}\` → \`${leg.version}\``
+        )
+        .join(', ') || 'none'
+    } — **${report.result.passed ? 'PASS' : 'FAIL'}** (${reasons.join(', ')})`
   );
   lines.push('');
 
-  // Columns use the full leg key, including execution backend and grammar surface.
-  // A label or engine version alone is not unique once the same candidate runs
-  // through both standard and analytics.
-  const columns = legs.map((l) => ({
-    key: l.key,
+  const columns = compatibilityLegs.map((leg) => ({
+    key: leg.key,
     heading:
-      l.surface && l.surface !== 'runtime-bundle'
-        ? `\`${l.version}\`<br>${l.executionBackend}<br>${l.surface}` +
-          (l.label === l.version ? '' : `<br>${l.label}`)
-        : `\`${l.version}\`<br>${l.executionBackend}` +
-          (l.label === l.version ? '' : `<br>${l.label}`),
+      leg.label === leg.version
+        ? `\`${leg.version}\` actual`
+        : `\`${leg.label}\` actual<br>(\`${leg.version}\`)`,
   }));
-  const rules = [...new Set(report.matrix.map((m) => m.ruleId))].sort();
-  lines.push(`| Rule | ${columns.map((c) => c.heading).join(' | ')} |`);
-  lines.push(`| ---- | ${columns.map(() => '----').join(' | ')} |`);
-  const cell = {
-    agree: 'agree',
-    drift: 'DRIFT',
-    uncovered: 'not covered',
-    'out-of-scope': 'n/a (out of scope)',
-    'not-applicable': 'n/a (surface)',
-    inconclusive: '**inconclusive**',
-  };
-  for (const ruleId of rules) {
+  const rules = [...specs.entries()]
+    .filter(([, entry]) => contractChannel(entry.spec) === 'lint')
+    .sort(([left], [right]) => left.localeCompare(right));
+  lines.push(
+    `| Rule | Expected compatibility | ${columns.map((column) => column.heading).join(' | ')} |`
+  );
+  lines.push(`| ---- | ---- | ${columns.map(() => '----').join(' | ')} |`);
+  for (const [ruleId, { spec }] of rules) {
     const cells = columns.map((column) => {
       const row = report.matrix.find((m) => m.ruleId === ruleId && m.legKey === column.key);
-      if (!row) return '—';
-      if (row.status === 'drift') return `**DRIFT** (${row.drifts})`;
-      // An unmapped status must still render as something visible. A blank cell
-      // reads as "nothing to see here", which is the opposite of what an
-      // unrecognized state means.
-      return cell[row.status] || `**${row.status}**`;
+      return actualCompatibility(row);
     });
-    lines.push(`| \`${ruleId}\` | ${cells.join(' | ')} |`);
+    lines.push(
+      `| \`${ruleId}\` | ${expectedCompatibility(spec)} | ${cells.join(' | ')} |`
+    );
   }
   lines.push('');
 
@@ -1781,6 +1875,18 @@ function renderMarkdown(report, drifts, coverageHoles, legs) {
           `integ-test/src/test/resources/ppl-lint/contracts/ with a trigger + control query and list ` +
           `it in manifest.json under \`defaultError\`. If the rule should not be default-error, lower ` +
           `its severity or disable it in packages/osd-monaco/src/ppl/lint/rules_catalog.json.`
+      );
+    }
+    lines.push('');
+  }
+
+  if (report.shippingCensus && !report.shippingCensus.passed) {
+    lines.push('### Shipping census');
+    lines.push('');
+    for (const problem of report.shippingCensus.problems || []) {
+      lines.push(
+        `- ${report.shippingCensus.blocking ? '**ENFORCED:**' : '**REPORT ONLY:**'} ${problem}. ` +
+          `Align \`manifest.json\` with the approved OSD shipping catalog.`
       );
     }
     lines.push('');

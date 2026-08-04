@@ -4,7 +4,7 @@
   "channel": "lint",
   "note": "The standard Calcite route can still project and filter enabled:false object values from _source. These result-shape oracles pin that observed acceptance; the warning communicates that the object is not indexed/searchable through ordinary OpenSearch field semantics.",
   "grammarSurface": "both",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "detector": "enabled-false-object",
     "enabled": true,
@@ -60,7 +60,10 @@
           "frontend": {
             "count": 1,
             "severity": "warning",
-            "matchMessage": "not searchable"
+            "messageEquals": "This field is stored but not searchable, so PPL returns null for it.",
+            "deterministicFix": {
+              "offered": false
+            }
           },
           "backends": {
             "standard": {
@@ -83,7 +86,10 @@
           "frontend": {
             "count": 1,
             "severity": "warning",
-            "matchMessage": "not searchable"
+            "messageEquals": "This field is stored but not searchable, so PPL returns null for it.",
+            "deterministicFix": {
+              "offered": false
+            }
           },
           "backends": {
             "standard": {
@@ -104,7 +110,10 @@
         },
         "indexed-field-control": {
           "frontend": {
-            "count": 0
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            }
           },
           "backends": {
             "standard": {

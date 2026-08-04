@@ -52,8 +52,14 @@
       "version": ">=3.4.0",
       "queries": {
         "multisearch-single-subsearch": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "The multisearch command requires at least two subsearches.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -80,8 +86,14 @@
           }
         },
         "multisearch-single-subsearch-with-where": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "The multisearch command requires at least two subsearches.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -108,7 +120,12 @@
           }
         },
         "multisearch-two-subsearches-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",

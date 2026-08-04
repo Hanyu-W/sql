@@ -50,8 +50,14 @@
       "version": ">=0.0.0",
       "queries": {
         "divide-by-zero-literal": {
-          "detectorCount": 1,
-          "severity": "warning",
+          "frontend": {
+            "count": 1,
+            "severity": "warning",
+            "messageEquals": "Dividing by zero returns no value (null) instead of an error.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",
@@ -70,8 +76,14 @@
           }
         },
         "divide-by-decimal-zero-literal": {
-          "detectorCount": 1,
-          "severity": "warning",
+          "frontend": {
+            "count": 1,
+            "severity": "warning",
+            "messageEquals": "Dividing by zero returns no value (null) instead of an error.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",
@@ -90,7 +102,12 @@
           }
         },
         "divide-by-nonzero-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",
@@ -109,8 +126,14 @@
           }
         },
         "modulo-by-zero-literal": {
-          "detectorCount": 1,
-          "severity": "warning",
+          "frontend": {
+            "count": 1,
+            "severity": "warning",
+            "messageEquals": "Dividing by zero returns no value (null) instead of an error.",
+            "deterministicFix": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",
