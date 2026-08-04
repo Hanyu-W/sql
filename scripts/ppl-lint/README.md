@@ -114,7 +114,10 @@ writes `detector-report.json`.
 | --- | --- |
 | `PPL_LINT_CONTRACT_DIR` | directory of `*.spec.json` + `manifest.json` |
 | `PPL_LINT_SCHEDULE` | `pr` or `nightly` |
-| `PPL_LINT_GRAMMAR_BUNDLE` | candidate `ppl-grammar-bundle.json` (required; no compiled fallback) |
+| `PPL_LINT_SURFACE` | `runtime-bundle` (default) or explicit `compiled-simplified` |
+| `PPL_LINT_ENGINE_MODE` | optional `calcite` or `legacy` identity for compatibility filtering/context |
+| `PPL_LINT_APPLICABLE_ONLY` | `1` omits contracts excluded by surface, version, or engine mode |
+| `PPL_LINT_GRAMMAR_BUNDLE` | candidate `ppl-grammar-bundle.json` (required on the runtime surface) |
 | `PPL_LINT_TARGET_MANIFEST` | schema-v2 `target.json` (engine, grammar, execution backend, and storage identity) |
 | `PPL_LINT_BACKEND_REPORT` | `backend-report.json` (enables the differential) |
 | `PPL_LINT_REPORT` | where to write `detector-report.json` |
@@ -223,40 +226,49 @@ status, not blocking behavior**.
 
 The check above validates **one** engine: the build from the PR. But a lint rule
 ships to every user, and each user's cluster is on whatever version they run. A
-rule that is correct on `main` can be a false positive on 3.6 or a false negative
-on 3.7, and the single-version check cannot see it.
+rule that is correct on `main` can be a false positive or false negative on a
+released cluster, and the single-version check cannot see it.
 
 [`ppl-lint-multiversion-validation.yml`](../../.github/workflows/ppl-lint-multiversion-validation.yml)
-validates every active shipping detector against several engine versions at
-once, and reports **what to change in the linter** when one disagrees.
+validates every active shipping detector against three planned configurations
+and reports **what to change** when one disagrees:
+
+- the OSD compiled-simplified fallback grammar against OpenSearch 2.19.6;
+- the runtime grammar exported by the highest official GA release at or below
+  the normalized SQL PR target;
+- the runtime grammar exported by the SQL PR build.
 
 ```
-observe (matrix: released 3.6/3.7 images + standard pr-build)
-    └── each leg exports the same 4 artifacts as the single-version check
-aggregate rule compatibility (one OSD bootstrap, one detector pass per runtime grammar)
-    └── aggregate-versions.mjs → drift-report.json + remediation report
+plan configurations
+    ├── observe 2.19.6 backend (compiled comparison)
+    ├── observe latest eligible GA + export runtime grammar
+    └── observe PR build + export runtime grammar
+aggregate rule compatibility (one OSD bootstrap, three detector passes)
+    └── aggregate-compatibility.mjs → 36-cell schema-v3 report
 ```
 
-Released legs run the official `opensearchproject/opensearch:<version>` image,
-which bundles the matching `opensearch-sql` plugin, so no old branch is built. The
-`pr-build` leg is the same Gradle test cluster the single-version check uses. The
-legs run the **same** contract oracle (`PplLintRuleValidationIT`) with
+Released legs run official `opensearchproject/opensearch:<version>` images,
+which bundle the matching `opensearch-sql` plugin, so no old branch is built.
+The plan reads the default `opensearch.version` from `build.gradle`, removes its
+prerelease/build suffix, and selects the highest exact-semver OpenSearch tag at
+or below it. The `pr-build` leg uses a Gradle test cluster. All legs run the
+**same** contract oracle (`PplLintRuleValidationIT`) with
 `-Dppl.lint.observe.only=true`, which records real behavior instead of asserting
 against expectations — on an older engine a mismatch is the signal being
 collected, not a broken run.
 
-**Engine floor: 3.6.0.**
-`GET /_plugins/_ppl/_grammar` landed in #5162, which is an ancestor of 3.6 but not
-3.5, so a 3.5 leg cannot export a grammar bundle for the detectors to lint against.
+The 2.19.6 leg does not request a runtime bundle. Its backend observations are
+joined to a detector pass over OSD's checked-in simplified grammar. Rules with
+`grammarSurface: runtime-bundle` are `n/a (surface)` there; rules outside their
+`wiring.appliesTo` version range are `n/a (version)`. Surface takes precedence
+when both exclusions apply. Analytics, syntax-channel, dormant-rule, discovery,
+and AI action tests are not part of this workflow.
 
-This workflow intentionally excludes the compiled-simplified surface and
-analytics engine. Those dimensions do not share the stable runtime-bundle
-contract being compared here.
-
-Observation jobs do not fail on compatibility differences. The final
+Observation jobs do not fail on compatibility differences. A failed or missing
+observation remains a planned column and becomes `inconclusive`. The final
 `Aggregate rule compatibility` job writes the complete expected-versus-actual
-table and `drift-report.json`, uploads them, and then fails when a rule drifts on
-a version declared by its `wiring.appliesTo` scope.
+table and `drift-report.json`, uploads both report and evidence, and only then
+fails for drift or inconclusive in-scope cells.
 
 ### What a drift report tells you
 
@@ -264,20 +276,16 @@ Every finding names a drift class, the evidence, and one remediation action:
 
 | Action | When | What you change |
 | --- | --- | --- |
-| `version-scope-rule` | the engine relaxed (or never had) the behavior on some versions | `appliesTo.minVersion` / `maxVersion` in `rules_catalog.json` — or `enabled: false` if no supported engine rejects it any more |
+| `scope-rule-version` | every contracted trigger is now accepted and controls prove support | `appliesTo.minVersion` / `maxVersion` in `rules_catalog.json` |
+| `narrow-detector` | only some contracted triggers are now accepted | keep the version in scope and narrow the detector to invalid forms |
 | `update-detector` | the detector regressed, went too broad, or its grammar anchor was renamed | the rule's detector `.ts` (named in the finding) |
 | `update-contract` | the linter is right and only the pinned expectation is stale | the `expectations[]` entry for that version |
-| `align-execution-backends` | standard and analytics disagree for the same SQL version and grammar | reconcile the detector with both routes or add a reliable backend signal to OSD |
+| `fix-test-leg` | a detector/backend row or target identity is missing or errored | repair or rerun the test leg before changing product behavior |
 
-Drift classes: `grammar-rule-missing` (a parser rule the detector walks was
-renamed or removed — the finding names the closest current rule names),
-`engine-relaxed` / `engine-partially-relaxed` / `engine-tightened` (the engine's
-verdict flipped), `engine-message-changed` (same verdict, reworded error),
-`detector-silent` / `detector-noisy` (false negative / false positive),
-`version-scope-too-narrow` (the engine rejects but the rule is scoped away from
-that version, so users see no diagnostic), `execution-backend-divergence` (same
-version, different route verdict), and `severity-mismatch`. Backend divergence
-never recommends changing a version range.
+The schema-v3 report consolidates query symptoms into four rule/configuration
+classifications: `detector-regression`, `full-engine-relaxation`,
+`partial-engine-relaxation`, and `contract-drift`. Missing or errored evidence
+is `inconclusive`, not a compatibility classification.
 
 #### Full vs partial relaxation: scope the rule, or narrow the detector?
 
@@ -285,10 +293,12 @@ When an engine starts accepting a query a rule flags, the fix depends on a quest
 a single query cannot answer: is the behavior **fully** gone on that version, or
 only **partially**?
 
-- **Every trigger relaxed** → `engine-relaxed`, action `version-scope-rule`. Nothing
+- **Every trigger relaxed** → `full-engine-relaxation`, action
+  `scope-rule-version`. Nothing
   the rule claims is still true on that engine, so bound it with `maxVersion`.
-- **Some triggers relaxed, others still rejected** → `engine-partially-relaxed`,
-  action `update-detector`. The engine fixed *part* of the condition. Scoping the
+- **Some triggers relaxed, others still rejected** →
+  `partial-engine-relaxation`, action `narrow-detector`. The engine fixed *part*
+  of the condition. Scoping the
   rule away here would drop the diagnostics that are still correct, converting a
   partial engine fix into a shipped **false negative**. Narrow the detector so it
   stops matching the now-valid shapes while still flagging the rest.
@@ -299,24 +309,16 @@ supersedes the per-query ones. A trigger with no verdict is counted as neither �
 treating it as "still rejects" would let a timed-out leg masquerade as a partial fix
 and send someone to narrow a healthy detector.
 
-The evidence always states the tally (`2 of 3 observed trigger(s) relaxed`), and a
-rule with only one pinned trigger gets an explicit warning that a "fully relaxed"
-verdict rests on a single observation. That is the gap the discovery corpus below
-closes.
+The evidence always states the contracted, accepted, rejected, and missing
+trigger tally. A one-trigger rule can be fully relaxed when that trigger and its
+controls produce complete evidence.
 
-Three hard guards keep the check from passing vacuously. The shipping census is
-also recorded, but remains report-only until the paired OSD default-alignment
-change lands:
+Four hard guards keep the check from passing vacuously:
 
-- A rule that is default-error in OSD's catalog but has no contract file is
-  reported in the shipping census. The detector runner records the catalog's
-  default-error census in `detector-report.json`, and the aggregate step compares
-  it against `manifest.defaultError`. This becomes blocking when census
-  enforcement is enabled after OSD defaults are aligned.
-- A leg whose artifacts are missing is a hard failure, never a silently dropped
-  version. The aggregate step also checks that every version the plan asked for
-  produced a report, so a dead observe job cannot shrink the matrix into a green
-  "agrees with all N versions".
+- The active manifest must contain exactly the approved 12 rule IDs.
+- A leg whose artifacts are missing remains in the matrix as a complete
+  `inconclusive` column. A dead observe job cannot shrink the matrix into a green
+  result.
 - A case with no engine verdict (a transport failure, recorded by the IT as
   `outcome: "error"`) is **not** read as acceptance. Coercing it would report a
   timeout as an engine that now accepts the query — and advise disabling a
@@ -327,81 +329,46 @@ change lands:
   — it proved nothing. Inconclusive findings say "check that leg's logs and re-run",
   never "edit the rule", because the linter is not what went wrong.
 
-A rule that is out of scope on an engine (`appliesTo` excludes it) and that the
-engine also accepts is reported as `n/a (out of scope)`, not as drift — that is
-the version window working. But if the engine *rejects* the trigger there, it is
-`version-scope-too-narrow`.
+A rule that is out of scope for a surface, version, or engine mode is not
+executed or compared. Its cell is `n/a` with the corresponding reason and never
+blocks the job.
 
 ### Where a failure shows up in the GitHub UI
 
-Every finding is emitted twice, because the run page and the diff are two
-different places a developer looks:
-
-1. **Annotations** (top of the run page, and inline on the file in *Files
-   changed* when the contract is part of the PR's diff). Each carries the drift
-   class, the rule, the engine version, and the one-line action. An
-   `update-contract` finding anchors on the exact `expectations[]` entry whose
-   `version` range produced it — not the top of the file — so the drift appears on
-   the line that caused it. Rule-wide findings (a renamed grammar rule) anchor on
-   the contract's `ruleId` instead.
-2. **The job summary** — the rule × version table plus the full grouped
-   remediation report, which stays the authoritative account.
-
-The required single-version lane follows the same rule: frontend and backend
-failures with a `[rule/query]` identity anchor on that contract's `ruleId`.
-An individual detector/query execution error is recorded as an `error` row and
-does not stop the remaining contracts from running or prevent
-`detector-report.json` from being uploaded. The required check still fails after
-the complete report is written, with the failing rule/query named directly.
-Shipping-census findings anchor on `manifest.json` and remain report-only until
-the paired OSD default-alignment change lands. Artifact and job failures without
-a trustworthy repository location remain file-less rather than pointing at a
-guessed line.
-
-Without the annotations the only thing above the summary is `Process completed
-with exit code 1`, so the natural next click lands in raw job logs rather than the
-remediation. Severity is not cosmetic:
-
-| Finding | Level | Why |
-| --- | --- | --- |
-| enforced drift, coverage hole | `error` | an active shipping rule disagrees with a supported engine; aggregation writes the report and then fails |
-| non-enforced drift | `warning` | reported, but it does not block |
-| `inconclusive` | `warning` | "we could not check" is a leg problem, not evidence that a rule is wrong |
-| unvalidated default-error rule | `error` (no file) | the edit goes in `manifest.json`, not a contract |
-
-A line number is emitted only when it is unambiguous. If a contract pins the same
-version range twice, or the range cannot be found, the annotation carries the file
-and no line — a wrong line sends the reader to edit the wrong expectation, which
-is worse than making them find it.
+The `Aggregate rule compatibility` step summary is the primary interface. It
+always contains all 12 rows and all three columns, followed by blocking findings
+and remediation. `ppl-lint-multiversion-drift/drift-report.json` carries the
+complete schema-v3 matrix and query cases; `ppl-lint-multiversion-evidence`
+carries target identities, detector/backend reports, logs, and reproduction
+commands. The final step fails only after both uploads have run.
 
 ### Running the multi-version check locally
 
-Each leg needs a reachable cluster. Point the observe step at any running engine:
+Use the planner with an exact-semver tag list, then point the aggregator at the
+three artifact directories produced by backend and detector runs:
 
 ```bash
-# Observe one engine (repeat per version into its own leg dir).
-mkdir -p legs/3.7.0
-./gradlew :integ-test:integTestRemote \
-  --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT \
-  -Dtests.rest.cluster=localhost:9200 \
-  -Dppl.lint.schedule=nightly -Dppl.lint.observe.only=true \
-  -Dppl.lint.report=$PWD/legs/3.7.0/backend-report.json \
-  -Dppl.lint.grammar.bundle=$PWD/legs/3.7.0/ppl-grammar-bundle.json \
-  -Dppl.lint.target=$PWD/legs/3.7.0/target.json
+git ls-remote --tags --refs https://github.com/opensearch-project/OpenSearch.git \
+  > /tmp/opensearch-release-tags.txt
+node scripts/ppl-lint/plan-compatibility.mjs \
+  --build-file build.gradle \
+  --release-tags /tmp/opensearch-release-tags.txt \
+  --compiled-version 2.19.6 \
+  --sql-sha "$(git rev-parse HEAD)" \
+  --osd-repository opensearch-project/OpenSearch-Dashboards \
+  --osd-ref main \
+  --out compatibility-plan.json
 
-# Lint each leg's grammar from an OSD checkout (writes detector-report.json),
-# then compare every standard runtime-bundle version at once. The aggregator
-# writes the table and JSON report before returning a failing drift status.
-node scripts/ppl-lint/aggregate-versions.mjs \
+node scripts/ppl-lint/aggregate-compatibility.mjs \
+  --plan compatibility-plan.json \
   --contracts integ-test/src/test/resources/ppl-lint/contracts \
-  --leg 3.6.0=legs/3.6.0 --leg 3.7.0=legs/3.7.0 --leg pr-build=legs/pr-build \
+  --artifacts legs \
+  --osd-sha "<checked-out OSD SHA>" \
   --out drift-report.json
 ```
 
 The step summary has one row per active detector. It prints the compatibility
-declared by `wiring.appliesTo` next to the actual result for every engine leg.
-For example, a rule with `minVersion: 3.7.0` renders `expected n/a` on 3.6
-instead of reporting drift.
+declared by `wiring.appliesTo` and `grammarSurface` next to each actual result.
 
 The classifier is pure and has no cluster or OSD dependency, so its tests run
 anywhere:
@@ -412,9 +379,8 @@ node --test "scripts/ppl-lint/__tests__/*.test.mjs"
 
 ## Discovery corpus (harvested, never enforced)
 
-The required corpus is hand-pinned, which is what lets a mismatch red the build.
-The `discovery` job builds a larger unpinned corpus to distinguish full engine
-fixes from partial behavior changes.
+The discovery scripts remain available as standalone investigation tooling.
+They are not invoked by the multi-surface compatibility workflow.
 
 ```
 harvest-queries.mjs ──▶ discovery-corpus.json ──┬──▶ run-frontend-contract.mjs ──▶ detector report

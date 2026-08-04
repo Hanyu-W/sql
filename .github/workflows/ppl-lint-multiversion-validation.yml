@@ -1,69 +1,27 @@
-name: PPL lint multi-version validation
+name: PPL lint multi-surface compatibility
 
-# Multi-version companion to ppl-lint-rule-validation.yml.
-#
-# The sibling workflow answers "do the OSD PPL lint detectors and THIS engine
-# build agree?". It validates one engine: the one built from the PR. That leaves
-# the failure mode that actually reaches users unguarded — a lint rule ships to
-# everyone, but each user runs it against whatever engine version their cluster
-# happens to be. A rule that is correct on main can be a false positive on 3.6 or
-# a false negative on 3.7, and nothing notices.
-#
-# This workflow validates all 12 active detector contracts against released
-# engine versions plus the PR build. The aggregate still records the exact
-# default-error census separately, but --all-rules makes warning/info omissions
-# visible too.
-#
-# Shape — a per-version matrix of observation legs, then one aggregation:
-#
-#   observe (matrix: 3.6.0, 3.7.0, pr-build)  ──▶  aggregate ──▶ drift report
-#
-# Each leg produces the SAME four artifacts the single-version workflow already
-# defines (ppl-grammar-bundle.json, target.json, backend-report.json,
-# detector-report.json), so this workflow adds no new producer format — only the
-# per-version fan-out and the cross-version comparison.
-#
-# Released legs run the official distribution image, which bundles the matching
-# opensearch-sql plugin (verified against opensearch-build's release manifests),
-# so no old branch has to be built. The `pr-build` leg is the same Gradle test
-# cluster the sibling workflow uses.
-#
-# Engine floor: 3.6.0. GET /_plugins/_ppl/_grammar landed in #5162 (`fe95703b5`),
-# which is an ancestor of the 3.6 release branch but NOT of 3.5 — a 3.5 leg could
-# not export a candidate grammar bundle, so the detector half would have nothing
-# to lint against. Raise `ENGINE_VERSIONS` as older versions leave support.
-#
-# Compatibility differences are collected without interrupting the matrix.
-# The aggregate writes the complete table and JSON artifact first, then the
-# final step fails this job when a declared-supported rule has drifted.
+# Validate the 12 active PPL lint rules on the checked-in OSD fallback grammar
+# and on runtime grammar bundles exported by the latest eligible GA engine and
+# this SQL pull request. Compatibility differences are data until the aggregate
+# job has published the complete 12 x 3 matrix.
 
 on:
-  # Nightly is the primary schedule: the matrix pulls three engine images, so it
-  # is too slow to sit on every push.
-  schedule:
-    - cron: '30 10 * * *'
-  # Run on PRs that touch the contract corpus or this machinery, where the whole
-  # point is to see the multi-version effect of the change.
   pull_request:
     paths:
+      - 'build.gradle'
       - 'integ-test/build.gradle'
       - 'integ-test/src/test/java/org/opensearch/sql/calcite/remote/PplLintRuleValidationIT.java'
       - 'integ-test/src/test/resources/ppl-lint/**'
-      - 'scripts/ppl-lint-rule-validation.sh'
       - 'scripts/ppl-lint/**'
       - '.github/workflows/ppl-lint-multiversion-validation.yml'
   workflow_dispatch:
     inputs:
       osd_repo:
-        description: OSD repository to check out. Defaults to opensearch-project/OpenSearch-Dashboards.
+        description: OSD repository containing the detector implementation.
         required: false
         type: string
       osd_ref:
-        description: OSD commit or branch whose detectors are validated.
-        required: false
-        type: string
-      engine_versions:
-        description: 'JSON array of released engine versions to validate, e.g. ["3.6.0","3.7.0"]. The PR build is always added.'
+        description: OSD branch or commit containing the detector implementation.
         required: false
         type: string
 
@@ -71,102 +29,90 @@ permissions:
   contents: read
 
 concurrency:
-  group: ppl-lint-multiversion-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ppl-lint-multi-surface-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
-env:
-  # Released engine versions to validate on the RUNTIME-BUNDLE surface. Each must
-  # be >= 3.6.0 (the _grammar endpoint floor) and must have a published
-  # distribution image.
-  # Latest patch of each line (3.6.0 and 3.7.0 ARE the latest patches today; bump
-  # them when 3.6.1 / 3.7.1 publish, and never pin `<line>.0` once a newer patch
-  # exists — that would validate an engine no user runs).
-  ENGINE_VERSIONS: '["3.6.0","3.7.0"]'
-
 jobs:
-  # Same reusable workflow + pinned SHA the sibling SQL workflows use, so a
-  # dependabot bump moves one set of action versions rather than two.
   Get-CI-Image-Tag:
     uses: opensearch-project/opensearch-build/.github/workflows/get-ci-image-tag.yml@761e093b8c1349cc07f21c1d681d3b30bf9e1999 # main
     with:
       product: opensearch
 
-  # Resolve the matrix and the OSD target once, so every leg and the aggregate
-  # step agree on exactly what is being validated.
   plan:
-    name: Plan matrix
+    name: Plan compatibility matrix
     runs-on: ubuntu-latest
     outputs:
-      released: ${{ steps.plan.outputs.released }}
-      discovery_engine: ${{ steps.plan.outputs.discovery_engine }}
-      osd_repo: ${{ steps.plan.outputs.osd_repo }}
-      osd_ref: ${{ steps.plan.outputs.osd_ref }}
+      released_targets: ${{ steps.outputs.outputs.released_targets }}
+      osd_repo: ${{ steps.outputs.outputs.osd_repo }}
+      osd_ref: ${{ steps.outputs.outputs.osd_ref }}
+      pr_target: ${{ steps.outputs.outputs.pr_target }}
     steps:
-      - name: Resolve engine versions and OSD target
-        id: plan
-        env:
-          REQUESTED_VERSIONS: ${{ inputs.engine_versions }}
-          DEFAULT_VERSIONS: ${{ env.ENGINE_VERSIONS }}
-          REQUESTED_REPO: ${{ inputs.osd_repo }}
-          REQUESTED_REF: ${{ inputs.osd_ref }}
-          VAR_REPO: ${{ vars.OSD_REPO }}
-          VAR_REF: ${{ vars.OSD_REF }}
+      - name: Checkout SQL pull request
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Read official OpenSearch GA tags
         run: |
           set -euo pipefail
-          released="${REQUESTED_VERSIONS:-$DEFAULT_VERSIONS}"
-          # Fail loudly on a malformed override rather than silently validating
-          # an empty matrix (which would look like a pass).
-          echo "$released" | python3 -c "
-          import json,sys
-          v=json.load(sys.stdin)
-          assert isinstance(v,list) and v, 'engine_versions must be a non-empty JSON array'
-          for item in v:
-              assert isinstance(item,str), 'engine_versions entries must be strings'
-          "
-          echo "released=$released" >> "$GITHUB_OUTPUT"
+          git ls-remote --tags --refs https://github.com/opensearch-project/OpenSearch.git \
+            > "$RUNNER_TEMP/opensearch-release-tags.txt"
 
-          # Discovery runs against ONE engine — the newest released version in the
-          # matrix. It is a lead-generator, not a version-drift check, so paying for
-          # a full matrix would multiply cost without adding signal: a false positive
-          # found on the newest engine is the one users hit soonest, and per-version
-          # differences are already the enforced corpus's job.
-          discovery_engine=$(echo "$released" | python3 -c "
-          import json,sys
-          v=json.load(sys.stdin)
-          # Newest by semver, not list order, so a reordered matrix cannot silently
-          # point discovery at an old engine.
-          def key(s):
-              parts=[int(p) for p in s.split('-')[0].split('.') if p.isdigit()]
-              return parts + [0]*(3-len(parts))
-          print(sorted(v,key=key)[-1])
-          ")
-          echo "discovery_engine=$discovery_engine" >> "$GITHUB_OUTPUT"
-          echo "Discovery engine: \`$discovery_engine\`" >> "$GITHUB_STEP_SUMMARY"
-          # Same precedence as the sibling workflow: dispatch input, then repo
-          # variable, then the canonical upstream default.
-          echo "osd_repo=${REQUESTED_REPO:-${VAR_REPO:-opensearch-project/OpenSearch-Dashboards}}" >> "$GITHUB_OUTPUT"
-          echo "osd_ref=${REQUESTED_REF:-${VAR_REF:-main}}" >> "$GITHUB_OUTPUT"
+      - name: Resolve target versions and configurations
+        env:
+          REQUESTED_OSD_REPO: ${{ inputs.osd_repo }}
+          REQUESTED_OSD_REF: ${{ inputs.osd_ref }}
+          VARIABLE_OSD_REPO: ${{ vars.OSD_REPO }}
+          VARIABLE_OSD_REF: ${{ vars.OSD_REF }}
+        run: |
+          set -euo pipefail
+          osd_repo="${REQUESTED_OSD_REPO:-${VARIABLE_OSD_REPO:-opensearch-project/OpenSearch-Dashboards}}"
+          osd_ref="${REQUESTED_OSD_REF:-${VARIABLE_OSD_REF:-main}}"
+          node scripts/ppl-lint/plan-compatibility.mjs \
+            --build-file build.gradle \
+            --release-tags "$RUNNER_TEMP/opensearch-release-tags.txt" \
+            --compiled-version 2.19.6 \
+            --sql-sha "$GITHUB_SHA" \
+            --osd-repository "$osd_repo" \
+            --osd-ref "$osd_ref" \
+            --out compatibility-plan.json
 
-  # One leg per released engine version: run the contract queries against the
-  # official distribution image (which bundles the matching sql plugin) and
-  # export that engine's grammar bundle.
+      - name: Publish plan outputs
+        id: outputs
+        run: |
+          set -euo pipefail
+          {
+            echo "released_targets=$(jq -c '.releasedTargets' compatibility-plan.json)"
+            echo "osd_repo=$(jq -r '.osd.repository' compatibility-plan.json)"
+            echo "osd_ref=$(jq -r '.osd.ref' compatibility-plan.json)"
+            echo "pr_target=$(jq -r '.prTargetVersion' compatibility-plan.json)"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo '## PPL lint compatibility plan'
+            echo
+            echo "- PR target: \`$(jq -r '.prTargetVersion' compatibility-plan.json)\`"
+            echo "- Latest eligible GA: \`$(jq -r '.latestEligibleGa' compatibility-plan.json)\`"
+            echo "- OSD: \`$(jq -r '.osd.repository + " @ " + .osd.ref' compatibility-plan.json)\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload compatibility plan
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ppl-lint-compatibility-plan
+          path: compatibility-plan.json
+          if-no-files-found: error
+
   observe-released:
-    name: Observe engine ${{ matrix.version }}
+    name: Observe engine ${{ matrix.version }} (${{ matrix.label }})
     needs: plan
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     strategy:
       fail-fast: false
-      matrix:
-        version: ${{ fromJSON(needs.plan.outputs.released) }}
+      matrix: ${{ fromJSON(needs.plan.outputs.released_targets) }}
     services:
       opensearch:
         image: opensearchproject/opensearch:${{ matrix.version }}
         env:
           discovery.type: single-node
-          # The lint contract only needs the PPL query and grammar endpoints, so
-          # run without the security plugin: no TLS or credentials to manage, and
-          # the observed error bodies are the engine's own rather than a proxy's.
           DISABLE_SECURITY_PLUGIN: 'true'
           DISABLE_INSTALL_DEMO_CONFIG: 'true'
           OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
@@ -182,41 +128,53 @@ jobs:
       - name: Checkout SQL pull request
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Wait for the engine and confirm its version
-        id: engine
+      - name: Confirm released engine identity
         run: |
           set -euo pipefail
-          for i in $(seq 1 40); do
-            if curl -sf http://localhost:9200 > /tmp/root.json; then break; fi
-            echo "waiting for engine (${i}/40)..."
+          for attempt in $(seq 1 40); do
+            curl -sf http://localhost:9200 > "$RUNNER_TEMP/engine-root.json" && break
+            echo "waiting for engine (${attempt}/40)..."
             sleep 5
           done
-          cat /tmp/root.json
-          reported=$(python3 -c "import json;print(json.load(open('/tmp/root.json'))['version']['number'])")
-          echo "reported=$reported" >> "$GITHUB_OUTPUT"
-          # A leg mislabeled as another version would attribute drift to the wrong
-          # engine, so require the image to be what the matrix asked for.
+          reported=$(jq -r '.version.number' "$RUNNER_TEMP/engine-root.json")
           case "$reported" in
             ${{ matrix.version }}*) ;;
-            *) echo "::error::engine reported $reported but the matrix asked for ${{ matrix.version }}"; exit 1 ;;
+            *) echo "::error::engine reported $reported; expected ${{ matrix.version }}"; exit 1 ;;
           esac
-          # The PPL plugin must actually be present, or every query would "pass"
-          # by failing identically.
           curl -sf http://localhost:9200/_cat/plugins | grep -i sql
 
       - name: Set up JDK 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: 21
 
-      # The same contract oracle the single-version workflow runs, pointed at an
-      # external cluster instead of a Gradle-managed one. One oracle, many
-      # engines: a per-version copy would be free to drift from the real check.
-      - name: Run contract observation against engine ${{ matrix.version }}
+      - name: Observe backend contracts
+        env:
+          EXPORT_RUNTIME_BUNDLE: ${{ matrix.export_runtime_bundle }}
         run: |
           set -euo pipefail
           mkdir -p leg
+          bundle_args=()
+          if [ "$EXPORT_RUNTIME_BUNDLE" = 'true' ]; then
+            bundle_args+=("-Dppl.lint.grammar.bundle=$(pwd)/leg/ppl-grammar-bundle.json")
+          fi
+          {
+            printf './gradlew :integ-test:integTestRemote '
+            printf '%q ' \
+              '--tests' 'org.opensearch.sql.calcite.remote.PplLintRuleValidationIT' \
+              '-Dtests.rest.cluster=localhost:9200' \
+              '-Dtests.cluster=localhost:9200' \
+              '-Dtests.clustername=docker-cluster' \
+              '-Dppl.lint.schedule=nightly' \
+              '-Dppl.lint.observe.only=true' \
+              '-Dppl.lint.execution_backend=standard' \
+              "-Dppl.lint.sql_sha=$GITHUB_SHA" \
+              "-Dppl.lint.report=$(pwd)/leg/backend-report.json" \
+              "-Dppl.lint.target=$(pwd)/leg/target.json" \
+              "${bundle_args[@]}"
+            echo
+          } > leg/backend-command.txt
           ./gradlew :integ-test:integTestRemote \
             --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT \
             -Dtests.rest.cluster=localhost:9200 \
@@ -225,36 +183,37 @@ jobs:
             -Dppl.lint.schedule=nightly \
             -Dppl.lint.observe.only=true \
             -Dppl.lint.execution_backend=standard \
-            -Dppl.lint.sql_sha="${GITHUB_SHA}" \
+            -Dppl.lint.sql_sha="$GITHUB_SHA" \
             -Dppl.lint.report="$(pwd)/leg/backend-report.json" \
-            -Dppl.lint.grammar.bundle="$(pwd)/leg/ppl-grammar-bundle.json" \
-            -Dppl.lint.target="$(pwd)/leg/target.json"
+            -Dppl.lint.target="$(pwd)/leg/target.json" \
+            "${bundle_args[@]}"
 
-      - name: Upload leg artifacts
+      - name: Upload released observation
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ppl-lint-leg-${{ matrix.version }}
+          name: ${{ matrix.artifact_name }}
           path: leg
-          if-no-files-found: error
+          if-no-files-found: warn
 
-      - name: Upload failure logs
+      - name: Upload released observation logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ppl-lint-leg-${{ matrix.version }}-logs
-          path: integ-test/build/reports/**
+          name: ${{ matrix.artifact_name }}-logs
+          path: |
+            integ-test/build/reports/**
+            integ-test/build/test-results/**
+          if-no-files-found: warn
 
-  # The PR's own engine build, so the newest point in the matrix is the code under
-  # review rather than the last release. Same oracle as the released legs; the only
-  # difference is a Gradle-managed cluster instead of a published image, which is
-  # why it cannot just be another matrix entry.
   observe-pr-build:
-    name: Observe engine pr-build
-    needs: Get-CI-Image-Tag
+    name: Observe engine pr-build (runtime)
+    needs:
+      - Get-CI-Image-Tag
+      - plan
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     container:
       image: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-version-linux }}
       options: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-options }}
@@ -268,75 +227,67 @@ jobs:
       - name: Set up JDK 21
         uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: 21
 
-      # Observe-only here too, so this leg reports what the PR engine does rather
-      # than duplicating the sibling workflow's assertions. The sibling workflow
-      # remains the enforcing single-version check.
-      - name: Run contract observation against the PR build
+      - name: Observe backend contracts
         run: |
           set -euo pipefail
           mkdir -p leg
           chown -R 1000:1000 "$(pwd)"
-          su "$(id -un 1000)" -c "./gradlew :integ-test:integTest \
-            --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT \
-            -Dppl.lint.schedule=nightly \
-            -Dppl.lint.observe.only=true \
-            -Dppl.lint.execution_backend=standard \
-            -Dppl.lint.sql_sha=${GITHUB_SHA} \
-            -Dppl.lint.report=$(pwd)/leg/backend-report.json \
-            -Dppl.lint.grammar.bundle=$(pwd)/leg/ppl-grammar-bundle.json \
-            -Dppl.lint.target=$(pwd)/leg/target.json"
+          command="./gradlew :integ-test:integTest --tests org.opensearch.sql.calcite.remote.PplLintRuleValidationIT -Dppl.lint.schedule=nightly -Dppl.lint.observe.only=true -Dppl.lint.execution_backend=standard -Dppl.lint.sql_sha=$GITHUB_SHA -Dppl.lint.report=$(pwd)/leg/backend-report.json -Dppl.lint.grammar.bundle=$(pwd)/leg/ppl-grammar-bundle.json -Dppl.lint.target=$(pwd)/leg/target.json"
+          printf '%s\n' "$command" > leg/backend-command.txt
+          su "$(id -un 1000)" -c "$command"
 
-      - name: Upload leg artifacts
+      - name: Upload PR-build observation
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ppl-lint-leg-pr-build
+          name: ppl-lint-observation-pr-build-runtime
           path: leg
-          if-no-files-found: error
+          if-no-files-found: warn
 
-      - name: Upload failure logs
+      - name: Upload PR-build observation logs
         if: ${{ failure() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: ppl-lint-leg-pr-build-logs
+          name: ppl-lint-observation-pr-build-runtime-logs
           path: |
             integ-test/build/reports/**
             integ-test/build/test-results/**
             integ-test/build/testclusters/*/logs/*
+          if-no-files-found: warn
 
-  # Lint each engine's exported grammar with the OSD detectors. Separate from the
-  # observation legs because OSD needs a newer Node/glibc than the engine image
-  # provides, and because one bootstrap can serve every leg.
-  #
-  # `always()` so a single broken leg still yields a report for the others: a
-  # partial matrix must be visibly partial, not silently absent. The aggregate
-  # step fails if NO leg produced a report.
-  detect:
+  aggregate:
     name: Aggregate rule compatibility
+    if: ${{ always() && needs.plan.result == 'success' }}
     needs:
       - plan
       - observe-released
       - observe-pr-build
-    if: ${{ always() && needs.plan.result == 'success' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 40
-    outputs:
-      osd_sha: ${{ steps.osd-rev.outputs.sha }}
+    timeout-minutes: 45
     steps:
       - name: Checkout SQL pull request
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Download all leg artifacts
+      - name: Download compatibility plan
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
         with:
-          pattern: ppl-lint-leg-*
+          name: ppl-lint-compatibility-plan
+          path: plan
+
+      - name: Download available observations
+        continue-on-error: true
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4
+        with:
+          pattern: ppl-lint-observation-*
           path: legs
 
       - name: Checkout OpenSearch-Dashboards
+        id: osd-checkout
+        continue-on-error: true
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           repository: ${{ needs.plan.outputs.osd_repo }}
@@ -344,18 +295,27 @@ jobs:
           path: .ci/OpenSearch-Dashboards
 
       - name: Record OSD revision
-        id: osd-rev
+        id: osd-revision
+        if: ${{ always() }}
         run: |
-          sha=$(git -C .ci/OpenSearch-Dashboards rev-parse HEAD)
-          echo "sha=$sha" >> "$GITHUB_OUTPUT"
-          echo "OSD revision: \`$sha\` (${{ needs.plan.outputs.osd_repo }} @ \`${{ needs.plan.outputs.osd_ref }}\`)" >> "$GITHUB_STEP_SUMMARY"
+          if sha=$(git -C .ci/OpenSearch-Dashboards rev-parse HEAD 2>/dev/null); then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "sha=" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Set up Node from OSD .nvmrc
+        if: ${{ steps.osd-revision.outputs.available == 'true' }}
+        continue-on-error: true
         uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4
         with:
           node-version-file: .ci/OpenSearch-Dashboards/.nvmrc
 
       - name: Pin Yarn from OSD engines
+        if: ${{ steps.osd-revision.outputs.available == 'true' }}
+        continue-on-error: true
         working-directory: .ci/OpenSearch-Dashboards
         run: |
           yarn_range=$(node -e "process.stdout.write(require('./package.json').engines.yarn)")
@@ -363,123 +323,123 @@ jobs:
           npm install -g "yarn@${yarn_version}"
 
       - name: Cache OSD Yarn dependencies
+        if: ${{ steps.osd-revision.outputs.available == 'true' }}
+        continue-on-error: true
         uses: actions/cache@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4
         with:
-          path: |
-            ~/.cache/yarn
+          path: ~/.cache/yarn
           key: ${{ runner.os }}-osd-yarn-${{ hashFiles('.ci/OpenSearch-Dashboards/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-osd-yarn-
+          restore-keys: ${{ runner.os }}-osd-yarn-
 
-      - name: Bootstrap OpenSearch-Dashboards
+      - name: Bootstrap OpenSearch-Dashboards once
+        id: osd-bootstrap
+        if: ${{ steps.osd-revision.outputs.available == 'true' }}
+        continue-on-error: true
         working-directory: .ci/OpenSearch-Dashboards
         run: |
-          for i in 1 2 3; do
+          for attempt in 1 2 3; do
             yarn osd bootstrap && exit 0
-            echo "Bootstrap attempt $i failed, retrying in 10s..."
+            echo "Bootstrap attempt $attempt failed; retrying in 10 seconds."
             sleep 10
           done
           exit 1
 
-      # One detector pass per leg, each against THAT engine's grammar bundle. The
-      # runner is the same SQL-owned script the single-version workflow uses, so
-      # the detector half cannot drift between the two checks.
-      - name: Run detectors against every engine grammar
-        working-directory: .ci/OpenSearch-Dashboards
+      - name: Run applicable detector passes
+        if: ${{ steps.osd-bootstrap.outcome == 'success' }}
+        continue-on-error: true
         run: |
-          set -euo pipefail
-          shopt -s nullglob
-          legs=("$GITHUB_WORKSPACE"/legs/ppl-lint-leg-*)
-          if [ ${#legs[@]} -eq 0 ]; then
-            echo "::error::no leg artifacts were downloaded; nothing to validate."
-            exit 1
-          fi
-          for leg in "${legs[@]}"; do
-            version=$(basename "$leg" | sed 's/^ppl-lint-leg-//')
-            if [ ! -f "$leg/ppl-grammar-bundle.json" ]; then
-              # Skip the log-only artifacts an observation failure may have uploaded.
-              echo "skipping $leg (no runtime grammar bundle)"
+          set -uo pipefail
+          while IFS= read -r configuration; do
+            id=$(jq -r '.id' <<< "$configuration")
+            artifact=$(jq -r '.artifactName' <<< "$configuration")
+            surface=$(jq -r '.surface' <<< "$configuration")
+            engine_mode=$(jq -r '.engineMode' <<< "$configuration")
+            leg="$GITHUB_WORKSPACE/legs/$artifact"
+            mkdir -p "$leg"
+            if [ ! -s "$leg/target.json" ] || [ ! -s "$leg/backend-report.json" ]; then
+              echo "Skipping detector pass for $id: backend evidence is incomplete."
               continue
             fi
-            echo "=== detectors vs engine $version (runtime-bundle surface) ==="
-            env PPL_LINT_SURFACE=runtime-bundle \
-            PPL_LINT_GRAMMAR_BUNDLE="$leg/ppl-grammar-bundle.json" \
-            PPL_LINT_OBSERVE_ONLY=1 \
-            PPL_LINT_CONTRACT_DIR="$GITHUB_WORKSPACE/integ-test/src/test/resources/ppl-lint/contracts" \
-            PPL_LINT_SCHEDULE=nightly \
-            PPL_LINT_INCLUDE_DORMANT=1 \
-            PPL_LINT_TARGET_MANIFEST="$leg/target.json" \
-            PPL_LINT_REPORT="$leg/detector-report.json" \
-            node -r ./src/setup_node_env \
-              "$GITHUB_WORKSPACE/scripts/ppl-lint/run-frontend-contract.mjs" \
-              > "$leg/detector.log" 2>&1 || true
-            # A per-leg non-zero exit is EXPECTED when that engine disagrees with
-            # the pinned expectation — that is the drift this workflow exists to
-            # report, and the aggregate step below is what classifies it. Only a
-            # missing report means the runner itself broke.
-            if [ ! -f "$leg/detector-report.json" ]; then
-              echo "::error::detector runner produced no report for engine $version"
-              tail -50 "$leg/detector.log" || true
-              exit 1
-            fi
-            tail -5 "$leg/detector.log" || true
-          done
 
-      # Compare every engine version against every other and against the pinned
-      # contracts, then print the remediation report.
-      - name: Aggregate drift across engine versions
-        id: aggregate
-        env:
-          RELEASED: ${{ needs.plan.outputs.released }}
+            if [ "$surface" = 'compiled-simplified' ]; then
+              grammar_root=".ci/OpenSearch-Dashboards/packages/osd-antlr-grammar/src/opensearch_ppl_simplified"
+              grammar_hash=$(
+                find "$grammar_root" -type f -print0 |
+                  sort -z |
+                  xargs -0 sha256sum |
+                  sha256sum |
+                  awk '{print "sha256:" $1}'
+              )
+              jq --arg hash "$grammar_hash" \
+                '.grammarHash = $hash | .grammarBundle = ""' \
+                "$leg/target.json" > "$leg/detector-target.json"
+              bundle=''
+            else
+              cp "$leg/target.json" "$leg/detector-target.json"
+              bundle="$leg/ppl-grammar-bundle.json"
+              if [ ! -s "$bundle" ]; then
+                echo "Skipping detector pass for $id: runtime grammar bundle is missing."
+                continue
+              fi
+            fi
+
+            {
+              printf 'cd %q && env ' "$GITHUB_WORKSPACE/.ci/OpenSearch-Dashboards"
+              printf 'PPL_LINT_SURFACE=%q ' "$surface"
+              printf 'PPL_LINT_ENGINE_MODE=%q ' "$engine_mode"
+              printf 'PPL_LINT_APPLICABLE_ONLY=1 '
+              printf 'PPL_LINT_GRAMMAR_BUNDLE=%q ' "$bundle"
+              printf 'PPL_LINT_TARGET_MANIFEST=%q ' "$leg/detector-target.json"
+              printf 'PPL_LINT_BACKEND_REPORT=%q ' "$leg/backend-report.json"
+              printf 'PPL_LINT_CONTRACT_DIR=%q ' "$GITHUB_WORKSPACE/integ-test/src/test/resources/ppl-lint/contracts"
+              printf 'PPL_LINT_SCHEDULE=nightly PPL_LINT_OBSERVE_ONLY=1 '
+              printf 'PPL_LINT_REPORT=%q ' "$leg/detector-report.json"
+              printf 'node -r ./src/setup_node_env %q\n' \
+                "$GITHUB_WORKSPACE/scripts/ppl-lint/run-frontend-contract.mjs"
+            } > "$leg/detector-command.txt"
+
+            (
+              cd .ci/OpenSearch-Dashboards
+              env \
+                PPL_LINT_SURFACE="$surface" \
+                PPL_LINT_ENGINE_MODE="$engine_mode" \
+                PPL_LINT_APPLICABLE_ONLY=1 \
+                PPL_LINT_GRAMMAR_BUNDLE="$bundle" \
+                PPL_LINT_TARGET_MANIFEST="$leg/detector-target.json" \
+                PPL_LINT_BACKEND_REPORT="$leg/backend-report.json" \
+                PPL_LINT_CONTRACT_DIR="$GITHUB_WORKSPACE/integ-test/src/test/resources/ppl-lint/contracts" \
+                PPL_LINT_SCHEDULE=nightly \
+                PPL_LINT_OBSERVE_ONLY=1 \
+                PPL_LINT_REPORT="$leg/detector-report.json" \
+                node -r ./src/setup_node_env \
+                  "$GITHUB_WORKSPACE/scripts/ppl-lint/run-frontend-contract.mjs"
+            ) > "$leg/detector.log" 2>&1 || true
+            tail -10 "$leg/detector.log" || true
+          done < <(jq -c '.configurations[]' plan/compatibility-plan.json)
+
+      - name: Aggregate every planned rule and configuration
+        id: compatibility
+        if: ${{ always() }}
         run: |
-          set -euo pipefail
-          shopt -s nullglob
-          args=()
-          present=()
-          for leg in "$GITHUB_WORKSPACE"/legs/ppl-lint-leg-*; do
-            [ -f "$leg/detector-report.json" ] || continue
-            version=$(basename "$leg" | sed 's/^ppl-lint-leg-//')
-            args+=(--leg "$version=$leg")
-            present+=("$version")
-          done
-          if [ ${#args[@]} -eq 0 ]; then
-            echo "::error::no complete legs to aggregate."
-            exit 1
-          fi
-          # Every version the plan asked for must have produced a leg. Aggregating
-          # only the survivors would report "PASS: agrees with all N versions" over
-          # a matrix that silently lost one — the exact vacuous pass this workflow
-          # exists to prevent. A dead leg is a failure, not a smaller matrix.
-          missing=()
-          for want in $(echo "$RELEASED" | python3 -c "import json,sys;print(' '.join(json.load(sys.stdin)))") pr-build; do
-            found=no
-            for have in "${present[@]}"; do
-              [ "$have" = "$want" ] && found=yes && break
-            done
-            [ "$found" = yes ] || missing+=("$want")
-          done
-          if [ ${#missing[@]} -gt 0 ]; then
-            echo "::error::planned engine leg(s) produced no report: ${missing[*]}. Check those observe jobs; the matrix is incomplete so its result would be misleading."
-            exit 1
-          fi
           set +e
-          node "$GITHUB_WORKSPACE/scripts/ppl-lint/aggregate-versions.mjs" \
-            --contracts "$GITHUB_WORKSPACE/integ-test/src/test/resources/ppl-lint/contracts" \
-            --out "$GITHUB_WORKSPACE/drift-report.json" \
-            --summary "$GITHUB_STEP_SUMMARY" \
-            --all-rules \
-            "${args[@]}"
-          aggregate_exit=$?
-          set -e
-          echo "exit_code=$aggregate_exit" >> "$GITHUB_OUTPUT"
+          node scripts/ppl-lint/aggregate-compatibility.mjs \
+            --plan plan/compatibility-plan.json \
+            --contracts integ-test/src/test/resources/ppl-lint/contracts \
+            --artifacts legs \
+            --osd-sha "${{ steps.osd-revision.outputs.sha }}" \
+            --out drift-report.json \
+            --summary "$GITHUB_STEP_SUMMARY"
+          result=$?
+          echo "exit_code=$result" >> "$GITHUB_OUTPUT"
+          exit 0
 
       - name: Upload drift report
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ppl-lint-multiversion-drift
-          if-no-files-found: error
           path: drift-report.json
+          if-no-files-found: error
 
       - name: Upload compatibility evidence
         if: ${{ always() }}
@@ -487,277 +447,45 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ppl-lint-multiversion-evidence
-          if-no-files-found: warn
           path: |
+            plan/compatibility-plan.json
+            legs/**/backend-report.json
             legs/**/detector-report.json
-            legs/**/detector.log
             legs/**/target.json
+            legs/**/detector-target.json
+            legs/**/*-command.txt
+            legs/**/detector.log
+          if-no-files-found: warn
 
-      - name: Fail after publishing compatibility drift
+      - name: Fail after publishing compatibility results
         if: ${{ always() }}
         env:
-          AGGREGATE_EXIT: ${{ steps.aggregate.outputs.exit_code }}
-          RELEASED: ${{ needs.plan.outputs.released }}
+          AGGREGATE_EXIT: ${{ steps.compatibility.outputs.exit_code }}
         run: |
           set -euo pipefail
-          if [ -z "$AGGREGATE_EXIT" ]; then
-            echo "::error::aggregation did not complete"
+          if [ ! -s drift-report.json ]; then
+            echo "::error::drift-report.json was not published"
             exit 1
           fi
-          expected_legs=$(echo "$RELEASED" | jq 'length + 1')
-          expected_rules=$(jq -c \
-            '[.contracts[] | sub("\\.spec\\.json$"; "")] | sort' \
-            integ-test/src/test/resources/ppl-lint/contracts/manifest.json)
-          if [ ! -s drift-report.json ] || ! jq -e \
-            --argjson expected_legs "$expected_legs" \
-            --argjson expected_rules "$expected_rules" \
-            '
-              type == "object" and
-              ($expected_rules | length) == 12 and
-              ($expected_rules | index("command-suggestion") | not) and
-              (.legs | type == "array" and length == $expected_legs) and
-              (.matrix | type == "array") and
-              (.matrix | length) == (12 * $expected_legs) and
-              (.matrix | map(.ruleId) | unique | sort) == $expected_rules and
-              (.matrix | map(.legKey) | unique | length) == $expected_legs and
-              (.matrix | map(.legKey) | unique | sort) ==
-                (.legs | map(.key) | unique | sort) and
-              ([.matrix[] | [.ruleId, .legKey]] | unique | length) ==
-                (12 * $expected_legs)
-            ' drift-report.json > /dev/null; then
-            echo "::error::aggregation did not produce the complete 12-rule compatibility matrix"
+          jq -e '
+            .schemaVersion == 3 and
+            .inventory.ruleCount == 12 and
+            (.inventory.ruleIds | length) == 12 and
+            (.configurations | length) == 3 and
+            (.matrix | length) == 36 and
+            .result.cellCount == 36 and
+            (
+              .result.compatible + .result.notApplicable +
+              .result.drift + .result.inconclusive
+            ) == 36
+          ' drift-report.json > /dev/null
+          if [ -z "$AGGREGATE_EXIT" ]; then
+            echo "::error::compatibility aggregation did not complete"
             exit 1
           fi
           if [ "$AGGREGATE_EXIT" -ne 0 ]; then
-            echo "::error::rule compatibility validation failed; see the table above and the ppl-lint-multiversion-drift artifact"
+            drift=$(jq -r '.result.drift' drift-report.json)
+            inconclusive=$(jq -r '.result.inconclusive' drift-report.json)
+            echo "::error::rule compatibility validation failed after artifact publication: $drift drift, $inconclusive inconclusive"
             exit "$AGGREGATE_EXIT"
           fi
-
-  # Discovery: harvest queries from OSD's own lint tests, run both halves over them,
-  # and report detector/engine disagreements as LEADS.
-  #
-  # Why this is separate from `detect`, and why it can never fail the build:
-  #
-  # The enforced corpus is hand-pinned — every expectation is a reviewed claim, which
-  # is what lets a mismatch red the build. That corpus is also small (about one
-  # trigger per rule), and `classifyRelaxationScope` needs SEVERAL triggers per rule
-  # to tell a FULL engine fix (version-scope the rule away) from a PARTIAL one
-  # (narrow the detector). Those need opposite actions, so with one trigger the
-  # advice can be confidently wrong.
-  #
-  # This job supplies that trigger variety from queries OSD's own detector authors
-  # already wrote. It pins NOTHING: roles are derived from real detector output and
-  # the engine supplies the other half, so no expectation is ever auto-generated.
-  # An auto-derived expectation could only confirm current behavior — locking in
-  # whatever the detector does today, bugs included.
-  #
-  # `continue-on-error` AND a zero exit from the labeler: a finding here is a lead to
-  # investigate, not a proven defect, and blocking unrelated PRs on an auto-generated
-  # guess would poison the whole check's credibility.
-  discovery:
-    name: Discovery corpus (harvested, not enforced)
-    # Only `plan`, for the OSD target and the engine version. Deliberately NOT the
-    # observe legs: discovery runs its own engine and harvests its own queries, so
-    # depending on them would idle this job behind ~30 minutes of matrix work it
-    # never reads, and a failed leg would block a report that does not need it.
-    needs: plan
-    continue-on-error: true
-    runs-on: ubuntu-latest
-    timeout-minutes: 40
-    services:
-      opensearch:
-        image: opensearchproject/opensearch:${{ needs.plan.outputs.discovery_engine }}
-        env:
-          discovery.type: single-node
-          DISABLE_SECURITY_PLUGIN: 'true'
-          DISABLE_INSTALL_DEMO_CONFIG: 'true'
-          OPENSEARCH_JAVA_OPTS: -Xms1g -Xmx1g
-        ports:
-          - 9200:9200
-        options: >-
-          --health-cmd "curl -sf http://localhost:9200/_cluster/health || exit 1"
-          --health-interval 15s
-          --health-timeout 10s
-          --health-retries 20
-          --health-start-period 60s
-    steps:
-      - name: Checkout SQL pull request
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-
-      - name: Checkout OpenSearch-Dashboards
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          repository: ${{ needs.plan.outputs.osd_repo }}
-          ref: ${{ needs.plan.outputs.osd_ref }}
-          path: .ci/OpenSearch-Dashboards
-
-      - name: Set up Node from OSD .nvmrc
-        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4
-        with:
-          node-version-file: .ci/OpenSearch-Dashboards/.nvmrc
-
-      - name: Pin Yarn from OSD engines
-        working-directory: .ci/OpenSearch-Dashboards
-        run: |
-          yarn_range=$(node -e "process.stdout.write(require('./package.json').engines.yarn)")
-          yarn_version=$(echo "$yarn_range" | sed -E 's/[^0-9.]//g')
-          npm install -g "yarn@${yarn_version}"
-
-      - name: Cache OSD Yarn dependencies
-        uses: actions/cache@0c907a75c2c80ebcb7f088228285e798b750cf8f # v4
-        with:
-          path: |
-            ~/.cache/yarn
-          key: ${{ runner.os }}-osd-yarn-${{ hashFiles('.ci/OpenSearch-Dashboards/yarn.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-osd-yarn-
-
-      - name: Bootstrap OpenSearch-Dashboards
-        working-directory: .ci/OpenSearch-Dashboards
-        run: |
-          for i in 1 2 3; do
-            yarn osd bootstrap && exit 0
-            echo "Bootstrap attempt $i failed, retrying in 10s..."
-            sleep 10
-          done
-          exit 1
-
-      # The rule id list comes from the OSD catalog being validated, not a hardcoded
-      # copy: attribution keys off `describe('<rule id>')` titles, so a stale list
-      # would silently stop harvesting queries for any newly added rule.
-      - name: Harvest the discovery corpus from OSD's lint tests
-        run: |
-          set -euo pipefail
-          node -e "
-            const c = require('./.ci/OpenSearch-Dashboards/packages/osd-monaco/src/ppl/lint/rules_catalog.json');
-            process.stdout.write(JSON.stringify(c.map((r) => r.id)));
-          " > /tmp/catalog-rules.json
-          node scripts/ppl-lint/harvest-queries.mjs \
-            --osd .ci/OpenSearch-Dashboards \
-            --catalog-rules @/tmp/catalog-rules.json \
-            --index opensearch-sql_test_index_account \
-            --out "$GITHUB_WORKSPACE/discovery-corpus.json" \
-            --specs-out "$GITHUB_WORKSPACE/discovery-specs"
-
-      # Seed the one index every harvested query was rewritten onto. Without it the
-      # engine rejects everything with IndexNotFoundException — which the labeler
-      # would correctly suppress as uninformative, yielding a run that reports
-      # nothing at all.
-      - name: Seed the fixture index
-        run: |
-          set -euo pipefail
-          for i in $(seq 1 40); do
-            curl -sf http://localhost:9200 > /dev/null && break
-            echo "waiting for engine (${i}/40)..."
-            sleep 5
-          done
-          curl -sf -X PUT "http://localhost:9200/opensearch-sql_test_index_account" \
-            -H 'content-type: application/json' -d '{
-              "mappings": { "properties": {
-                "account_number": { "type": "long" },
-                "balance":        { "type": "long" },
-                "age":            { "type": "integer" },
-                "status":         { "type": "keyword" },
-                "firstname":      { "type": "text" },
-                "lastname":       { "type": "text" },
-                "msg":            { "type": "text" },
-                "body":           { "type": "text" },
-                "raw":            { "type": "object", "enabled": false }
-              } }
-            }'
-          curl -sf -X POST "http://localhost:9200/opensearch-sql_test_index_account/_doc?refresh=true" \
-            -H 'content-type: application/json' \
-            -d '{"account_number":1,"balance":39225,"age":32,"status":"ok","firstname":"Amber","lastname":"Duke","msg":"took 42ms","body":"INFO started"}'
-
-      # Export this engine's grammar bundle. Discovery only runs against the runtime
-      # grammar surface, so an unavailable endpoint skips the detector pass.
-      - name: Export the engine grammar bundle
-        id: bundle
-        run: |
-          set -uo pipefail
-          if curl -sf --max-time 60 "http://localhost:9200/_plugins/_ppl/_grammar" \
-               -o "$GITHUB_WORKSPACE/discovery-bundle.json"; then
-            hash=$(python3 -c "
-          import json
-          print(json.load(open('$GITHUB_WORKSPACE/discovery-bundle.json')).get('grammarHash',''))
-          ")
-            python3 -c "
-          import json
-          json.dump({'schemaVersion': 2,
-                     'engineVersion': '${{ needs.plan.outputs.discovery_engine }}',
-                     'grammarHash': '$hash',
-                     'grammarBundle': 'discovery-bundle.json',
-                     'executionBackend': 'standard',
-                     'storage': 'lucene',
-                     'shardCount': 1},
-                    open('$GITHUB_WORKSPACE/discovery-target.json','w'))
-          "
-            echo "surface=runtime-bundle" >> "$GITHUB_OUTPUT"
-          else
-            echo "::warning::_grammar export failed; skipping discovery detector pass."
-            echo "surface=unavailable" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Run the detectors over the discovery corpus
-        working-directory: .ci/OpenSearch-Dashboards
-        env:
-          SURFACE: ${{ steps.bundle.outputs.surface }}
-        run: |
-          set -uo pipefail
-          if [ "$SURFACE" != 'runtime-bundle' ]; then
-            echo "Discovery detector pass skipped: runtime grammar bundle unavailable."
-            exit 0
-          fi
-          # A non-zero exit is EXPECTED and ignored: the generated specs carry
-          # placeholder expectations, so the runner reports a "failure" for every
-          # query whose real diagnostic count differs. Only the report is read.
-          env PPL_LINT_DISCOVERY=1 \
-          PPL_LINT_SURFACE=runtime-bundle \
-          PPL_LINT_GRAMMAR_BUNDLE="$GITHUB_WORKSPACE/discovery-bundle.json" \
-          PPL_LINT_TARGET_MANIFEST="$GITHUB_WORKSPACE/discovery-target.json" \
-          PPL_LINT_CONTRACT_DIR="$GITHUB_WORKSPACE/discovery-specs" \
-          PPL_LINT_SCHEDULE=nightly \
-          PPL_LINT_REPORT="$GITHUB_WORKSPACE/discovery-detector-report.json" \
-          node -r ./src/setup_node_env \
-            "$GITHUB_WORKSPACE/scripts/ppl-lint/run-frontend-contract.mjs" \
-            > "$GITHUB_WORKSPACE/discovery-detector.log" 2>&1 || true
-          if [ ! -f "$GITHUB_WORKSPACE/discovery-detector-report.json" ]; then
-            echo "::warning::the detector runner produced no discovery report; skipping."
-            tail -50 "$GITHUB_WORKSPACE/discovery-detector.log" || true
-          fi
-
-      - name: Probe the engine with the discovery corpus
-        run: |
-          set -euo pipefail
-          node scripts/ppl-lint/probe-discovery-backend.mjs \
-            --corpus discovery-corpus.json \
-            --endpoint http://localhost:9200 \
-            --out discovery-backend-report.json
-
-      - name: Label and report
-        run: |
-          set -euo pipefail
-          if [ ! -f discovery-detector-report.json ]; then
-            echo "::warning::no detector report; nothing to label."
-            exit 0
-          fi
-          node scripts/ppl-lint/label-discovery.mjs \
-            --corpus discovery-corpus.json \
-            --detector discovery-detector-report.json \
-            --backend discovery-backend-report.json \
-            --version "${{ needs.plan.outputs.discovery_engine }}" \
-            --out discovery-findings.json \
-            --summary "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload discovery artifacts
-        if: ${{ always() }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        continue-on-error: true
-        with:
-          name: ppl-lint-discovery
-          path: |
-            discovery-corpus.json
-            discovery-findings.json
-            discovery-detector-report.json
-            discovery-backend-report.json
-            discovery-detector.log
