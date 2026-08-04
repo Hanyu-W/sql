@@ -520,6 +520,8 @@ jobs:
               (.matrix | length) == (12 * $expected_legs) and
               (.matrix | map(.ruleId) | unique | sort) == $expected_rules and
               (.matrix | map(.legKey) | unique | length) == $expected_legs and
+              (.matrix | map(.legKey) | unique | sort) ==
+                (.legs | map(.key) | unique | sort) and
               ([.matrix[] | [.ruleId, .legKey]] | unique | length) ==
                 (12 * $expected_legs)
             ' drift-report.json > /dev/null; then
