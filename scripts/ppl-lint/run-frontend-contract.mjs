@@ -130,6 +130,31 @@ const SURFACE = (() => {
   return requested;
 })();
 
+const APPLICABLE_ONLY = process.env.PPL_LINT_APPLICABLE_ONLY === '1';
+const ENGINE_MODE = (() => {
+  const requested = process.env.PPL_LINT_ENGINE_MODE;
+  if (requested === undefined || requested === '') {
+    if (APPLICABLE_ONLY) {
+      // eslint-disable-next-line no-console
+      console.error(
+        '[ppl-lint-frontend] FATAL: PPL_LINT_ENGINE_MODE is required when ' +
+          'PPL_LINT_APPLICABLE_ONLY=1.'
+      );
+      process.exit(2);
+    }
+    return undefined;
+  }
+  if (!['calcite', 'legacy'].includes(requested)) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[ppl-lint-frontend] FATAL: PPL_LINT_ENGINE_MODE must be "calcite" or "legacy", ` +
+        `got "${requested}".`
+    );
+    process.exit(2);
+  }
+  return requested;
+})();
+
 function log(message) {
   // eslint-disable-next-line no-console
   console.log(`[ppl-lint-detector-contract] ${message}`);
@@ -533,6 +558,37 @@ function versionMatchesRange(range, version) {
   return true;
 }
 
+export function compatibilityExclusion(spec, version, surface, engineMode) {
+  const contractSurface = spec.grammarSurface || 'runtime-bundle';
+  if (contractSurface !== 'both' && contractSurface !== surface) {
+    return {
+      reason: 'surface',
+      detail: `grammarSurface=${contractSurface}, running ${surface}`,
+    };
+  }
+  const appliesTo = (spec.wiring && spec.wiring.appliesTo) || {};
+  const have = parseVersion(version);
+  const min = parseVersion(appliesTo.minVersion);
+  const max = parseVersion(appliesTo.maxVersion);
+  if (
+    have &&
+    ((min && compareVersion(have, min) < 0) ||
+      (max && compareVersion(have, max) > 0))
+  ) {
+    return {
+      reason: 'version',
+      detail: `wiring.appliesTo excludes ${version || 'unknown version'}`,
+    };
+  }
+  if (appliesTo.engine && appliesTo.engine !== engineMode) {
+    return {
+      reason: 'engine',
+      detail: `wiring.appliesTo.engine=${appliesTo.engine}, running ${engineMode}`,
+    };
+  }
+  return undefined;
+}
+
 /**
  * Select the single expectation that applies to the candidate version + engine.
  * Exactly one must match (design §5.3): zero means the rule test does not cover
@@ -615,10 +671,10 @@ function checkWiring(spec, catalog, getDetector, failures) {
  * candidate backend version so version filtering matches the backend, and sets
  * an enable override for default-off rules that declare `forceEnable`.
  */
-function buildContext(spec, engineVersion) {
+function buildContext(spec, engineVersion, engineMode) {
   const fc = spec.frontendContext || {};
   const context = {
-    isCalcite: fc.isCalcite !== false,
+    isCalcite: engineMode ? engineMode === 'calcite' : fc.isCalcite !== false,
     dataSourceVersion: engineVersion || undefined,
     // Pin the "latest verified engine" to the candidate version rather than the
     // hardcoded OSD_KNOWN_VERSION ('3.7.0'), which can mis-filter rules near a
@@ -1131,6 +1187,19 @@ function main() {
     const index = spec.index;
     const channel = contractChannel(spec);
     const scoringFailures = reportOnly ? reportOnlyFailures : failures;
+    if (APPLICABLE_ONLY) {
+      const exclusion = compatibilityExclusion(spec, engineVersion, surface, ENGINE_MODE);
+      if (exclusion) {
+        log(`SKIP ${ruleId} (${exclusion.detail}) — ${path.basename(file)}`);
+        if (exclusion.reason === 'surface') {
+          skippedForSurface.push({
+            ruleId,
+            contractSurface: spec.grammarSurface || 'runtime-bundle',
+          });
+        }
+        continue;
+      }
+    }
     const entry = checkWiring(spec, catalog, getDetector, scoringFailures);
     if (!entry) {
       for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
@@ -1187,7 +1256,7 @@ function main() {
       continue;
     }
 
-    const context = buildContext(spec, engineVersion);
+    const context = buildContext(spec, engineVersion, ENGINE_MODE);
     const expectation = selectExpectation(spec, engineVersion, context.isCalcite, scoringFailures, {
       allowMissing: observeOnly,
     });

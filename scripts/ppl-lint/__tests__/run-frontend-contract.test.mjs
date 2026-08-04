@@ -15,6 +15,7 @@ import {
   assertActiveShippingContracts,
   buildCensus,
   buildFrontendExecutionError,
+  compatibilityExclusion,
   evaluateFrontendAssertions,
   selectManifestContractNames,
 } from '../run-frontend-contract.mjs';
@@ -27,6 +28,54 @@ const RANGE = {
   endLine: 1,
   endColumn: 14,
 };
+
+test('compatibility exclusion uses surface, version, then engine precedence', () => {
+  const runtimeCalciteRule = {
+    grammarSurface: 'runtime-bundle',
+    wiring: {
+      appliesTo: { minVersion: '3.4.0', engine: 'calcite' },
+    },
+  };
+  assert.equal(
+    compatibilityExclusion(
+      runtimeCalciteRule,
+      '2.19.6',
+      'compiled-simplified',
+      'legacy'
+    ).reason,
+    'surface'
+  );
+  assert.equal(
+    compatibilityExclusion(
+      { ...runtimeCalciteRule, grammarSurface: 'both' },
+      '2.19.6',
+      'compiled-simplified',
+      'legacy'
+    ).reason,
+    'version'
+  );
+  assert.equal(
+    compatibilityExclusion(
+      {
+        grammarSurface: 'both',
+        wiring: { appliesTo: { engine: 'calcite' } },
+      },
+      '3.8.0',
+      'runtime-bundle',
+      'legacy'
+    ).reason,
+    'engine'
+  );
+  assert.equal(
+    compatibilityExclusion(
+      runtimeCalciteRule,
+      '3.8.0-SNAPSHOT',
+      'runtime-bundle',
+      'calcite'
+    ),
+    undefined
+  );
+});
 
 test('exact lint assertions materialize the effective deterministic edit', () => {
   const result = evaluateFrontendAssertions({
