@@ -960,75 +960,6 @@ function failedExtendedFrontendAssertions(entry, frontendOracle) {
 }
 
 /**
- * Check an out-of-scope rule for the one drift that still matters there: the
- * engine rejects a trigger query, but the rule's `appliesTo` excludes this
- * version, so users on it see no diagnostic for a real error. Everything else
- * about an out-of-scope rule is intentional silence.
- *
- * The trigger queries come from the spec's own `queries` map (there is no
- * expectation to read on this path), and the backend observation from this leg's
- * report; `classifyDrift` decides, so the "too narrow" wording stays in one place.
- */
-function classifyOutOfScope({ spec, ruleId, leg, classify, divergentCases }) {
-  const found = [];
-  const unusable = [];
-  const observations = new Map();
-
-  for (const [queryName] of Object.entries(spec.queries || {})) {
-    const rowKey = `${ruleId}::${queryName}`;
-    const backendEntry = leg.backend.get(rowKey);
-    const detectorResult = leg.detector.resultsByKey.get(rowKey);
-    const { observed, usable } = readBackendObservation(backendEntry, detectorResult);
-    if (!usable) {
-      unusable.push(`${queryName} (${unusableObservationReason(detectorResult)})`);
-      continue;
-    }
-    observations.set(queryName, observed);
-  }
-
-  // What did this rule's CONTROL queries — valid uses of the same command — do on
-  // this engine? THREE states, not two, and the difference decides whether a
-  // rejected trigger means anything.
-  const controlVerdicts = Object.entries(spec.queries || {})
-    .filter(([, def]) => (def.role || 'trigger') === 'control')
-    .map(([name]) => observations.get(name)?.backendRejected);
-  const controlAlsoRejected = controlVerdicts.some((v) => v === true);
-  // A rule with controls, none of which produced a verdict, cannot be judged here.
-  const controlUnknown =
-    controlVerdicts.length > 0 && !controlVerdicts.some((v) => typeof v === 'boolean');
-
-  for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
-    if ((queryDef.role || 'trigger') !== 'trigger') continue;
-    const rowKey = `${ruleId}::${queryName}`;
-    const outOfScopeObserved = observations.get(queryName);
-    if (!outOfScopeObserved) continue;
-    const pairedDivergence = divergentCases.has(`${leg.key}::${rowKey}`);
-    if (pairedDivergence && leg.executionBackend === 'analytics') continue;
-    const drift = classify({
-      ruleId,
-      version: leg.version,
-      queryName,
-      role: 'trigger',
-      query: queryDef.query.split('{{index}}').join(spec.index),
-      // Out of scope means the rule is expected to stay silent here.
-      expected: { detectorCount: 0 },
-      observed: outOfScopeObserved,
-      wiring: spec.wiring,
-      detectorPath: spec.detectorPath,
-      executionBackend: leg.executionBackend,
-      // An unknown control verdict is treated the same as a rejected one: both
-      // mean "we cannot claim this engine supports the command", and staying quiet
-      // is the only honest option.
-      controlAlsoRejected: controlAlsoRejected || controlUnknown,
-      // Deliberately no parser-rule check here: a grammar that lacks the rule is
-      // expected on an engine the command predates.
-    });
-    if (drift) found.push(drift);
-  }
-  return { drifts: found, unusable };
-}
-
-/**
  * Pick the contract expectation that applies to a version, reusing the same
  * "exactly one must match" rule as the two single-version halves. Returns
  * undefined when the corpus does not cover this version — reported separately as
@@ -1186,6 +1117,22 @@ function main() {
       }
 
       const inScope = versionInAppliesTo(appliesTo, leg.version);
+      if (!inScope) {
+        notApplicable.push({
+          ruleId,
+          ...legFields(leg),
+          surface: legSurface,
+          kind: 'applies-to',
+          reason: `wiring.appliesTo excludes engine ${leg.version}`,
+        });
+        matrix.push({
+          ruleId,
+          ...legFields(leg),
+          status: 'out-of-scope',
+          drifts: 0,
+        });
+        continue;
+      }
 
       // A parser rule that vanished from the grammar is one fact about this
       // rule on this engine, not one per query — raise it once and move on, so
@@ -1209,42 +1156,6 @@ function main() {
 
       const expectation = selectExpectation(spec, leg.version, versionMatchesRange);
       if (!expectation) {
-        if (!inScope) {
-          // Deliberately out of scope on this engine. Still run the classifier
-          // for the one case that matters — an engine that rejects a trigger the
-          // rule has been scoped away from (a missed diagnostic).
-          const outOfScope = classifyOutOfScope({
-            spec,
-            ruleId,
-            leg,
-            classify: classifyDrift,
-            divergentCases,
-          });
-          for (const drift of outOfScope.drifts) {
-            addDrift(drift, leg, { enforced: isEnforced, contractFile: file });
-          }
-          if (outOfScope.unusable.length > 0) {
-            inconclusive.push({
-              ruleId,
-              file,
-              ...legFields(leg),
-              enforced: isEnforced,
-              reasons: outOfScope.unusable,
-            });
-          }
-          matrix.push({
-            ruleId,
-            ...legFields(leg),
-            status:
-              outOfScope.unusable.length > 0
-                ? 'inconclusive'
-                : outOfScope.drifts.length > 0
-                  ? 'drift'
-                  : 'out-of-scope',
-            drifts: outOfScope.drifts.length,
-          });
-          continue;
-        }
         // In scope on this engine but nothing pins its behavior there.
         coverageHoles.push({
           ruleId,
@@ -1724,10 +1635,8 @@ function main() {
   }
   const enforcedDrifts = drifts.filter((d) => d.blocking);
   const enforcedHoles = coverageHoles.filter((h) => h.blocking);
-  // `--all-rules` widens observation to the whole corpus. Semantic drift remains
-  // enforced only for default-error rules, but a missing detector row or backend
-  // verdict is an infrastructure failure for every rule we asked the run to
-  // observe.
+  // `--all-rules` makes drift, missing coverage, and inconclusive observations
+  // blocking for every active shipping rule in the manifest.
   const enforcedInconclusive = inconclusive.filter((i) => i.enforced || args.allRules);
   const blockingMissingContracts = missingContracts.filter((entry) => entry.blocking);
   for (const row of matrix) {
@@ -1807,7 +1716,7 @@ function main() {
     workspace: process.env.GITHUB_WORKSPACE,
   });
 
-  const markdown = renderMarkdown(report, drifts, coverageHoles, legs);
+  const markdown = renderMarkdown(report, drifts, coverageHoles, legs, specs);
   // eslint-disable-next-line no-console
   console.log(markdown);
   if (args.summary) {
@@ -1836,8 +1745,42 @@ function main() {
   );
 }
 
-/** Rule × version agreement matrix followed by the grouped remediation report. */
-function renderMarkdown(report, drifts, coverageHoles, legs) {
+function expectedCompatibility(spec) {
+  const appliesTo = (spec.wiring && spec.wiring.appliesTo) || {};
+  const scope = [];
+  if (appliesTo.engine) {
+    scope.push(
+      appliesTo.engine === 'calcite'
+        ? 'Calcite'
+        : appliesTo.engine.charAt(0).toUpperCase() + appliesTo.engine.slice(1)
+    );
+  }
+  if (appliesTo.minVersion && appliesTo.maxVersion) {
+    scope.push(`>= ${appliesTo.minVersion}, <= ${appliesTo.maxVersion}`);
+  } else if (appliesTo.minVersion) {
+    scope.push(`>= ${appliesTo.minVersion}`);
+  } else if (appliesTo.maxVersion) {
+    scope.push(`<= ${appliesTo.maxVersion}`);
+  } else {
+    scope.push('all versions');
+  }
+  return scope.join(', ');
+}
+
+function actualCompatibility(row) {
+  if (!row) return 'not evaluated';
+  if (row.status === 'agree') return 'compatible';
+  if (row.status === 'out-of-scope') return 'expected n/a';
+  if (row.status === 'drift') return row.drifts > 1 ? `**drift** (${row.drifts})` : '**drift**';
+  if (row.status === 'uncovered' || row.status === 'inconclusive') {
+    return '**inconclusive**';
+  }
+  if (row.status === 'not-applicable') return 'expected n/a';
+  return `**${row.status}**`;
+}
+
+/** Expected-vs-actual compatibility table followed by the detailed remediation report. */
+function renderMarkdown(report, drifts, coverageHoles, legs, specs) {
   const lines = [];
   lines.push('## PPL lint multi-version validation');
   lines.push('');
@@ -1863,56 +1806,46 @@ function renderMarkdown(report, drifts, coverageHoles, legs) {
       `${report.result.blockingShippingCensusProblems} shipping census problem(s)`
     );
   }
+  const compatibilityLegs = legs.filter(
+    (leg) =>
+      leg.executionBackend === 'standard' &&
+      (leg.surface || 'runtime-bundle') === 'runtime-bundle'
+  );
   lines.push(
-    // Name the surface when a leg is not the default runtime-bundle one, so a
-    // reader knows a column speaks for OSD's compiled grammar rather than the
-    // engine's exported one — the two do not run the same set of rules.
-    `Engine versions: ${legs
-      .map((l) => {
-        const identity =
-          l.label === l.version ? `\`${l.version}\`` : `\`${l.label}\` → \`${l.version}\``;
-        return l.surface && l.surface !== 'runtime-bundle'
-          ? `${identity} (${l.executionBackend}, ${l.surface})`
-          : `${identity} (${l.executionBackend})`;
-      })
-      .join(', ')} — ` + `**${report.result.passed ? 'PASS' : 'FAIL'}** (${reasons.join(', ')})`
+    `Standard runtime-bundle engines: ${
+      compatibilityLegs
+        .map((leg) =>
+          leg.label === leg.version
+            ? `\`${leg.version}\``
+            : `\`${leg.label}\` → \`${leg.version}\``
+        )
+        .join(', ') || 'none'
+    } — **${report.result.passed ? 'PASS' : 'FAIL'}** (${reasons.join(', ')})`
   );
   lines.push('');
 
-  // Columns use the full leg key, including execution backend and grammar surface.
-  // A label or engine version alone is not unique once the same candidate runs
-  // through both standard and analytics.
-  const columns = legs.map((l) => ({
-    key: l.key,
+  const columns = compatibilityLegs.map((leg) => ({
+    key: leg.key,
     heading:
-      l.surface && l.surface !== 'runtime-bundle'
-        ? `\`${l.version}\`<br>${l.executionBackend}<br>${l.surface}` +
-          (l.label === l.version ? '' : `<br>${l.label}`)
-        : `\`${l.version}\`<br>${l.executionBackend}` +
-          (l.label === l.version ? '' : `<br>${l.label}`),
+      leg.label === leg.version
+        ? `\`${leg.version}\` actual`
+        : `\`${leg.label}\` actual<br>(\`${leg.version}\`)`,
   }));
-  const rules = [...new Set(report.matrix.map((m) => m.ruleId))].sort();
-  lines.push(`| Rule | ${columns.map((c) => c.heading).join(' | ')} |`);
-  lines.push(`| ---- | ${columns.map(() => '----').join(' | ')} |`);
-  const cell = {
-    agree: 'agree',
-    drift: 'DRIFT',
-    uncovered: 'not covered',
-    'out-of-scope': 'n/a (out of scope)',
-    'not-applicable': 'n/a (surface)',
-    inconclusive: '**inconclusive**',
-  };
-  for (const ruleId of rules) {
+  const rules = [...specs.entries()]
+    .filter(([, entry]) => contractChannel(entry.spec) === 'lint')
+    .sort(([left], [right]) => left.localeCompare(right));
+  lines.push(
+    `| Rule | Expected compatibility | ${columns.map((column) => column.heading).join(' | ')} |`
+  );
+  lines.push(`| ---- | ---- | ${columns.map(() => '----').join(' | ')} |`);
+  for (const [ruleId, { spec }] of rules) {
     const cells = columns.map((column) => {
       const row = report.matrix.find((m) => m.ruleId === ruleId && m.legKey === column.key);
-      if (!row) return '—';
-      if (row.status === 'drift') return `**DRIFT** (${row.drifts})`;
-      // An unmapped status must still render as something visible. A blank cell
-      // reads as "nothing to see here", which is the opposite of what an
-      // unrecognized state means.
-      return cell[row.status] || `**${row.status}**`;
+      return actualCompatibility(row);
     });
-    lines.push(`| \`${ruleId}\` | ${cells.join(' | ')} |`);
+    lines.push(
+      `| \`${ruleId}\` | ${expectedCompatibility(spec)} | ${cells.join(' | ')} |`
+    );
   }
   lines.push('');
 

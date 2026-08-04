@@ -1,16 +1,16 @@
 # PPL lint rule validation
 
 A cross-repository GitHub Actions check that proves the OpenSearch Dashboards
-(OSD) PPL lint detectors and runtime syntax validation still agree with the SQL
-backend on the **same candidate runtime grammar** built by a SQL pull request.
+(OSD) PPL lint detectors still agree with the SQL backend on the **same
+candidate runtime grammar** built by a SQL pull request.
 
 PPL language behavior lives in SQL; PPL lint detectors live in OSD. A SQL change
 can silently invalidate an OSD rule (a parser refactor stops a detector matching,
 or a semantic change makes a flagged query valid) without touching OSD. Neither
 repository's own unit tests catch that. This check does.
 
-- **Design:** `ppl-lint-ci-validation-design.md`
-- **Analytics rollout:** [`docs/dev/ppl-lint-analytics-engine-ci-validation.md`](../../docs/dev/ppl-lint-analytics-engine-ci-validation.md)
+- **Multi-version design:** [`docs/dev/ppl-lint-runtime-compatibility-ci-design.md`](../../docs/dev/ppl-lint-runtime-compatibility-ci-design.md)
+- **Deferred analytics design:** [`docs/dev/ppl-lint-analytics-engine-ci-validation.md`](../../docs/dev/ppl-lint-analytics-engine-ci-validation.md)
 - **Workflow:** [`.github/workflows/ppl-lint-rule-validation.yml`](../../.github/workflows/ppl-lint-rule-validation.yml)
 - **Contracts:** [`integ-test/src/test/resources/ppl-lint/contracts/`](../../integ-test/src/test/resources/ppl-lint/contracts)
 
@@ -227,94 +227,36 @@ rule that is correct on `main` can be a false positive on 3.6 or a false negativ
 on 3.7, and the single-version check cannot see it.
 
 [`ppl-lint-multiversion-validation.yml`](../../.github/workflows/ppl-lint-multiversion-validation.yml)
-validates every `defaultError` rule against several engine versions at once, and
-reports **what to change in the linter** when one disagrees.
+validates every active shipping detector against several engine versions at
+once, and reports **what to change in the linter** when one disagrees.
 
 ```
-observe (matrix: released images + pr-build standard + pr-build analytics)
+observe (matrix: released 3.6/3.7 images + standard pr-build)
     └── each leg exports the same 4 artifacts as the single-version check
-detect (one OSD bootstrap, one detector pass per leg's grammar)
+aggregate rule compatibility (one OSD bootstrap, one detector pass per runtime grammar)
     └── aggregate-versions.mjs → drift-report.json + remediation report
 ```
 
 Released legs run the official `opensearchproject/opensearch:<version>` image,
 which bundles the matching `opensearch-sql` plugin, so no old branch is built. The
 `pr-build` leg is the same Gradle test cluster the single-version check uses. The
-`pr-build-analytics` leg installs the full Arrow, analytics, composite, Parquet,
-Lucene-backend, and DataFusion-backend stack and fails unless fixture settings,
-explain output, and a profiled canary attest the route. These legs
-run the **same** contract oracle (`PplLintRuleValidationIT`) with
+legs run the **same** contract oracle (`PplLintRuleValidationIT`) with
 `-Dppl.lint.observe.only=true`, which records real behavior instead of asserting
 against expectations — on an older engine a mismatch is the signal being
 collected, not a broken run.
 
-**Engine floor: 3.6.0 — for the runtime-bundle surface.**
+**Engine floor: 3.6.0.**
 `GET /_plugins/_ppl/_grammar` landed in #5162, which is an ancestor of 3.6 but not
 3.5, so a 3.5 leg cannot export a grammar bundle for the detectors to lint against.
 
-### The two grammar surfaces
+This workflow intentionally excludes the compiled-simplified surface and
+analytics engine. Those dimensions do not share the stable runtime-bundle
+contract being compared here.
 
-OSD ships lint on **two** surfaces, and a user gets whichever one their session
-resolves to (`lintRuntimePPLQuery`):
-
-| Surface | When the product uses it | Engine floor |
-| --- | --- | --- |
-| `runtime-bundle` | the engine exported a grammar bundle and it has loaded | 3.6.0 |
-| `compiled-simplified` | no bundle — no dataset selected, engine below 3.6, or bundle not yet loaded | none |
-
-The compiled surface is not a degraded copy of the runtime one: it runs detector
-logic the runtime path does not (`field_validation`'s text-side pass keys off
-`grammarSurface === 'compiled-simplified'`). It is also the surface with no engine
-floor, so it is where old-engine coverage is possible at all.
-
-`PPL_LINT_SURFACE` selects which surface a detector run validates. It defaults to
-`runtime-bundle`, so the required check is unchanged, and the compiled surface is
-an **explicit opt-in** — never a silent fallback. A missing bundle on the runtime
-surface stays a hard failure, because quietly linting OSD's own grammar instead of
-the candidate would validate the wrong thing.
-
-**`runtimeOnly` rules do not run on the compiled surface.** `lint_runner` skips
-them (the productions they walk are absent from the compiled grammar), so a
-compiled leg reports them `not-applicable` rather than as zero diagnostics. This
-distinction is load-bearing: counted as zero, a healthy rule would classify as
-`detector-silent` drift and send someone to "fix" it. In the summary table those
-cells read `n/a (surface)`, and a rule whose every case is inert is `n/a` — not
-`agree` (it proved nothing) and not `inconclusive` (nothing went wrong, and there
-is nothing to re-run).
-
-Two legs may share an engine version while validating different surfaces, so the
-matrix is keyed on the **leg label**, grammar surface, and execution backend, not
-the version alone.
-
-Each contract declares the surface(s) it was verified against, and a contract is
-only scored on a matching leg — `"both"` opts into either. Judged on a surface it
-never claimed, every verdict is meaningless: a runtime-bundle contract on a
-compiled leg yields both `version-scope-too-narrow` ("the engine rejects but the
-rule is scoped away") and a coverage hole, each about a surface the contract does
-not describe. Contracts declaring `"both"` are what a pre-3.6 leg can actually
-validate; the rest report `n/a (surface)`.
-
-**Compiled-surface legs run nightly** (`COMPILED_ENGINE_VERSIONS`, default
-`2.19.0` / `3.0.0` / `3.5.0`) — three more engine images is too slow for every PR.
-Dispatch with `compiled_versions` to run one ad hoc, or `[]` to skip. Their observe
-job omits `-Dppl.lint.grammar.bundle` (the IT then exports nothing) and writes a
-`surface` marker file, which is what tells the detect job to lint them on the
-compiled surface rather than treating a missing bundle as a failed export.
-
-```bash
-# A compiled-surface leg: no grammar bundle needed, so any engine version works.
-PPL_LINT_SURFACE=compiled-simplified \
-PPL_LINT_CONTRACT_DIR=<contracts> \
-PPL_LINT_TARGET_MANIFEST=<leg>/target.json \
-PPL_LINT_SCHEDULE=nightly \
-PPL_LINT_REPORT=<leg>/detector-report.json \
-node -r ./src/setup_node_env <sql>/scripts/ppl-lint/run-frontend-contract.mjs
-```
-
-This workflow is **non-enforcing for now**: it reports and uploads, while the
-required check stays the single-version `validation-result`. Promoting it needs a
-green baseline across the whole matrix first, so a rule that has already drifted
-on 3.6 does not block every unrelated PR on day one.
+Observation jobs do not fail on compatibility differences. The final
+`Aggregate rule compatibility` job writes the complete expected-versus-actual
+table and `drift-report.json`, uploads them, and then fails when a rule drifts on
+a version declared by its `wiring.appliesTo` scope.
 
 ### What a drift report tells you
 
@@ -422,9 +364,9 @@ remediation. Severity is not cosmetic:
 
 | Finding | Level | Why |
 | --- | --- | --- |
-| enforced drift, coverage hole | `error` | a shipped default-error rule disagrees with a supported engine |
+| enforced drift, coverage hole | `error` | an active shipping rule disagrees with a supported engine; aggregation writes the report and then fails |
 | non-enforced drift | `warning` | reported, but it does not block |
-| `inconclusive` | `warning` | "we could not check" is a leg problem; the run is already red from the exit code, and rendering it as an error invites editing a rule because a leg timed out |
+| `inconclusive` | `warning` | "we could not check" is a leg problem, not evidence that a rule is wrong |
 | unvalidated default-error rule | `error` (no file) | the edit goes in `manifest.json`, not a contract |
 
 A line number is emitted only when it is unambiguous. If a contract pins the same
@@ -447,21 +389,19 @@ mkdir -p legs/3.7.0
   -Dppl.lint.grammar.bundle=$PWD/legs/3.7.0/ppl-grammar-bundle.json \
   -Dppl.lint.target=$PWD/legs/3.7.0/target.json
 
-# Observe the PR build through composite/Parquet + DataFusion.
-mkdir -p legs/pr-build-analytics
-./gradlew :integ-test:analyticsEnginePplLintIT \
-  -Dppl.lint.schedule=nightly -Dppl.lint.observe.only=true \
-  -Dppl.lint.report=$PWD/legs/pr-build-analytics/backend-report.json \
-  -Dppl.lint.grammar.bundle=$PWD/legs/pr-build-analytics/ppl-grammar-bundle.json \
-  -Dppl.lint.target=$PWD/legs/pr-build-analytics/target.json
-
 # Lint each leg's grammar from an OSD checkout (writes detector-report.json),
-# then compare every version at once:
+# then compare every standard runtime-bundle version at once. The aggregator
+# writes the table and JSON report before returning a failing drift status.
 node scripts/ppl-lint/aggregate-versions.mjs \
   --contracts integ-test/src/test/resources/ppl-lint/contracts \
-  --leg 3.6.0=legs/3.6.0 --leg 3.7.0=legs/3.7.0 \
+  --leg 3.6.0=legs/3.6.0 --leg 3.7.0=legs/3.7.0 --leg pr-build=legs/pr-build \
   --out drift-report.json
 ```
+
+The step summary has one row per active detector. It prints the compatibility
+declared by `wiring.appliesTo` next to the actual result for every engine leg.
+For example, a rule with `minVersion: 3.7.0` renders `expected n/a` on 3.6
+instead of reporting drift.
 
 The classifier is pure and has no cluster or OSD dependency, so its tests run
 anywhere:
