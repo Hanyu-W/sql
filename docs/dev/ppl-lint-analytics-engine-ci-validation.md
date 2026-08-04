@@ -1,10 +1,17 @@
 # Analytics Engine Coverage for PPL Lint CI Validation
 
-- **Status:** Validated for phased implementation
+- **Status:** Deferred; not part of PPL lint pull-request or multi-version CI
 - **Last updated:** 2026-07-28
 - **Scope:** PPL lint contract validation in
   `.github/workflows/ppl-lint-rule-validation.yml` and
   `.github/workflows/ppl-lint-multiversion-validation.yml`
+
+> **Decision update (2026-08-04):** Analytics-engine lint validation is
+> deferred because the feature build and composite/Parquet fixture surface are
+> not stable enough for this compatibility workflow. The active design is
+> [PPL Lint Runtime Compatibility CI](ppl-lint-runtime-compatibility-ci-design.md),
+> which covers standard runtime-bundle engines only. This document is retained
+> as future design context and is not an implementation commitment.
 
 ## 1. Summary
 

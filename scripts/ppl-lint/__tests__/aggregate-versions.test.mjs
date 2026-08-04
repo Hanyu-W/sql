@@ -25,6 +25,18 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SCRIPT = path.join(HERE, '..', 'aggregate-versions.mjs');
+const REAL_CONTRACTS = path.resolve(
+  HERE,
+  '..',
+  '..',
+  '..',
+  'integ-test',
+  'src',
+  'test',
+  'resources',
+  'ppl-lint',
+  'contracts'
+);
 
 /** Contract used by every case: a >=3.7 calcite-only rule with one trigger + one control. */
 const SPEC = {
@@ -225,11 +237,12 @@ function writeLeg({
   return dir;
 }
 
-/** Run the aggregator; returns { status, stdout, report }. */
+/** Run the aggregator; returns the process result plus its JSON and Markdown reports. */
 function run({ contracts, legs, extraArgs = [] }) {
   const outDir = makeTmp('ppl-lint-out-');
   const out = path.join(outDir, 'drift-report.json');
-  const args = [SCRIPT, '--contracts', contracts, '--out', out];
+  const summaryFile = path.join(outDir, 'summary.md');
+  const args = [SCRIPT, '--contracts', contracts, '--out', out, '--summary', summaryFile];
   const entries = Array.isArray(legs) ? legs : Object.entries(legs);
   for (const [version, dir] of entries) {
     args.push('--leg', `${version}=${dir}`);
@@ -237,7 +250,14 @@ function run({ contracts, legs, extraArgs = [] }) {
   args.push(...extraArgs);
   const result = spawnSync(process.execPath, args, { encoding: 'utf8' });
   const report = fs.existsSync(out) ? JSON.parse(fs.readFileSync(out, 'utf8')) : undefined;
-  return { status: result.status, stdout: result.stdout || '', stderr: result.stderr || '', report };
+  const summary = fs.existsSync(summaryFile) ? fs.readFileSync(summaryFile, 'utf8') : '';
+  return {
+    status: result.status,
+    stdout: result.stdout || '',
+    stderr: result.stderr || '',
+    report,
+    summary,
+  };
 }
 
 /** The all-agree case, reused as the base for each drift scenario. */
@@ -291,15 +311,47 @@ function writeSchema4Contracts({ includeAnalytics = true } = {}) {
   });
 }
 
-test('all versions agreeing exits 0 and reports no drift', () => {
-  const { status, report, stdout } = run({ contracts: writeContracts(), legs: healthyLegs() });
+test('all versions agreeing exits 0 and reports expected versus actual compatibility', () => {
+  const { status, report, stdout, summary } = run({
+    contracts: writeContracts(),
+    legs: healthyLegs(),
+  });
   assert.equal(status, 0);
   assert.equal(report.result.passed, true);
   assert.equal(report.drifts.length, 0);
   assert.match(stdout, /agrees with all 2 engine version\(s\)/);
+  assert.match(summary, /\| Rule \| Expected compatibility \| `3\.7\.0` actual \| `3\.8\.0` actual \|/);
+  assert.match(
+    summary,
+    /\| `union-min-datasets` \| Calcite, >= 3\.7\.0 \| compatible \| compatible \|/
+  );
   // Every rule/version pair is accounted for in the matrix.
   assert.equal(report.matrix.length, 2);
   assert.ok(report.matrix.every((m) => m.status === 'agree'));
+});
+
+test('the compatibility table contains exactly the 12 active shipping detectors', () => {
+  const leg = writeLeg({
+    version: '3.8.0',
+    cases: {
+      trigger: { detector: 1, rejected: true },
+      control: { detector: 0, rejected: false },
+    },
+  });
+
+  const { status, summary } = run({
+    contracts: REAL_CONTRACTS,
+    legs: [['pr-build', leg]],
+    extraArgs: ['--all-rules'],
+  });
+
+  assert.equal(status, 1, 'missing synthetic observations remain inconclusive');
+  const ruleRows = summary
+    .split('\n')
+    .filter((line) => /^\| `[a-z0-9-]+` \|/.test(line));
+  assert.equal(ruleRows.length, 12);
+  assert.match(summary, /\| `rex-scan-cost` \| all versions \|/);
+  assert.doesNotMatch(summary, /command-suggestion/);
 });
 
 test('same-version standard and analytics verdicts are classified as backend divergence', () => {
@@ -360,8 +412,10 @@ test('same-version standard and analytics verdicts are classified as backend div
     0,
     'route differences must not be rendered as product-version drift'
   );
-  assert.match(stdout, /`3\.8\.0`<br>standard/);
-  assert.match(stdout, /`3\.8\.0`<br>analytics/);
+  const tableHeader = stdout.split('\n').find((line) => line.startsWith('| Rule |'));
+  assert.match(tableHeader, /Expected compatibility/);
+  assert.match(tableHeader, /`pr-build` actual/);
+  assert.doesNotMatch(tableHeader, /analytics/);
 });
 
 test('schema-v3 analytics has explicit backend-oracle coverage holes', () => {
@@ -878,6 +932,30 @@ test('a version where only one engine relaxed is red, and names just that versio
   assert.equal(report.matrix.find((m) => m.version === '3.7.0').status, 'agree');
 });
 
+test('drift exits nonzero only after writing the JSON report and full Markdown table', () => {
+  const legs = healthyLegs();
+  legs['3.8.0'] = writeLeg({
+    version: '3.8.0',
+    cases: {
+      trigger: { detector: 0, rejected: true },
+      control: { detector: 0, rejected: false },
+    },
+  });
+
+  const { status, report, summary } = run({ contracts: writeContracts(), legs });
+
+  assert.equal(status, 1);
+  assert.equal(report.result.passed, false);
+  assert.equal(report.result.enforcedDriftCount, 1);
+  assert.match(summary, /## PPL lint multi-version validation/);
+  assert.match(summary, /\| Rule \| Expected compatibility \|/);
+  assert.match(
+    summary,
+    /\| `union-min-datasets` \| Calcite, >= 3\.7\.0 \| compatible \| \*\*drift\*\* \|/
+  );
+  assert.match(summary, /### Remediation/);
+});
+
 test('a changed rejection HTTP status is semantic drift, not agreement', () => {
   const leg = writeLeg({
     version: '3.8.0',
@@ -1060,23 +1138,29 @@ test('a rule out of scope on an older engine that accepts is not drift', () => {
     version: '3.6.0',
     cases: { trigger: { detector: 0, rejected: false }, control: { detector: 0, rejected: false } },
   });
-  const { status, report } = run({ contracts: writeContracts(), legs });
+  const { status, report, summary } = run({ contracts: writeContracts(), legs });
   assert.equal(status, 0);
   assert.equal(report.matrix.find((m) => m.version === '3.6.0').status, 'out-of-scope');
   assert.equal(report.coverageHoles.length, 0);
+  const row = summary
+    .split('\n')
+    .find((line) => line.startsWith('| `union-min-datasets` |'));
+  assert.match(row, /Calcite, >= 3\.7\.0/);
+  assert.match(row, /expected n\/a/);
+  assert.equal((row.match(/compatible/g) || []).length, 2);
 });
 
-test('an out-of-scope engine that rejects is flagged as scoped too narrowly', () => {
+test('an engine below minVersion is expected n/a even when its query rejects', () => {
   const legs = healthyLegs();
   legs['3.6.0'] = writeLeg({
     version: '3.6.0',
     cases: { trigger: { detector: 0, rejected: true }, control: { detector: 0, rejected: false } },
   });
-  const { status, report } = run({ contracts: writeContracts(), legs });
-  assert.equal(status, 1);
-  const drift = report.drifts.find((d) => d.version === '3.6.0');
-  assert.equal(drift.driftClass, 'version-scope-too-narrow');
-  assert.equal(drift.remediation.action, 'version-scope-rule');
+  const { status, report, summary } = run({ contracts: writeContracts(), legs });
+  assert.equal(status, 0);
+  assert.equal(report.drifts.filter((drift) => drift.version === '3.6.0').length, 0);
+  assert.equal(report.matrix.find((row) => row.version === '3.6.0').status, 'out-of-scope');
+  assert.match(summary, /expected n\/a/);
 });
 
 test('an in-scope version with no expectation is a coverage hole, not silent success', () => {
@@ -1406,18 +1490,19 @@ test('a reworded engine message does not mask a detector that went silent', () =
   assert.equal(drift.remediation.action, 'update-detector');
 });
 
-test('a detector firing on a version its appliesTo excludes is reported', () => {
-  // OSD's version filter runs a rule when the cluster version is unknown, so an
-  // out-of-scope rule CAN reach users. Silence here would hide that false positive.
+test('a detector observation below minVersion remains expected n/a', () => {
   const dir = writeLeg({
     version: '3.6.0', // below the rule's 3.7 minVersion
     cases: { trigger: { detector: 1, rejected: false }, control: { detector: 0, rejected: false } },
   });
-  const { status, report } = run({ contracts: writeContracts(), legs: { '3.6.0': dir } });
-  assert.equal(status, 1);
-  const drift = report.drifts.find((d) => d.version === '3.6.0');
-  assert.equal(drift.driftClass, 'detector-noisy');
-  assert.equal(drift.remediation.action, 'update-detector');
+  const { status, report, summary } = run({
+    contracts: writeContracts(),
+    legs: { '3.6.0': dir },
+  });
+  assert.equal(status, 0);
+  assert.equal(report.drifts.length, 0);
+  assert.equal(report.matrix[0].status, 'out-of-scope');
+  assert.match(summary, /expected n\/a/);
 });
 
 test('a calcite-scoped expectation is selected rather than counted twice', () => {
@@ -1438,11 +1523,7 @@ test('a calcite-scoped expectation is selected rather than counted twice', () =>
   );
 });
 
-test('an errored trigger on an out-of-scope rule does not silently pass', () => {
-  // The out-of-scope path used to read `entry.rejected` directly. An errored
-  // observation has no such field, so it coerced to false, the
-  // version-scope-too-narrow check (which needs `=== true`) never fired, and a
-  // genuinely mis-scoped rule rendered as `out-of-scope` with exit 0.
+test('an errored trigger below minVersion remains expected n/a', () => {
   const dir = writeLeg({
     version: '3.6.0', // below the rule's 3.7 minVersion => out of scope
     cases: { trigger: { detector: 0, rejected: true }, control: { detector: 0, rejected: false } },
@@ -1473,21 +1554,13 @@ test('an errored trigger on an out-of-scope rule does not silently pass', () => 
     contracts: writeContracts(),
     legs: { '3.6.0': dir },
   });
-  // The point is that an unobserved trigger yields no CLAIM either way: it must
-  // not be reported as a confident out-of-scope agreement...
-  assert.equal(
-    report.drifts.filter((d) => d.driftClass === 'version-scope-too-narrow').length,
-    0,
-    'an unobserved trigger cannot support a version-scope finding'
-  );
-  // ...nor may it invent linter advice from a verdict that never arrived.
+  assert.equal(status, 0);
   assert.equal(report.drifts.length, 0);
-  assert.equal(status, 1);
-  assert.equal(report.matrix[0].status, 'inconclusive');
-  assert.equal(report.result.enforcedInconclusive, 1);
+  assert.equal(report.matrix[0].status, 'out-of-scope');
+  assert.equal(report.result.enforcedInconclusive, 0);
 });
 
-test('a missing detector and backend row is inconclusive even when the rule is out of scope', () => {
+test('missing rows below minVersion remain expected n/a', () => {
   const dir = writeLeg({
     version: '3.6.0',
     cases: {
@@ -1510,16 +1583,12 @@ test('a missing detector and backend row is inconclusive even when the rule is o
     legs: { '3.6.0': dir },
   });
 
-  assert.equal(status, 1);
-  assert.equal(report.matrix[0].status, 'inconclusive');
-  assert.match(report.inconclusive[0].reasons.join(' '), /trigger \(no detector result\)/);
+  assert.equal(status, 0);
+  assert.equal(report.matrix[0].status, 'out-of-scope');
+  assert.equal(report.inconclusive.length, 0);
 });
 
-test('an errored control cannot fail open into "widen appliesTo" advice', () => {
-  // controlAlsoRejected suppresses the version-scope finding when the command
-  // itself is unsupported. Reading `entry.rejected` raw made that suppression fail
-  // OPEN on an errored control: the run would then advise lowering minVersion,
-  // shipping a precise-cause diagnostic for an unknown-command failure.
+test('an errored control below minVersion remains expected n/a', () => {
   const dir = writeLeg({
     version: '3.6.0',
     cases: { trigger: { detector: 0, rejected: true }, control: { detector: 0, rejected: true } },
@@ -1538,19 +1607,15 @@ test('an errored control cannot fail open into "widen appliesTo" advice', () => 
         : { ...e, outcome: 'observed' }
   );
   fs.writeFileSync(path.join(dir, 'backend-report.json'), JSON.stringify(backend));
-  const { status, report, stdout } = run({
+  const { status, report, stdout, summary } = run({
     contracts: writeContracts(),
     legs: { '3.6.0': dir },
   });
-  const scoped = report.drifts.filter((d) => d.driftClass === 'version-scope-too-narrow');
-  assert.equal(
-    scoped.length,
-    0,
-    'with the control unobserved there is no evidence the command is supported, so no widening advice'
-  );
+  assert.equal(report.drifts.length, 0);
   assert.ok(!/Widen "/.test(stdout));
-  assert.equal(status, 1);
-  assert.equal(report.matrix[0].status, 'inconclusive');
+  assert.equal(status, 0);
+  assert.equal(report.matrix[0].status, 'out-of-scope');
+  assert.match(summary, /expected n\/a/);
 });
 
 test('a bad --leg argument is rejected', () => {
