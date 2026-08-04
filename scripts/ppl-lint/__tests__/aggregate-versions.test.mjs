@@ -119,6 +119,7 @@ function writeLeg({
   grammarHash = `sha256:${version}`,
   surface = 'runtime-bundle',
   explicitIdentity = true,
+  censusEnforced = false,
 }) {
   const dir = makeTmp(`ppl-lint-leg-${version}-`);
   const target = {
@@ -168,6 +169,20 @@ function writeLeg({
       severities: c.severities || (c.detector > 0 ? ['error'] : []),
       severityMatched: c.severityMatched ?? true,
       messageMatched: c.messageMatched ?? true,
+      ...Object.fromEntries(
+        [
+          'deterministicFixMatched',
+          'aiActionMatched',
+          'actionDecisionMatched',
+          'fixMatched',
+          'rawMessageMatched',
+          'totalErrorsMatched',
+        ]
+          .filter((field) => c[field] !== undefined)
+          .map((field) => [field, c[field]])
+      ),
+      ...(c.assertions ? { assertions: c.assertions } : {}),
+      ...(c.mismatches ? { mismatches: c.mismatches } : {}),
       ...(explicitIdentity ? { executionBackend } : {}),
     });
     backend.push({
@@ -200,6 +215,10 @@ function writeLeg({
       surface,
       results,
       ...(defaultErrorRules !== null ? { defaultErrorRules } : {}),
+      enabledRules: [SPEC.ruleId],
+      activeContractRules: [SPEC.ruleId],
+      requiredSyntaxFeatures: [],
+      census: { enforced: censusEnforced },
     })
   );
   fs.writeFileSync(path.join(dir, 'backend-report.json'), JSON.stringify(backend));
@@ -625,6 +644,51 @@ test('paired detector reports must be identical across execution backends', () =
   assert.match(stderr, /detector parity failed for union-min-datasets::trigger/);
 });
 
+test('identical exact-action mismatches across versions cannot aggregate green', () => {
+  const badCase = {
+    detector: 1,
+    rejected: true,
+    deterministicFixMatched: false,
+    assertions: { deterministicFix: false },
+    mismatches: [
+      {
+        field: 'deterministicFix',
+        expected: { offered: false },
+        actual: { offered: true },
+      },
+    ],
+  };
+  const legs = {
+    '3.7.0': writeLeg({
+      version: '3.7.0',
+      cases: {
+        trigger: badCase,
+        control: { detector: 0, rejected: false },
+      },
+    }),
+    '3.8.0': writeLeg({
+      version: '3.8.0',
+      cases: {
+        trigger: badCase,
+        control: { detector: 0, rejected: false },
+      },
+    }),
+  };
+
+  const { status, report } = run({ contracts: writeContracts(), legs });
+  assert.equal(status, 1);
+  const actionDrifts = report.drifts.filter(
+    (drift) => drift.driftClass === 'frontend-contract-mismatch'
+  );
+  assert.equal(actionDrifts.length, 2);
+  assert.ok(
+    actionDrifts.every((drift) =>
+      drift.frontendAssertions.includes('deterministicFixMatched')
+    )
+  );
+  assert.ok(report.matrix.every((row) => row.status === 'drift'));
+});
+
 test('target and detector execution identities must match', () => {
   const dir = writeLeg({
     version: '3.8.0',
@@ -1048,6 +1112,7 @@ test('a default-error rule with no contract file fails the check', () => {
       version: '3.7.0',
       cases: { trigger: { detector: 1, rejected: true }, control: { detector: 0, rejected: false } },
       defaultErrorRules: ['union-min-datasets', 'brand-new-error-rule'],
+      censusEnforced: true,
     }),
   };
   const { status, report, stdout } = run({ contracts: writeContracts(), legs });
@@ -1069,6 +1134,29 @@ test('a census matching the manifest keeps the check green', () => {
   const { status, report } = run({ contracts: writeContracts(), legs });
   assert.equal(status, 0);
   assert.equal(report.result.missingContractCount, 0);
+});
+
+test('an enforced shipping census mismatch fails aggregation', () => {
+  const legs = {
+    '3.7.0': writeLeg({
+      version: '3.7.0',
+      cases: {
+        trigger: { detector: 1, rejected: true },
+        control: { detector: 0, rejected: false },
+      },
+      censusEnforced: true,
+    }),
+  };
+
+  const { status, report, stdout } = run({ contracts: writeContracts(), legs });
+  assert.equal(status, 1);
+  assert.equal(report.result.passed, false);
+  assert.ok(report.result.blockingShippingCensusProblems > 0);
+  assert.equal(report.shippingCensus.blocking, true);
+  assert.match(stdout, /shipping census problem/);
+  assert.match(stdout, /CENSUS ENFORCED/);
+  assert.doesNotMatch(stdout, /CENSUS REPORT-ONLY/);
+  assert.match(stdout, /### Shipping census/);
 });
 
 test('a schema-v2 detector report without a census fails closed', () => {

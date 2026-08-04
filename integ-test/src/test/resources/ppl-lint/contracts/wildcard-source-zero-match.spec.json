@@ -3,7 +3,7 @@
   "ruleId": "wildcard-source-zero-match",
   "channel": "lint",
   "grammarSurface": "both",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "detector": "wildcard-source-zero-match",
     "enabled": true,
@@ -48,7 +48,14 @@
           "frontend": {
             "count": 1,
             "severity": "info",
-            "matchMessage": "matches no known index"
+            "messageEquals": "Wildcard source pattern matches no known index.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
           },
           "backends": {
             "standard": {
@@ -69,7 +76,13 @@
         },
         "matching-wildcard-control": {
           "frontend": {
-            "count": 0
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
           },
           "backends": {
             "standard": {

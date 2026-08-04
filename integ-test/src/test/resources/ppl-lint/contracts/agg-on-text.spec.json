@@ -4,7 +4,7 @@
   "channel": "lint",
   "note": "The standard engine accepts both text aggregations: avg(text) returns null while sum(text) returns a non-empty numeric result (observed as 0.0). The warning catches this misleading coercion rather than predicting backend rejection.",
   "grammarSurface": "both",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "detector": "agg-on-text",
     "enabled": true,
@@ -58,7 +58,14 @@
           "frontend": {
             "count": 1,
             "severity": "warning",
-            "matchMessage": "text field"
+            "messageEquals": "Numeric aggregation on a text field may return no value (null), because text is not stored as a number.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
           },
           "backends": {
             "standard": {
@@ -81,7 +88,14 @@
           "frontend": {
             "count": 1,
             "severity": "warning",
-            "matchMessage": "text field"
+            "messageEquals": "Numeric aggregation on a text field may return no value (null), because text is not stored as a number.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
           },
           "backends": {
             "standard": {
@@ -102,7 +116,13 @@
         },
         "avg-numeric-control": {
           "frontend": {
-            "count": 0
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
           },
           "backends": {
             "standard": {

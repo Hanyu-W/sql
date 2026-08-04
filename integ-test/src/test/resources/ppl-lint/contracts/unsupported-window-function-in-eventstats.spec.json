@@ -49,8 +49,18 @@
       "version": ">=3.4.0 <3.7.0",
       "queries": {
         "eventstats-rank": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "This window function is not supported in eventstats/streamstats. Only row_number is supported.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -77,8 +87,18 @@
           }
         },
         "eventstats-dense-rank": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "This window function is not supported in eventstats/streamstats. Only row_number is supported.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -105,7 +125,15 @@
           }
         },
         "eventstats-avg-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",
@@ -129,8 +157,18 @@
       "version": ">=3.7.0 <3.8.0",
       "queries": {
         "eventstats-rank": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "This window function is not supported in eventstats/streamstats. Only row_number is supported.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -157,8 +195,18 @@
           }
         },
         "eventstats-dense-rank": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "This window function is not supported in eventstats/streamstats. Only row_number is supported.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -185,7 +233,15 @@
           }
         },
         "eventstats-avg-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",
@@ -209,8 +265,18 @@
       "version": ">=3.8.0",
       "queries": {
         "eventstats-rank": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "This window function is not supported in eventstats/streamstats. Only row_number is supported.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -237,8 +303,18 @@
           }
         },
         "eventstats-dense-rank": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "This window function is not supported in eventstats/streamstats. Only row_number is supported.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -265,7 +341,15 @@
           }
         },
         "eventstats-avg-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",

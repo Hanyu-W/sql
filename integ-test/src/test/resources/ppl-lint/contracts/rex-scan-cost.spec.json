@@ -3,7 +3,7 @@
   "ruleId": "rex-scan-cost",
   "channel": "lint",
   "grammarSurface": "both",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "detector": "rex-scan-cost",
     "enabled": true,
@@ -52,7 +52,13 @@
           "frontend": {
             "count": 1,
             "severity": "info",
-            "matchMessage": "every input row"
+            "messageEquals": "parse runs the pattern against every input row from text field \"email\", even when it finds no match.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
           },
           "backends": {
             "standard": {
@@ -69,7 +75,13 @@
           "frontend": {
             "count": 1,
             "severity": "info",
-            "matchMessage": "every input row"
+            "messageEquals": "grok runs the pattern against every input row from text field \"email\", even when it finds no match.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
           },
           "backends": {
             "standard": {
@@ -84,7 +96,13 @@
         },
         "plain-field-control": {
           "frontend": {
-            "count": 0
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
           },
           "backends": {
             "standard": {

@@ -3,7 +3,7 @@
   "ruleId": "command-suggestion",
   "channel": "syntax",
   "grammarSurface": "runtime-bundle",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "code": "UNKNOWN_COMMAND"
   },
@@ -47,8 +47,9 @@
             "count": 1,
             "code": "UNKNOWN_COMMAND",
             "fixText": "where",
-            "matchMessage": "where",
-            "rawMessage": true
+            "matchMessage": "Unknown command \"wherre\". Did you mean \"where\"?",
+            "rawMessage": true,
+            "totalErrors": 1
           },
           "backends": {
             "standard": {
@@ -71,6 +72,8 @@
           "frontend": {
             "count": 0,
             "code": "UNKNOWN_COMMAND",
+            "fixText": null,
+            "rawMessage": false,
             "totalErrors": 0
           },
           "backends": {
@@ -94,6 +97,8 @@
           "frontend": {
             "count": 0,
             "code": "UNKNOWN_COMMAND",
+            "fixText": null,
+            "rawMessage": false,
             "totalErrors": 1
           },
           "backends": {
@@ -117,6 +122,8 @@
           "frontend": {
             "count": 0,
             "code": "UNKNOWN_COMMAND",
+            "fixText": null,
+            "rawMessage": false,
             "totalErrors": 1
           },
           "backends": {

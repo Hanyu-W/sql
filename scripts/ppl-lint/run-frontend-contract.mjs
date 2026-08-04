@@ -77,10 +77,12 @@
 import fs from 'fs';
 import path from 'path';
 import { createRequire } from 'module';
+import { fileURLToPath } from 'url';
 
 import {
   assertContractSchema,
   assertExactQueryCoverage,
+  assertShippingFrontendOracles,
   classifyBackendReportRow,
   contractChannel,
   indexBackendReport,
@@ -105,6 +107,8 @@ const CATALOG_MODULE = 'packages/osd-monaco/ppl-lint';
 // supports older checkouts (that is the coverage it adds), so fall back to the
 // source module, which `setup_node_env` transpiles on require anyway.
 const CATALOG_SOURCE_MODULE = 'packages/osd-monaco/src/ppl/lint/catalog';
+const ACTION_DECISION_MODULE =
+  'packages/osd-monaco/src/ppl/lint/action_decision';
 const DETECTOR_REGISTRY_MODULE = 'packages/osd-monaco/target/ppl/lint/detector_registry.js';
 
 /**
@@ -169,6 +173,54 @@ function loadContractFile(file) {
   return undefined; // unreachable
 }
 
+export function assertActiveShippingContracts(contracts, { discovery = false } = {}) {
+  if (discovery) {
+    return;
+  }
+  for (const { file, spec } of contracts) {
+    for (const expectation of spec.expectations) {
+      try {
+        assertShippingFrontendOracles(spec, expectation);
+      } catch (error) {
+        throw new Error(`Invalid active shipping contract ${file}: ${error.message}`);
+      }
+    }
+  }
+}
+
+export function selectManifestContractNames(manifest, includeDormant = false) {
+  if (!Array.isArray(manifest.contracts)) {
+    throw new TypeError('manifest.json must have a "contracts" array of file names.');
+  }
+  if (new Set(manifest.contracts).size !== manifest.contracts.length) {
+    throw new Error('manifest.json "contracts" contains duplicate file names.');
+  }
+  const active = manifest.contracts.map((name) => ({ name, reportOnly: false }));
+  if (!includeDormant) {
+    return active;
+  }
+  if (!Array.isArray(manifest.dormantContracts)) {
+    throw new TypeError(
+      'PPL_LINT_INCLUDE_DORMANT=1 requires manifest.json "dormantContracts" to be an array.'
+    );
+  }
+  if (new Set(manifest.dormantContracts).size !== manifest.dormantContracts.length) {
+    throw new Error('manifest.json "dormantContracts" contains duplicate file names.');
+  }
+  const activeNames = new Set(manifest.contracts);
+  for (const name of manifest.dormantContracts) {
+    if (activeNames.has(name)) {
+      throw new Error(
+        `manifest.json contract "${name}" cannot be both active and dormant.`
+      );
+    }
+  }
+  return [
+    ...active,
+    ...manifest.dormantContracts.map((name) => ({ name, reportOnly: true })),
+  ];
+}
+
 /** Load every *.spec.json under the contract dir, honoring manifest.json if present. */
 function loadContracts() {
   const dir = process.env.PPL_LINT_CONTRACT_DIR;
@@ -179,8 +231,16 @@ function loadContracts() {
       fatal(`Contract file not found: ${single}`);
     }
     const contract = loadContractFile(single);
+    try {
+      assertActiveShippingContracts([contract], {
+        discovery: process.env.PPL_LINT_DISCOVERY === '1',
+      });
+    } catch (error) {
+      fatal(error.message);
+    }
     return {
-      contracts: [contract],
+      contracts: [{ ...contract, reportOnly: false }],
+      activeContracts: [contract],
       manifest: { contracts: [path.basename(single)] },
       manifestPath: '',
     };
@@ -195,6 +255,7 @@ function loadContracts() {
 
   const manifestPath = path.join(dir, 'manifest.json');
   let files;
+  let selectedFiles;
   let manifest;
   if (fs.existsSync(manifestPath)) {
     try {
@@ -202,28 +263,69 @@ function loadContracts() {
     } catch (error) {
       fatal(`Invalid contract manifest ${manifestPath}: ${error.message}`);
     }
-    if (!Array.isArray(manifest.contracts)) {
-      fatal(`manifest.json must have a "contracts" array of file names.`);
+    try {
+      selectedFiles = selectManifestContractNames(
+        manifest,
+        process.env.PPL_LINT_INCLUDE_DORMANT === '1'
+      );
+    } catch (error) {
+      fatal(error.message);
     }
-    if (new Set(manifest.contracts).size !== manifest.contracts.length) {
-      fatal(`manifest.json "contracts" contains duplicate file names.`);
-    }
-    files = manifest.contracts.map((name) => path.join(dir, name));
+    files = selectedFiles.map(({ name }) => path.join(dir, name));
   } else {
     files = fs
       .readdirSync(dir)
       .filter((f) => f.endsWith('.spec.json'))
       .sort()
       .map((f) => path.join(dir, f));
+    selectedFiles = files.map((file) => ({
+      name: path.basename(file),
+      reportOnly: false,
+    }));
   }
 
-  const contracts = files.map((file) => {
+  const contracts = files.map((file, index) => {
     if (!fs.existsSync(file)) {
       fatal(`Contract referenced by manifest not found: ${file}`);
     }
-    return loadContractFile(file);
+    return {
+      ...loadContractFile(file),
+      reportOnly: selectedFiles[index].reportOnly,
+    };
   });
-  return { contracts, manifest: manifest || { contracts: files.map(path.basename) }, manifestPath };
+  const activeContracts = contracts
+    .filter(({ reportOnly }) => !reportOnly)
+    .map(({ file, spec }) => ({ file, spec }));
+  try {
+    assertActiveShippingContracts(activeContracts, {
+      discovery: process.env.PPL_LINT_DISCOVERY === '1',
+    });
+  } catch (error) {
+    fatal(error.message);
+  }
+  return {
+    contracts,
+    activeContracts,
+    manifest: manifest || { contracts: files.map(path.basename) },
+    manifestPath,
+  };
+}
+
+function resolveActionDecision(module) {
+  if (!module) {
+    return undefined;
+  }
+  for (const name of [
+    'decidePPLLintAction',
+    'decidePPLDiagnosticAction',
+    'getPPLDiagnosticActionDecision',
+    'decideDiagnosticAction',
+  ]) {
+    if (typeof module[name] === 'function') {
+      return module[name];
+    }
+  }
+  return undefined;
 }
 
 function loadOsd() {
@@ -260,6 +362,7 @@ function loadOsd() {
   // so a checkout without the built export can still run the compiled surface.
   const catalogModule =
     resolveOsd(CATALOG_MODULE, { optional: true }) || resolveOsd(CATALOG_SOURCE_MODULE);
+  const actionDecisionModule = resolveOsd(ACTION_DECISION_MODULE, { optional: true });
   const { getBundledCatalog } = catalogModule;
   const registry = resolveOsd(DETECTOR_REGISTRY_MODULE, { optional: true });
   if (typeof getBundledCatalog !== 'function') {
@@ -276,6 +379,7 @@ function loadOsd() {
       fatal(`PPLLanguageAnalyzer not found in ${ANALYZER_MODULE}.`);
     }
     const analyzer = new PPLLanguageAnalyzer();
+    const headless = resolveOsd(HEADLESS_MODULE, { optional: true });
     return {
       surface: SURFACE,
       // Same (query, grammar, context) shape as the bundle path so the main loop
@@ -286,6 +390,10 @@ function loadOsd() {
       },
       getBundledCatalog,
       getDetector,
+      decideAction:
+        resolveActionDecision(headless) ||
+        resolveActionDecision(catalogModule) ||
+        resolveActionDecision(actionDecisionModule),
       osdRoot,
     };
   }
@@ -310,6 +418,10 @@ function loadOsd() {
     deserializeBundleOrThrow,
     lintQuery: lintQueryWithBundle,
     validateSyntax,
+    decideAction:
+      resolveActionDecision(headless) ||
+      resolveActionDecision(catalogModule) ||
+      resolveActionDecision(actionDecisionModule),
     getBundledCatalog,
     getDetector,
     osdRoot,
@@ -486,6 +598,9 @@ function selectExpectation(spec, version, isCalcite, failures, { allowMissing = 
 function checkWiring(spec, catalog, getDetector, failures) {
   const { ruleId, wiring } = spec;
   if (contractChannel(spec) === 'syntax') {
+    if (!wiring) {
+      failures.push(`[${ruleId}] contract.wiring is required for strict syntax wiring.`);
+    }
     return { id: ruleId, syntaxCode: wiring && wiring.code };
   }
   const entry = catalog.find((c) => c.id === ruleId);
@@ -494,7 +609,8 @@ function checkWiring(spec, catalog, getDetector, failures) {
     return undefined;
   }
   if (!wiring) {
-    return entry; // no wiring block to assert
+    failures.push(`[${ruleId}] contract.wiring is required for strict catalog comparison.`);
+    return entry;
   }
 
   let expected;
@@ -564,11 +680,300 @@ function buildContext(spec, engineVersion) {
   return context;
 }
 
+function rangeOffsets(query, range) {
+  const lineStarts = [0];
+  for (let index = 0; index < query.length; index += 1) {
+    if (query[index] === '\n') {
+      lineStarts.push(index + 1);
+    }
+  }
+  const offset = (line, column) => {
+    const lineStart = lineStarts[line - 1];
+    if (lineStart === undefined) {
+      throw new Error(`range line ${line} is outside a ${lineStarts.length}-line query`);
+    }
+    const lineEnd = lineStarts[line] === undefined ? query.length : lineStarts[line] - 1;
+    if (lineStart + column > lineEnd) {
+      throw new Error(`range column ${column} is outside query line ${line}`);
+    }
+    return lineStart + column;
+  };
+  return {
+    start: offset(range.startLine, range.startColumn),
+    end: offset(range.endLine, range.endColumn),
+  };
+}
+
+function materializeDeterministicFix(query, diagnostic) {
+  if (!diagnostic.fix) {
+    return undefined;
+  }
+  const range = diagnostic.fix.range || diagnostic.range;
+  const { start, end } = rangeOffsets(query, range);
+  const sourceText = query.slice(start, end);
+  const expectedTextMatchesSource =
+    diagnostic.fix.expectedText === undefined ||
+    diagnostic.fix.expectedText === sourceText;
+  return {
+    offered: true,
+    title: diagnostic.fix.title,
+    text: diagnostic.fix.text,
+    range: {
+      startLine: range.startLine,
+      startColumn: range.startColumn,
+      endLine: range.endLine,
+      endColumn: range.endColumn,
+    },
+    ...(diagnostic.fix.expectedText !== undefined
+      ? { expectedText: diagnostic.fix.expectedText }
+      : {}),
+    ...(!expectedTextMatchesSource
+      ? { expectedTextMatchesSource: false }
+      : {}),
+    appliedQuery: query.slice(0, start) + diagnostic.fix.text + query.slice(end),
+  };
+}
+
+function normalizeActionDecision(decision) {
+  if (typeof decision === 'string') {
+    return { kind: decision };
+  }
+  if (!decision || typeof decision !== 'object' || Array.isArray(decision)) {
+    return { kind: 'invalid', value: decision };
+  }
+  return {
+    kind: decision.kind || decision.type || decision.action,
+    commandId: decision.commandId || (decision.command && decision.command.id),
+  };
+}
+
+function exactEqual(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+export function evaluateFrontendAssertions({
+  channel,
+  query,
+  matches,
+  allFrontendFindings = matches,
+  frontendOracle,
+  decideAction,
+}) {
+  const assertions = {};
+  const mismatches = [];
+  const record = (field, matched, expected, actual) => {
+    assertions[field] = matched;
+    if (!matched) {
+      mismatches.push({ field, expected, actual });
+    }
+    return matched;
+  };
+
+  const severityMatched =
+    channel === 'syntax' ||
+    !frontendOracle.severity ||
+    matches.length === 0 ||
+    matches.every((finding) => finding.severity === frontendOracle.severity);
+  if (channel === 'lint' && frontendOracle.severity !== undefined) {
+    record(
+      'severity',
+      severityMatched,
+      frontendOracle.severity,
+      matches.map((finding) => finding.severity)
+    );
+  }
+
+  let messageMatched = true;
+  if (frontendOracle.matchMessage !== undefined) {
+    messageMatched = matches.some((finding) =>
+      String(finding.message || '').includes(frontendOracle.matchMessage)
+    );
+    record(
+      'message',
+      messageMatched,
+      { contains: frontendOracle.matchMessage },
+      matches.map((finding) => finding.message)
+    );
+  } else if (frontendOracle.messageEquals !== undefined) {
+    messageMatched =
+      matches.length > 0 &&
+      matches.every((finding) => finding.message === frontendOracle.messageEquals);
+    record(
+      'message',
+      messageMatched,
+      { equals: frontendOracle.messageEquals },
+      matches.map((finding) => finding.message)
+    );
+  }
+
+  let deterministicFixMatched = true;
+  let deterministicFixActual;
+  if (frontendOracle.deterministicFix !== undefined) {
+    const fixes = matches
+      .map((diagnostic) => materializeDeterministicFix(query, diagnostic))
+      .filter(Boolean);
+    deterministicFixActual =
+      fixes.length === 0
+        ? { offered: false }
+        : fixes.length === 1
+          ? fixes[0]
+          : { offered: true, count: fixes.length, fixes };
+    deterministicFixMatched = record(
+      'deterministicFix',
+      exactEqual(frontendOracle.deterministicFix, deterministicFixActual),
+      frontendOracle.deterministicFix,
+      deterministicFixActual
+    );
+  }
+
+  let aiActionMatched = true;
+  let aiActionActual;
+  let actionDecisionMatched = true;
+  let actionDecisionActual;
+  if (frontendOracle.aiAction !== undefined) {
+    let decisions = [];
+    if (typeof decideAction !== 'function') {
+      aiActionActual = {
+        unavailable: true,
+        reason: 'production headless action-decision export is unavailable',
+      };
+      actionDecisionActual = aiActionActual;
+    } else {
+      try {
+        for (const diagnostic of matches) {
+          decisions.push(
+            normalizeActionDecision(
+              decideAction({
+                channel,
+                diagnostic,
+                hasDeterministicFix: !!diagnostic.fix,
+                aiFixEligible: diagnostic.aiFix?.eligible !== false,
+                enableAIFeatures: true,
+                hasAiFixHandler: true,
+                chatWired: true,
+                aiAgentAvailableForSource: true,
+              })
+            )
+          );
+        }
+      } catch (error) {
+        aiActionActual = {
+          error:
+            `production action decision failed: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        };
+        actionDecisionActual = aiActionActual;
+      }
+      const invalidDecision = decisions.find(
+        (decision) => !['deterministic', 'ai', 'none'].includes(decision.kind)
+      );
+      if (aiActionActual === undefined && invalidDecision) {
+        aiActionActual = { invalidDecision };
+      }
+      if (aiActionActual === undefined) {
+        const actions = decisions
+          .filter((decision) => decision.kind === 'ai')
+          .map((decision) => ({
+            offered: true,
+            ...(decision.commandId !== undefined
+              ? { commandId: decision.commandId }
+              : {}),
+          }));
+        aiActionActual =
+          actions.length === 0
+            ? { offered: false }
+            : actions.length === 1
+              ? actions[0]
+              : { offered: true, count: actions.length, actions };
+      }
+      if (actionDecisionActual === undefined) {
+        actionDecisionActual = decisions.map((decision) => decision.kind);
+      }
+    }
+    aiActionMatched = record(
+      'aiAction',
+      exactEqual(frontendOracle.aiAction, aiActionActual),
+      frontendOracle.aiAction,
+      aiActionActual
+    );
+    const expectedDecisionKind = frontendOracle.deterministicFix?.offered
+      ? 'deterministic'
+      : frontendOracle.aiAction.offered
+        ? 'ai'
+        : 'none';
+    const expectedDecisions = matches.map(() => expectedDecisionKind);
+    actionDecisionMatched = record(
+      'actionDecision',
+      exactEqual(expectedDecisions, actionDecisionActual),
+      expectedDecisions,
+      actionDecisionActual
+    );
+  }
+
+  let syntaxFixMatched = true;
+  if (channel === 'syntax' && frontendOracle.fixText !== undefined) {
+    const fixes = allFrontendFindings
+      .filter((finding) => finding.fix)
+      .map((finding) => finding.fix.text);
+    const expected =
+      frontendOracle.fixText === null
+        ? { offered: false }
+        : { offered: true, text: frontendOracle.fixText };
+    const actual =
+      fixes.length === 0
+        ? { offered: false }
+        : fixes.length === 1
+          ? { offered: true, text: fixes[0] }
+          : { offered: true, count: fixes.length, texts: fixes };
+    syntaxFixMatched = record('syntaxFix', exactEqual(expected, actual), expected, actual);
+  }
+
+  let rawMessageMatched = true;
+  if (channel === 'syntax' && frontendOracle.rawMessage !== undefined) {
+    const rawMessages = allFrontendFindings
+      .map((finding) => finding.rawMessage)
+      .filter((message) => typeof message === 'string' && message.length > 0);
+    const actual = rawMessages.length > 0;
+    rawMessageMatched = record(
+      'rawParserError',
+      actual === frontendOracle.rawMessage,
+      frontendOracle.rawMessage,
+      actual
+    );
+  }
+
+  let totalErrorsMatched = true;
+  if (channel === 'syntax' && frontendOracle.totalErrors !== undefined) {
+    totalErrorsMatched = record(
+      'totalErrors',
+      allFrontendFindings.length === frontendOracle.totalErrors,
+      frontendOracle.totalErrors,
+      allFrontendFindings.length
+    );
+  }
+
+  return {
+    assertions,
+    mismatches,
+    severityMatched,
+    messageMatched,
+    deterministicFixMatched,
+    deterministicFixActual,
+    aiActionMatched,
+    aiActionActual,
+    actionDecisionMatched,
+    actionDecisionActual,
+    syntaxFixMatched,
+    rawMessageMatched,
+    totalErrorsMatched,
+  };
+}
+
 function equalSets(left, right) {
   return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
-function buildCensus(contracts, manifest, catalog) {
+export function buildCensus(contracts, manifest, catalog) {
   const problems = [];
   const byFile = new Map(
     contracts.map(({ file, spec }) => [path.basename(file), spec])
@@ -610,6 +1015,27 @@ function buildCensus(contracts, manifest, catalog) {
     .filter(({ spec }) => contractChannel(spec) === 'syntax')
     .map(({ spec }) => spec.ruleId)
     .sort();
+  const catalogRuleIds = catalog.map((rule) => rule.id).sort();
+  const duplicateCatalogRuleIds = catalogRuleIds.filter(
+    (ruleId, index) => catalogRuleIds.indexOf(ruleId) !== index
+  );
+  if (duplicateCatalogRuleIds.length > 0) {
+    problems.push(
+      `catalog contains duplicate rule IDs: ${[
+        ...new Set(duplicateCatalogRuleIds),
+      ].join(', ')}.`
+    );
+  }
+  const syntaxRulesInCatalog = activeSyntaxRules.filter((ruleId) =>
+    catalogRuleIds.includes(ruleId)
+  );
+  if (syntaxRulesInCatalog.length > 0) {
+    problems.push(
+      `syntax features must remain outside the detector catalog: ${syntaxRulesInCatalog.join(
+        ', '
+      )}.`
+    );
+  }
   const enabledRules = catalog
     .filter((rule) => rule.enabled)
     .map((rule) => rule.id)
@@ -627,6 +1053,12 @@ function buildCensus(contracts, manifest, catalog) {
   if (requiredSyntaxFeatures.length !== 1) {
     problems.push(
       `expected one required syntax feature, found ${requiredSyntaxFeatures.length}.`
+    );
+  }
+  if (!equalSets(new Set(requiredSyntaxFeatures), new Set(['command-suggestion']))) {
+    problems.push(
+      `required syntax features must equal ["command-suggestion"], found ` +
+        `${JSON.stringify(requiredSyntaxFeatures)}.`
     );
   }
   if (activeContractRules.length !== 13) {
@@ -669,7 +1101,7 @@ function main() {
   const reportPath = process.env.PPL_LINT_REPORT;
   const target = loadTarget();
   const backendReport = loadBackendReport(target);
-  const { contracts, manifest, manifestPath } = loadContracts();
+  const { contracts, activeContracts, manifest, manifestPath } = loadContracts();
 
   const osd = loadOsd();
   const {
@@ -677,11 +1109,12 @@ function main() {
     getDetector,
     lintQuery,
     validateSyntax,
+    decideAction,
     osdRoot,
     surface,
   } = osd;
   const catalog = getBundledCatalog();
-  const census = buildCensus(contracts, manifest, catalog);
+  const census = buildCensus(activeContracts, manifest, catalog);
 
   // The compiled surface lints with OSD's own checked-in grammar, so there is no
   // candidate bundle to load. On the runtime surface a missing bundle stays a hard
@@ -698,6 +1131,7 @@ function main() {
   }
 
   const failures = [];
+  const reportOnlyFailures = [];
   // Contracts this surface did not score, recorded so the report says a rule was
   // skipped for surface rather than leaving its absence unexplained.
   const skippedForSurface = [];
@@ -719,6 +1153,8 @@ function main() {
     observeAnalytics,
     observeOnly,
     differential: !!backendReport,
+    includedDormant: process.env.PPL_LINT_INCLUDE_DORMANT === '1',
+    reportOnlyFailures,
     // Census of the rules that ship enabled at ERROR severity, read from the OSD
     // catalog this run linted with. The multi-version aggregator enforces its
     // `defaultError` manifest set against this list, so a rule that becomes
@@ -755,18 +1191,19 @@ function main() {
       `contracts=${contracts.length}`
   );
 
-  for (const { file, spec } of contracts) {
+  for (const { file, spec, reportOnly = false } of contracts) {
     const ruleId = spec.ruleId;
     const index = spec.index;
     const channel = contractChannel(spec);
-    const entry = checkWiring(spec, catalog, getDetector, failures);
+    const scoringFailures = reportOnly ? reportOnlyFailures : failures;
+    const entry = checkWiring(spec, catalog, getDetector, scoringFailures);
     if (!entry) {
       continue;
     }
 
     // A contract runs on PR only when scheduled for PR; nightly runs everything.
     const contractSchedule = spec.schedule || 'pr';
-    if (schedule === 'pr' && contractSchedule !== 'pr') {
+    if (!reportOnly && schedule === 'pr' && contractSchedule !== 'pr') {
       log(`SKIP ${ruleId} (schedule=${contractSchedule}, running ${schedule}) — ${path.basename(file)}`);
       continue;
     }
@@ -796,6 +1233,7 @@ function main() {
           query: (queryDef.query || '').split('{{index}}').join(index),
           surface,
           executionBackend,
+          ...(reportOnly ? { reportOnly: true } : {}),
           outcome: 'not-applicable',
           notApplicable: `contract declares grammarSurface "${contractSurface}"`,
         });
@@ -804,7 +1242,7 @@ function main() {
     }
 
     const context = buildContext(spec, engineVersion);
-    const expectation = selectExpectation(spec, engineVersion, context.isCalcite, failures, {
+    const expectation = selectExpectation(spec, engineVersion, context.isCalcite, scoringFailures, {
       allowMissing: observeOnly,
     });
     if (!expectation) {
@@ -823,6 +1261,7 @@ function main() {
             query,
             surface,
             executionBackend,
+            ...(reportOnly ? { reportOnly: true } : {}),
             outcome: 'not-applicable',
             notApplicable: 'runtimeOnly rule does not run on the compiled-simplified surface',
           });
@@ -850,6 +1289,7 @@ function main() {
           query,
           surface,
           executionBackend,
+          ...(reportOnly ? { reportOnly: true } : {}),
           expected: 0,
           actual: matches.length,
           severities: matches.map((m) => m.severity),
@@ -882,8 +1322,6 @@ function main() {
       }
       const frontendOracle = oracleSelection.frontend;
       const expectedCount = frontendOracle.count;
-      const expectedSeverity = frontendOracle.severity;
-      const expectedMessage = frontendOracle.matchMessage;
 
       // A `runtimeOnly` rule walks grammar productions that exist only in the
       // runtime bundle, so `lint_runner` skips it on the compiled surface. Its
@@ -904,6 +1342,7 @@ function main() {
           query,
           surface,
           executionBackend,
+          ...(reportOnly ? { reportOnly: true } : {}),
           outcome: 'not-applicable',
           notApplicable: 'runtimeOnly rule does not run on the compiled-simplified surface',
         });
@@ -934,30 +1373,27 @@ function main() {
           `expected ${expectedCount}, got ${actual} — ${query}`
       );
 
-      const severityOk =
-        channel === 'syntax' ||
-        !expectedSeverity ||
-        actual === 0 ||
-        matches.every((m) => m.severity === expectedSeverity);
-      const messageOk =
-        !expectedMessage ||
-        matches.some((m) => (m.message || '').includes(expectedMessage));
-      const fixOk =
-        channel !== 'syntax' ||
-        frontendOracle.fixText === undefined ||
-        matches.some((m) => m.fix && m.fix.text === frontendOracle.fixText);
-      const rawMessageOk =
-        channel !== 'syntax' ||
-        frontendOracle.rawMessage === undefined ||
-        matches.some((m) =>
-          frontendOracle.rawMessage
-            ? typeof m.rawMessage === 'string' && m.rawMessage.length > 0
-            : m.rawMessage === undefined
-        );
-      const totalErrorsOk =
-        channel !== 'syntax' ||
-        frontendOracle.totalErrors === undefined ||
-        allFrontendFindings.length === frontendOracle.totalErrors;
+      const evaluated = evaluateFrontendAssertions({
+        channel,
+        query,
+        matches,
+        allFrontendFindings,
+        frontendOracle,
+        decideAction,
+      });
+      const assertions = { count: ok, ...evaluated.assertions };
+      const mismatches = [
+        ...(ok
+          ? []
+          : [
+              {
+                field: 'count',
+                expected: expectedCount,
+                actual,
+              },
+            ]),
+        ...evaluated.mismatches,
+      ];
 
       const resultEntry = {
         ruleId,
@@ -968,11 +1404,25 @@ function main() {
         expected: expectedCount,
         actual,
         severities: matches.map((m) => m.severity).filter(Boolean),
-        severityMatched: severityOk,
-        messageMatched: messageOk,
-        fixMatched: fixOk,
-        rawMessageMatched: rawMessageOk,
-        totalErrorsMatched: totalErrorsOk,
+        severityMatched: evaluated.severityMatched,
+        messageMatched: evaluated.messageMatched,
+        deterministicFixMatched: evaluated.deterministicFixMatched,
+        aiActionMatched: evaluated.aiActionMatched,
+        actionDecisionMatched: evaluated.actionDecisionMatched,
+        fixMatched: evaluated.syntaxFixMatched,
+        rawMessageMatched: evaluated.rawMessageMatched,
+        totalErrorsMatched: evaluated.totalErrorsMatched,
+        assertions,
+        mismatches,
+        ...(evaluated.deterministicFixActual !== undefined
+          ? { deterministicFix: evaluated.deterministicFixActual }
+          : {}),
+        ...(evaluated.aiActionActual !== undefined
+          ? { aiAction: evaluated.aiActionActual }
+          : {}),
+        ...(evaluated.actionDecisionActual !== undefined
+          ? { actionDecision: evaluated.actionDecisionActual }
+          : {}),
         ...(channel === 'syntax'
           ? {
               code: frontendOracle.code,
@@ -980,39 +1430,16 @@ function main() {
               totalErrors: allFrontendFindings.length,
             }
           : {}),
+        ...(reportOnly ? { reportOnly: true } : {}),
         executionBackend,
         backendOracleStatus: oracleSelection.status,
       };
 
-      if (!ok) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected ${expectedCount} "${ruleId}" diagnostic(s), got ${actual} for: ${query}`
-        );
-      }
-      if (!severityOk) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected severity "${expectedSeverity}" for: ${query}`
-        );
-      }
-      if (!messageOk) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected message to contain "${expectedMessage}" for: ${query}`
-        );
-      }
-      if (!fixOk) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected fix text "${frontendOracle.fixText}" for: ${query}`
-        );
-      }
-      if (!rawMessageOk) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected rawMessage=${frontendOracle.rawMessage} for: ${query}`
-        );
-      }
-      if (!totalErrorsOk) {
-        failures.push(
-          `[${ruleId}/${queryName}] expected ${frontendOracle.totalErrors} total syntax error(s), ` +
-            `got ${allFrontendFindings.length} for: ${query}`
+      for (const mismatch of mismatches) {
+        scoringFailures.push(
+          `[${ruleId}/${queryName}] frontend.${mismatch.field} mismatch: ` +
+            `expected ${JSON.stringify(mismatch.expected)}, got ` +
+            `${JSON.stringify(mismatch.actual)} for: ${query}`
         );
       }
 
@@ -1026,7 +1453,7 @@ function main() {
         resultEntry.reason = oracleSelection.reason;
         resultEntry.coverageMissing = oracleSelection.reason;
         if (!observeAnalytics) {
-          failures.push(
+          scoringFailures.push(
             `[${ruleId}/${queryName}] ${executionBackend} backend coverage missing: ${oracleSelection.reason}.`
           );
         }
@@ -1041,7 +1468,9 @@ function main() {
       if (backendReport) {
         const be = backendReport.get(`${ruleId}::${queryName}`);
         if (!be) {
-          failures.push(`[${ruleId}/${queryName}] no backend report entry (backend did not run this query).`);
+          scoringFailures.push(
+            `[${ruleId}/${queryName}] no backend report entry (backend did not run this query).`
+          );
         } else {
           const backendObservation = classifyBackendReportRow(be);
           if (oracleSelection.status !== 'applicable') {
@@ -1051,7 +1480,7 @@ function main() {
             resultEntry.backendOutcome = backendObservation.status;
           } else if (backendObservation.status !== 'observed') {
             resultEntry.backendOutcome = backendObservation.status;
-            failures.push(
+            scoringFailures.push(
               `[${ruleId}/${queryName}] backend report has no accepted/rejected verdict ` +
                 `(outcome=${JSON.stringify(backendObservation.status)}).`
             );
@@ -1061,7 +1490,7 @@ function main() {
             const backendRejected = backendObservation.rejected;
             resultEntry.backendRejected = backendRejected;
             if (backendRejected !== expectRejected) {
-              failures.push(
+              scoringFailures.push(
                 `[${ruleId}/${queryName}] differential: backend ${backendRejected ? 'rejected' : 'accepted'} ` +
                   `but the contract's backend.kind="${backendKind}" expects ${expectRejected ? 'rejection' : 'acceptance'} for: ${query}`
               );
@@ -1090,7 +1519,7 @@ function main() {
             // the pairing rule is scoped to the rules it makes sense for.
             const detectorFlagged = actual > 0;
             if (role === 'trigger' && expectRejected && detectorFlagged !== backendRejected) {
-              failures.push(
+              scoringFailures.push(
                 `[${ruleId}/${queryName}] differential: trigger detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
                   `but backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
               );
@@ -1099,7 +1528,7 @@ function main() {
             // query the rule has to stay quiet on. Unlike a trigger, that claim does
             // not vary with `backend.kind`.
             if (role === 'control' && (detectorFlagged || backendRejected)) {
-              failures.push(
+              scoringFailures.push(
                 `[${ruleId}/${queryName}] differential: control must pass on both sides but detector ${detectorFlagged ? 'flagged' : 'passed'} ` +
                   `and backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
               );
@@ -1108,7 +1537,7 @@ function main() {
               role === 'suppression-control' &&
               (detectorFlagged || !backendRejected)
             ) {
-              failures.push(
+              scoringFailures.push(
                 `[${ruleId}/${queryName}] differential: suppression control must retain a backend ` +
                   `syntax rejection without a "${frontendOracle.code}" suggestion, but frontend ` +
                   `${detectorFlagged ? 'suggested a rewrite' : 'did not suggest a rewrite'} and ` +
@@ -1141,7 +1570,15 @@ function main() {
     process.exit(1);
   }
 
+  if (reportOnlyFailures.length > 0) {
+    log(
+      `REPORT-ONLY: ${reportOnlyFailures.length} dormant contract problem(s):\n- ` +
+        reportOnlyFailures.join('\n- ')
+    );
+  }
   log(`PASS: all contracts agreed with the OSD detectors on the candidate bundle (schedule=${schedule}).`);
 }
 
-main();
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main();
+}

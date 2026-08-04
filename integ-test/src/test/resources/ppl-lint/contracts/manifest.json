@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "description": "Active PPL frontend/backend compatibility corpus for the approved 12 detector rules plus the command-suggestion syntax feature. New contracts remain nightly until their runtime and analytics oracles are reviewed; census drift is report-only until the paired OSD default-alignment change lands.",
+  "description": "Required PPL frontend/backend compatibility corpus for the approved 12 detector rules plus the command-suggestion syntax feature.",
   "contracts": [
     "agg-on-text.spec.json",
     "command-suggestion.spec.json",
@@ -41,14 +41,6 @@
   "requiredSyntaxFeatures": [
     "command-suggestion.spec.json"
   ],
-  "pendingReview": [
-    "agg-on-text.spec.json",
-    "command-suggestion.spec.json",
-    "enabled-false-object.spec.json",
-    "rex-scan-cost.spec.json",
-    "type-mismatch-numeric.spec.json",
-    "wildcard-source-zero-match.spec.json"
-  ],
   "nonEnforcing": [
     "agg-on-text.spec.json",
     "division-by-zero.spec.json",
@@ -61,7 +53,6 @@
     "enforced": "Reviewed lint error contracts with deterministic backend behavior.",
     "defaultError": "Exact approved six-rule detector error census. command-suggestion is an error-channel feature but is intentionally excluded because it is not a detector.",
     "requiredSyntaxFeatures": "Syntax-channel features validated through the production runtime grammar listener.",
-    "pendingReview": "Nightly contracts whose standard and analytics observations must be reviewed before promotion to the required PR schedule.",
     "nonEnforcing": "Oracle-quality classification for warning, info, advisory, and result-shape contracts; scheduling determines execution, not this list.",
     "dormantContracts": "Preserved default-off detector regression contracts. They do not count toward active shipping coverage and must force-enable their detector when run."
   }

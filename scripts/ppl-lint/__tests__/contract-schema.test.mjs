@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import {
   assertContractSchema,
   assertExactQueryCoverage,
+  assertShippingFrontendOracles,
   classifyBackendReportRow,
   contractChannel,
   indexBackendReport,
@@ -508,8 +509,186 @@ test('missing channel remains a backwards-compatible lint contract', () => {
       channel: 'lint',
       count: 1,
       severity: 'warning',
-      matchMessage: undefined,
+      messageEquals: undefined,
+      deterministicFix: undefined,
+      aiAction: undefined,
     }
+  );
+});
+
+test('schema-v4 lint frontend normalizes exact message, fix, and AI action oracles', () => {
+  const contract = spec(4);
+  const frontend = normalizeFrontendOracle(contract, {
+    frontend: {
+      count: 1,
+      severity: 'warning',
+      messageEquals: 'Use a non-zero divisor.',
+      deterministicFix: {
+        offered: true,
+        title: 'Replace zero',
+        text: '1',
+        range: {
+          startLine: 1,
+          startColumn: 20,
+          endLine: 1,
+          endColumn: 21,
+        },
+        expectedText: '0',
+        appliedQuery: 'source=t | eval x = 1',
+      },
+      aiAction: { offered: false },
+    },
+  });
+
+  assert.deepEqual(frontend, {
+    channel: 'lint',
+    count: 1,
+    severity: 'warning',
+    messageEquals: 'Use a non-zero divisor.',
+    deterministicFix: {
+      offered: true,
+      title: 'Replace zero',
+      text: '1',
+      range: {
+        startLine: 1,
+        startColumn: 20,
+        endLine: 1,
+        endColumn: 21,
+      },
+      expectedText: '0',
+      appliedQuery: 'source=t | eval x = 1',
+    },
+    aiAction: { offered: false },
+  });
+});
+
+test('matchMessage remains available only to schema-v3 lint contracts', () => {
+  assert.equal(
+    normalizeFrontendOracle(spec(3), {
+      frontend: { count: 1, matchMessage: 'legacy substring' },
+    }).matchMessage,
+    'legacy substring'
+  );
+  assert.throws(
+    () =>
+      normalizeFrontendOracle(spec(4), {
+        frontend: { count: 1, matchMessage: 'not exact' },
+      }),
+    /matchMessage is not valid/
+  );
+});
+
+test('schema-v4 action payloads fail closed on partial or extra fields', () => {
+  const contract = spec(4);
+  for (const [frontend, expected] of [
+    [
+      { count: 1, deterministicFix: { offered: false, title: 'unexpected' } },
+      /must contain only offered/,
+    ],
+    [
+      {
+        count: 1,
+        deterministicFix: {
+          offered: true,
+          title: 'Fix',
+          text: 'x',
+          range: { startLine: 0, startColumn: 0, endLine: 1, endColumn: 1 },
+          appliedQuery: 'x',
+        },
+      },
+      /startLine must be a positive integer/,
+    ],
+    [
+      {
+        count: 1,
+        deterministicFix: {
+          offered: true,
+          title: 'Fix',
+          text: 'x',
+          range: { startLine: 1, startColumn: 0, endLine: 1, endColumn: 1 },
+          appliedQuery: 'x',
+        },
+      },
+      /expectedText must be a string/,
+    ],
+    [
+      {
+        count: 1,
+        deterministicFix: {
+          offered: true,
+          title: 'Fix',
+          text: 'x',
+          range: { startLine: 1, startColumn: 2, endLine: 1, endColumn: 1 },
+          expectedText: 'y',
+          appliedQuery: 'x',
+        },
+      },
+      /must end at or after its start/,
+    ],
+    [
+      { count: 1, aiAction: { offered: true } },
+      /commandId must be a non-empty string/,
+    ],
+    [
+      { count: 1, aiAction: { offered: false, commandId: 'ppl.lint.aiFix' } },
+      /must contain only offered/,
+    ],
+  ]) {
+    assert.throws(() => normalizeFrontendOracle(contract, { frontend }), expected);
+  }
+});
+
+test('active lint contracts require exact messages and explicit exclusive action modes', () => {
+  const contract = spec(4);
+  const expectation = structuredClone(contract.expectations[0]);
+  expectation.queries.trigger = {
+    frontend: {
+      count: 1,
+      severity: 'error',
+      messageEquals: 'Exact diagnostic.',
+      deterministicFix: { offered: false },
+      aiAction: { offered: true, commandId: 'ppl.lint.aiFix' },
+    },
+    backends: {
+      standard: { kind: 'rejection', httpStatus: 400, body: { status: 400 } },
+      analytics: { kind: 'rejection', httpStatus: 400, body: { status: 400 } },
+    },
+  };
+  expectation.queries.control.frontend = {
+    count: 0,
+    deterministicFix: { offered: false },
+    aiAction: { offered: false },
+  };
+  delete expectation.queries.control.detectorCount;
+
+  assert.doesNotThrow(() => assertShippingFrontendOracles(contract, expectation));
+
+  const missingMessage = structuredClone(expectation);
+  delete missingMessage.queries.trigger.frontend.messageEquals;
+  assert.throws(
+    () => assertShippingFrontendOracles(contract, missingMessage),
+    /messageEquals is required/
+  );
+
+  const missingSeverity = structuredClone(expectation);
+  delete missingSeverity.queries.trigger.frontend.severity;
+  assert.throws(
+    () => assertShippingFrontendOracles(contract, missingSeverity),
+    /severity is required/
+  );
+
+  const simultaneousActions = structuredClone(expectation);
+  simultaneousActions.queries.trigger.frontend.deterministicFix = {
+    offered: true,
+    title: 'Fix',
+    text: 'fixed',
+    range: { startLine: 1, startColumn: 0, endLine: 1, endColumn: 3 },
+    expectedText: 'bad',
+    appliedQuery: 'fixed',
+  };
+  assert.throws(
+    () => assertShippingFrontendOracles(contract, simultaneousActions),
+    /cannot offer deterministic and AI actions together/
   );
 });
 
@@ -543,6 +722,77 @@ test('syntax frontend assertions normalize stable code, fix, raw message, and er
     totalErrors: 1,
   });
   assert.equal(assertContractSchema(contract), 4);
+});
+
+test('active syntax contracts require explicit fix, raw-message, and total-error assertions', () => {
+  const contract = {
+    schemaVersion: 4,
+    ruleId: 'command-suggestion',
+    channel: 'syntax',
+    wiring: { code: 'UNKNOWN_COMMAND' },
+    queries: {
+      trigger: { role: 'trigger', query: 'source=t | wherre a > 1' },
+    },
+  };
+  const expectation = {
+    queries: {
+      trigger: {
+        frontend: {
+          count: 1,
+          code: 'UNKNOWN_COMMAND',
+          fixText: 'where',
+          matchMessage: 'Unknown command "wherre". Did you mean "where"?',
+          rawMessage: true,
+          totalErrors: 1,
+        },
+      },
+    },
+  };
+  assert.doesNotThrow(() => assertShippingFrontendOracles(contract, expectation));
+
+  delete expectation.queries.trigger.frontend.fixText;
+  assert.throws(
+    () => assertShippingFrontendOracles(contract, expectation),
+    /fixText must explicitly assert/
+  );
+});
+
+test('syntax supports explicit fix absence and requires frontend code to match wiring', () => {
+  const contract = {
+    schemaVersion: 4,
+    ruleId: 'command-suggestion',
+    channel: 'syntax',
+    wiring: { code: 'UNKNOWN_COMMAND' },
+    queries: {
+      suppressed: { role: 'suppression-control', query: 'source=t | zzzzzzzz' },
+    },
+  };
+  assert.deepEqual(
+    normalizeFrontendOracle(contract, {
+      frontend: {
+        count: 0,
+        code: 'UNKNOWN_COMMAND',
+        fixText: null,
+        rawMessage: true,
+        totalErrors: 1,
+      },
+    }),
+    {
+      channel: 'syntax',
+      count: 0,
+      code: 'UNKNOWN_COMMAND',
+      fixText: null,
+      rawMessage: true,
+      totalErrors: 1,
+    }
+  );
+  assert.throws(
+    () =>
+      normalizeFrontendOracle(contract, {
+        frontend: { count: 0, code: 'OTHER_ERROR' },
+      }),
+    /does not match contract\.wiring\.code/
+  );
 });
 
 test('lint and syntax frontend fields cannot cross channels', () => {

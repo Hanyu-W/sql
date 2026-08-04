@@ -266,6 +266,37 @@ function normalizeDetectorReport(detector, target) {
       if (typeof entry.messageMatched !== 'boolean') {
         throw new TypeError(`detector report row ${key}.messageMatched must be a boolean`);
       }
+      for (const field of [
+        'deterministicFixMatched',
+        'aiActionMatched',
+        'actionDecisionMatched',
+        'fixMatched',
+        'rawMessageMatched',
+        'totalErrorsMatched',
+      ]) {
+        if (entry[field] !== undefined && typeof entry[field] !== 'boolean') {
+          throw new TypeError(`detector report row ${key}.${field} must be a boolean`);
+        }
+      }
+      if (entry.assertions !== undefined) {
+        if (
+          !entry.assertions ||
+          typeof entry.assertions !== 'object' ||
+          Array.isArray(entry.assertions)
+        ) {
+          throw new TypeError(`detector report row ${key}.assertions must be a JSON object`);
+        }
+        for (const [field, matched] of Object.entries(entry.assertions)) {
+          if (typeof matched !== 'boolean') {
+            throw new TypeError(
+              `detector report row ${key}.assertions.${field} must be a boolean`
+            );
+          }
+        }
+      }
+      if (entry.mismatches !== undefined && !Array.isArray(entry.mismatches)) {
+        throw new TypeError(`detector report row ${key}.mismatches must be a JSON array`);
+      }
     }
     results.set(key, entry);
   }
@@ -578,6 +609,16 @@ function detectorParityValue(entry) {
       typeof entry.rawMessageMatched === 'boolean' ? entry.rawMessageMatched : undefined,
     totalErrorsMatched:
       typeof entry.totalErrorsMatched === 'boolean' ? entry.totalErrorsMatched : undefined,
+    deterministicFixMatched:
+      typeof entry.deterministicFixMatched === 'boolean'
+        ? entry.deterministicFixMatched
+        : undefined,
+    aiActionMatched:
+      typeof entry.aiActionMatched === 'boolean' ? entry.aiActionMatched : undefined,
+    assertions: entry.assertions,
+    mismatches: entry.mismatches,
+    deterministicFix: entry.deterministicFix,
+    aiAction: entry.aiAction,
     code: entry.code,
     codes: entry.codes,
     totalErrors: entry.totalErrors,
@@ -596,6 +637,9 @@ function assertDetectorParity(pair) {
   for (const key of keys) {
     const standardRow = standard.get(key);
     const analyticsRow = analytics.get(key);
+    if (standardRow?.reportOnly === true || analyticsRow?.reportOnly === true) {
+      continue;
+    }
     if (!standardRow || !analyticsRow) {
       fatal(
         `detector parity failed for ${key}: standard row=${!!standardRow}, ` +
@@ -852,8 +896,59 @@ function readBackendObservation(backendEntry, detectorResult) {
       backendMismatch: verdict.backendMismatch,
       severityMatched: detectorResult ? detectorResult.severityMatched : undefined,
       messageMatched: detectorResult ? detectorResult.messageMatched : undefined,
+      deterministicFixMatched: detectorResult
+        ? detectorResult.deterministicFixMatched
+        : undefined,
+      aiActionMatched: detectorResult ? detectorResult.aiActionMatched : undefined,
+      fixMatched: detectorResult ? detectorResult.fixMatched : undefined,
+      rawMessageMatched: detectorResult ? detectorResult.rawMessageMatched : undefined,
+      totalErrorsMatched: detectorResult
+        ? detectorResult.totalErrorsMatched
+        : undefined,
+      assertions: detectorResult ? detectorResult.assertions : undefined,
+      mismatches: detectorResult ? detectorResult.mismatches : undefined,
     },
   };
+}
+
+function failedExtendedFrontendAssertions(entry, frontendOracle) {
+  if (!entry) {
+    return [];
+  }
+  const failures = new Set();
+  for (const field of [
+    'deterministicFixMatched',
+    'aiActionMatched',
+    'fixMatched',
+    'rawMessageMatched',
+    'totalErrorsMatched',
+  ]) {
+    if (entry[field] === false) {
+      failures.add(field);
+    }
+  }
+  for (const [field, matched] of Object.entries(entry.assertions || {})) {
+    if (
+      matched === false &&
+      field !== 'count' &&
+      field !== 'severity' &&
+      (field !== 'message' || frontendOracle.messageEquals !== undefined)
+    ) {
+      failures.add(field);
+    }
+  }
+  for (const mismatch of entry.mismatches || []) {
+    const field = mismatch && mismatch.field;
+    if (
+      typeof field === 'string' &&
+      field !== 'count' &&
+      field !== 'severity' &&
+      (field !== 'message' || frontendOracle.messageEquals !== undefined)
+    ) {
+      failures.add(field);
+    }
+  }
+  return [...failures].sort();
 }
 
 /**
@@ -1036,12 +1131,16 @@ function main() {
   const missingContracts = auditDefaultErrorCensus(legs, specs, enforcedRules);
   const shippingCensus = auditShippingCensus(legs, specs, manifest);
   const blockCensusDrift = !shippingCensus.available || shippingCensus.enforced;
+  shippingCensus.blocking = blockCensusDrift;
+  const blockingShippingCensusProblems = blockCensusDrift
+    ? shippingCensus.problems
+    : [];
   for (const entry of missingContracts) {
     entry.blocking = blockCensusDrift;
   }
   if (!shippingCensus.passed) {
     for (const problem of shippingCensus.problems) {
-      log(`CENSUS REPORT-ONLY: ${problem}`);
+      log(`CENSUS ${blockCensusDrift ? 'ENFORCED' : 'REPORT-ONLY'}: ${problem}`);
     }
   }
 
@@ -1304,6 +1403,51 @@ function main() {
             reason: detectorResult.notApplicable,
           });
           ruleNotApplicable++;
+          continue;
+        }
+        const failedFrontendAssertions = failedExtendedFrontendAssertions(
+          detectorResult,
+          oracleSelection.frontend
+        );
+        if (failedFrontendAssertions.length > 0) {
+          addDrift(
+            {
+              ruleId,
+              version: leg.version,
+              driftVersion: leg.version,
+              queryName,
+              role,
+              query,
+              driftClass: 'frontend-contract-mismatch',
+              evidence:
+                `${ruleId} @ ${leg.version} [${queryName}]: frontend assertion(s) failed: ` +
+                failedFrontendAssertions.join(', '),
+              frontendAssertions: failedFrontendAssertions,
+              frontendMismatches: detectorResult.mismatches || [],
+              remediation: {
+                action: 'update-detector',
+                target:
+                  spec.detectorPath ||
+                  `packages/osd-monaco/src/ppl/lint/rules/${ruleId.replace(/-/g, '_')}.ts`,
+                detail:
+                  `Reproduce this contract query against the reported OSD commit and candidate ` +
+                  `grammar. Restore the exact message/action/fix behavior, or update the contract ` +
+                  `only after confirming an intentional product change.`,
+              },
+            },
+            leg,
+            {
+              enforced: isEnforced,
+              contractFile: file,
+              expectationRange: expectation.version,
+              expectationEngine: expectation.engine,
+            }
+          );
+          ruleDrifts++;
+          compared++;
+          if (role === 'trigger') {
+            triggersCompared++;
+          }
           continue;
         }
         const { observed, usable } = readBackendObservation(backendEntry, detectorResult);
@@ -1627,6 +1771,7 @@ function main() {
         coverageHoles.filter((h) => h.enforced && !h.blocking).length,
       missingContractCount: missingContracts.length,
       blockingMissingContractCount: blockingMissingContracts.length,
+      blockingShippingCensusProblems: blockingShippingCensusProblems.length,
       enforcedInconclusive: enforcedInconclusive.length,
       // An inconclusive default-error rule fails too: "we could not check" must
       // never render as "it is fine".
@@ -1634,6 +1779,7 @@ function main() {
         enforcedDrifts.length === 0 &&
         enforcedHoles.length === 0 &&
         blockingMissingContracts.length === 0 &&
+        blockingShippingCensusProblems.length === 0 &&
         enforcedInconclusive.length === 0,
     },
   };
@@ -1668,7 +1814,8 @@ function main() {
     console.error(
       `[ppl-lint-multiversion] FAIL: ${enforcedDrifts.length} drift(s), ` +
         `${enforcedHoles.length} coverage hole(s), ${blockingMissingContracts.length} unvalidated ` +
-        `default-error rule(s) and ${enforcedInconclusive.length} inconclusive rule/version pair(s).`
+        `default-error rule(s), ${blockingShippingCensusProblems.length} shipping census problem(s), ` +
+        `and ${enforcedInconclusive.length} inconclusive rule/version pair(s).`
     );
     process.exit(1);
   }
@@ -1701,6 +1848,11 @@ function renderMarkdown(report, drifts, coverageHoles, legs) {
   }
   if (report.result.missingContractCount) {
     reasons.push(`${report.result.missingContractCount} unvalidated rule(s)`);
+  }
+  if (report.result.blockingShippingCensusProblems) {
+    reasons.push(
+      `${report.result.blockingShippingCensusProblems} shipping census problem(s)`
+    );
   }
   lines.push(
     // Name the surface when a leg is not the default runtime-bundle one, so a
@@ -1781,6 +1933,18 @@ function renderMarkdown(report, drifts, coverageHoles, legs) {
           `integ-test/src/test/resources/ppl-lint/contracts/ with a trigger + control query and list ` +
           `it in manifest.json under \`defaultError\`. If the rule should not be default-error, lower ` +
           `its severity or disable it in packages/osd-monaco/src/ppl/lint/rules_catalog.json.`
+      );
+    }
+    lines.push('');
+  }
+
+  if (report.shippingCensus && !report.shippingCensus.passed) {
+    lines.push('### Shipping census');
+    lines.push('');
+    for (const problem of report.shippingCensus.problems || []) {
+      lines.push(
+        `- ${report.shippingCensus.blocking ? '**ENFORCED:**' : '**REPORT ONLY:**'} ${problem}. ` +
+          `Align \`manifest.json\` with the approved OSD shipping catalog.`
       );
     }
     lines.push('');
