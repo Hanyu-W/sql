@@ -173,6 +173,42 @@ test('detector severity and message mismatches fail the manifest and summary', (
   }
 });
 
+test('a detector execution error fails with its rule row instead of missing-artifact noise', () => {
+  const dir = makeRun();
+  validArtifacts(dir);
+  const file = path.join(dir, 'artifacts', 'detector-report.json');
+  const detector = JSON.parse(fs.readFileSync(file, 'utf8'));
+  detector.results[0] = {
+    ...detector.results[0],
+    expected: 0,
+    actual: 0,
+    assertions: { execution: false },
+    mismatches: [
+      {
+        field: 'execution',
+        expected: 'completed',
+        actual: 'detector crashed',
+      },
+    ],
+    outcome: 'error',
+    error: 'detector crashed',
+  };
+  detector.failures = [
+    '[advisory-rule/trigger] frontend.execution failed: detector crashed',
+  ];
+  fs.writeFileSync(file, JSON.stringify(detector));
+  const summary = path.join(dir, 'summary.md');
+
+  const result = run(dir, { GITHUB_STEP_SUMMARY: summary });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /advisory-rule::trigger execution failed: detector crashed/);
+  assert.doesNotMatch(result.stderr, /count mismatch/);
+  assert.doesNotMatch(result.stderr, /did not match its execution assertion/);
+  assert.doesNotMatch(result.stderr, /required artifact is missing/);
+  assert.doesNotMatch(result.stderr, /has no matching detector row/);
+  assert.match(fs.readFileSync(summary, 'utf8'), /advisory-rule.*Error.*Fail/);
+});
+
 test('syntax-specific frontend mismatches fail artifact validation', () => {
   for (const field of ['fixMatched', 'rawMessageMatched', 'totalErrorsMatched']) {
     const dir = makeRun();
@@ -191,19 +227,19 @@ test('syntax-specific frontend mismatches fail artifact validation', () => {
   }
 });
 
-test('exact deterministic and AI action mismatches fail artifacts and summary rows', () => {
-  for (const field of ['deterministicFixMatched', 'aiActionMatched']) {
+test('exact deterministic fix mismatches fail artifacts and summary rows', () => {
+  for (const field of ['deterministicFixMatched']) {
     const dir = makeRun();
     validArtifacts(dir);
     const file = path.join(dir, 'artifacts', 'detector-report.json');
     const detector = JSON.parse(fs.readFileSync(file, 'utf8'));
     detector.results[0][field] = false;
     detector.results[0].assertions = {
-      [field === 'deterministicFixMatched' ? 'deterministicFix' : 'aiAction']: false,
+      deterministicFix: false,
     };
     detector.results[0].mismatches = [
       {
-        field: field === 'deterministicFixMatched' ? 'deterministicFix' : 'aiAction',
+        field: 'deterministicFix',
         expected: { offered: false },
         actual: { offered: true },
       },
@@ -213,7 +249,7 @@ test('exact deterministic and AI action mismatches fail artifacts and summary ro
 
     const result = run(dir, { GITHUB_STEP_SUMMARY: summary });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /did not match its (deterministic-fix|AI-action) assertion/);
+    assert.match(result.stderr, /did not match its deterministic-fix assertion/);
     assert.match(fs.readFileSync(summary, 'utf8'), /advisory-rule.*accepted.*Fail/);
   }
 });

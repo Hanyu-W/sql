@@ -61,10 +61,6 @@
             "messageEquals": "Capture group name \"user_name\" is invalid. Start with a letter and use only letters and numbers.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -99,10 +95,6 @@
             "messageEquals": "Capture group name \"user-name\" is invalid. Start with a letter and use only letters and numbers.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -134,9 +126,6 @@
           "frontend": {
             "count": 0,
             "deterministicFix": {
-              "offered": false
-            },
-            "aiAction": {
               "offered": false
             }
           },
@@ -170,10 +159,6 @@
             "messageEquals": "Capture group name \"user_name\" is invalid. Start with a letter and use only letters and numbers.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -208,10 +193,6 @@
             "messageEquals": "Capture group name \"user-name\" is invalid. Start with a letter and use only letters and numbers.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -243,9 +224,6 @@
           "frontend": {
             "count": 0,
             "deterministicFix": {
-              "offered": false
-            },
-            "aiAction": {
               "offered": false
             }
           },

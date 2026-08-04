@@ -58,8 +58,6 @@ function failedFrontendAssertions(entry) {
   }
   for (const [field, label] of [
     ['deterministicFixMatched', 'deterministic-fix'],
-    ['aiActionMatched', 'AI-action'],
-    ['actionDecisionMatched', 'action-decision'],
     ['fixMatched', 'syntax-fix'],
     ['rawMessageMatched', 'raw-parser-error'],
     ['totalErrorsMatched', 'total-error'],
@@ -181,6 +179,14 @@ function main() {
     }
     if (!backendByKey.has(key)) {
       artifactErrors.push(`detector row ${key} has no matching backend row`);
+    }
+    if (entry.outcome === 'error') {
+      const message =
+        typeof entry.error === 'string' && entry.error.length > 0
+          ? entry.error
+          : 'unknown frontend execution error';
+      artifactErrors.push(`detector row ${key} execution failed: ${message}`);
+      continue;
     }
     if (!Number.isInteger(entry.expected) || !Number.isInteger(entry.actual)) {
       artifactErrors.push(`detector row ${key} must contain integer expected/actual counts`);
@@ -332,7 +338,12 @@ function writeSummary(manifest, detector, backend) {
 
   for (const r of detector.results || []) {
     const be = backendByKey.get(`${r.ruleId}::${r.queryName}`);
-    const detectorCell = `${r.actual}/${r.expected}${r.severities && r.severities.length ? ` (${r.severities.join(',')})` : ''}`;
+    const detectorCell =
+      r.outcome === 'error'
+        ? 'Error'
+        : `${r.actual}/${r.expected}${
+            r.severities && r.severities.length ? ` (${r.severities.join(',')})` : ''
+          }`;
     const backendCell = !be
       ? '—'
       : typeof be.rejected !== 'boolean'
@@ -343,7 +354,8 @@ function writeSummary(manifest, detector, backend) {
     const ok =
       r.reportOnly === true
         ? undefined
-        : r.actual === r.expected &&
+        : r.outcome !== 'error' &&
+          r.actual === r.expected &&
           failedFrontendAssertions(r).length === 0 &&
           !!be &&
           be.outcome === 'pass';

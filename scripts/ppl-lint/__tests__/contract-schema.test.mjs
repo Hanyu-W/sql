@@ -511,12 +511,11 @@ test('missing channel remains a backwards-compatible lint contract', () => {
       severity: 'warning',
       messageEquals: undefined,
       deterministicFix: undefined,
-      aiAction: undefined,
     }
   );
 });
 
-test('schema-v4 lint frontend normalizes exact message, fix, and AI action oracles', () => {
+test('schema-v4 lint frontend normalizes exact message and fix oracles', () => {
   const contract = spec(4);
   const frontend = normalizeFrontendOracle(contract, {
     frontend: {
@@ -536,7 +535,6 @@ test('schema-v4 lint frontend normalizes exact message, fix, and AI action oracl
         expectedText: '0',
         appliedQuery: 'source=t | eval x = 1',
       },
-      aiAction: { offered: false },
     },
   });
 
@@ -558,7 +556,6 @@ test('schema-v4 lint frontend normalizes exact message, fix, and AI action oracl
       expectedText: '0',
       appliedQuery: 'source=t | eval x = 1',
     },
-    aiAction: { offered: false },
   });
 });
 
@@ -578,7 +575,7 @@ test('matchMessage remains available only to schema-v3 lint contracts', () => {
   );
 });
 
-test('schema-v4 action payloads fail closed on partial or extra fields', () => {
+test('schema-v4 deterministic-fix payloads fail closed on partial or extra fields', () => {
   const contract = spec(4);
   for (const [frontend, expected] of [
     [
@@ -605,19 +602,6 @@ test('schema-v4 action payloads fail closed on partial or extra fields', () => {
           offered: true,
           title: 'Fix',
           text: 'x',
-          range: { startLine: 1, startColumn: 0, endLine: 1, endColumn: 1 },
-          appliedQuery: 'x',
-        },
-      },
-      /expectedText must be a string/,
-    ],
-    [
-      {
-        count: 1,
-        deterministicFix: {
-          offered: true,
-          title: 'Fix',
-          text: 'x',
           range: { startLine: 1, startColumn: 2, endLine: 1, endColumn: 1 },
           expectedText: 'y',
           appliedQuery: 'x',
@@ -625,20 +609,27 @@ test('schema-v4 action payloads fail closed on partial or extra fields', () => {
       },
       /must end at or after its start/,
     ],
-    [
-      { count: 1, aiAction: { offered: true } },
-      /commandId must be a non-empty string/,
-    ],
-    [
-      { count: 1, aiAction: { offered: false, commandId: 'ppl.lint.aiFix' } },
-      /must contain only offered/,
-    ],
   ]) {
     assert.throws(() => normalizeFrontendOracle(contract, { frontend }), expected);
   }
+
+  assert.doesNotThrow(() =>
+    normalizeFrontendOracle(contract, {
+      frontend: {
+        count: 1,
+        deterministicFix: {
+          offered: true,
+          title: 'Fix',
+          text: 'x',
+          range: { startLine: 1, startColumn: 0, endLine: 1, endColumn: 1 },
+          appliedQuery: 'x',
+        },
+      },
+    })
+  );
 });
 
-test('active lint contracts require exact messages and explicit exclusive action modes', () => {
+test('active lint contracts require exact messages and deterministic-fix behavior', () => {
   const contract = spec(4);
   const expectation = structuredClone(contract.expectations[0]);
   expectation.queries.trigger = {
@@ -647,7 +638,6 @@ test('active lint contracts require exact messages and explicit exclusive action
       severity: 'error',
       messageEquals: 'Exact diagnostic.',
       deterministicFix: { offered: false },
-      aiAction: { offered: true, commandId: 'ppl.lint.aiFix' },
     },
     backends: {
       standard: { kind: 'rejection', httpStatus: 400, body: { status: 400 } },
@@ -657,7 +647,6 @@ test('active lint contracts require exact messages and explicit exclusive action
   expectation.queries.control.frontend = {
     count: 0,
     deterministicFix: { offered: false },
-    aiAction: { offered: false },
   };
   delete expectation.queries.control.detectorCount;
 
@@ -677,8 +666,8 @@ test('active lint contracts require exact messages and explicit exclusive action
     /severity is required/
   );
 
-  const simultaneousActions = structuredClone(expectation);
-  simultaneousActions.queries.trigger.frontend.deterministicFix = {
+  const fixWithoutFinding = structuredClone(expectation);
+  fixWithoutFinding.queries.control.frontend.deterministicFix = {
     offered: true,
     title: 'Fix',
     text: 'fixed',
@@ -687,8 +676,8 @@ test('active lint contracts require exact messages and explicit exclusive action
     appliedQuery: 'fixed',
   };
   assert.throws(
-    () => assertShippingFrontendOracles(contract, simultaneousActions),
-    /cannot offer deterministic and AI actions together/
+    () => assertShippingFrontendOracles(contract, fixWithoutFinding),
+    /must not offer a deterministic fix/
   );
 });
 

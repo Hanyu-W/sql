@@ -56,10 +56,6 @@
             "messageEquals": "Dividing by zero returns no value (null) instead of an error.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -86,10 +82,6 @@
             "messageEquals": "Dividing by zero returns no value (null) instead of an error.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -113,9 +105,6 @@
           "frontend": {
             "count": 0,
             "deterministicFix": {
-              "offered": false
-            },
-            "aiAction": {
               "offered": false
             }
           },
@@ -143,10 +132,6 @@
             "messageEquals": "Dividing by zero returns no value (null) instead of an error.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {

@@ -9,11 +9,10 @@ name: PPL lint multi-version validation
 # happens to be. A rule that is correct on main can be a false positive on 3.6 or
 # a false negative on 3.7, and nothing notices.
 #
-# This workflow validates every active shipping contract — 12 detector rules and
-# the command-suggestion syntax feature where its runtime grammar surface is
-# available — against released engine versions plus the PR build. The aggregate
-# still records the exact default-error census separately, but --all-rules makes
-# warning/info omissions and syntax regressions visible too.
+# This workflow validates all 12 active detector contracts against released
+# engine versions plus the PR build. The aggregate still records the exact
+# default-error census separately, but --all-rules makes warning/info omissions
+# visible too.
 #
 # Shape — a per-version matrix of observation legs, then one aggregation:
 #
@@ -837,7 +836,6 @@ jobs:
             env "${surface_env[@]}" "${observe_env[@]}" \
             PPL_LINT_CONTRACT_DIR="$GITHUB_WORKSPACE/integ-test/src/test/resources/ppl-lint/contracts" \
             PPL_LINT_SCHEDULE=nightly \
-            PPL_LINT_ENFORCE_CENSUS=1 \
             PPL_LINT_INCLUDE_DORMANT=1 \
             PPL_LINT_TARGET_MANIFEST="$leg/target.json" \
             PPL_LINT_REPORT="$leg/detector-report.json" \

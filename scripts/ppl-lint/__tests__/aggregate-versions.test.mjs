@@ -172,8 +172,6 @@ function writeLeg({
       ...Object.fromEntries(
         [
           'deterministicFixMatched',
-          'aiActionMatched',
-          'actionDecisionMatched',
           'fixMatched',
           'rawMessageMatched',
           'totalErrorsMatched',
@@ -183,6 +181,8 @@ function writeLeg({
       ),
       ...(c.assertions ? { assertions: c.assertions } : {}),
       ...(c.mismatches ? { mismatches: c.mismatches } : {}),
+      ...(c.detectorOutcome ? { outcome: c.detectorOutcome } : {}),
+      ...(c.detectorError ? { error: c.detectorError } : {}),
       ...(explicitIdentity ? { executionBackend } : {}),
     });
     backend.push({
@@ -644,7 +644,7 @@ test('paired detector reports must be identical across execution backends', () =
   assert.match(stderr, /detector parity failed for union-min-datasets::trigger/);
 });
 
-test('identical exact-action mismatches across versions cannot aggregate green', () => {
+test('identical deterministic-fix mismatches across versions cannot aggregate green', () => {
   const badCase = {
     detector: 1,
     rejected: true,
@@ -687,6 +687,42 @@ test('identical exact-action mismatches across versions cannot aggregate green',
     )
   );
   assert.ok(report.matrix.every((row) => row.status === 'drift'));
+});
+
+test('a detector execution error is infrastructure evidence, not detector drift', () => {
+  const legs = {
+    '3.7.0': writeLeg({
+      version: '3.7.0',
+      cases: {
+        trigger: {
+          detector: 0,
+          rejected: true,
+          detectorOutcome: 'error',
+          detectorError: 'detector crashed',
+          assertions: { execution: false },
+          mismatches: [
+            {
+              field: 'execution',
+              expected: 'completed',
+              actual: 'detector crashed',
+            },
+          ],
+        },
+        control: { detector: 0, rejected: false },
+      },
+    }),
+  };
+
+  const { status, report, stdout } = run({ contracts: writeContracts(), legs });
+  assert.equal(status, 1);
+  assert.equal(report.drifts.length, 0);
+  assert.equal(report.result.enforcedInconclusive, 1);
+  assert.equal(report.matrix[0].status, 'inconclusive');
+  assert.match(
+    report.inconclusive[0].reasons.join(' '),
+    /trigger \(frontend execution failed: detector crashed\)/
+  );
+  assert.doesNotMatch(stdout, /update-detector/);
 });
 
 test('target and detector execution identities must match', () => {
@@ -1157,6 +1193,27 @@ test('an enforced shipping census mismatch fails aggregation', () => {
   assert.match(stdout, /CENSUS ENFORCED/);
   assert.doesNotMatch(stdout, /CENSUS REPORT-ONLY/);
   assert.match(stdout, /### Shipping census/);
+});
+
+test('a report-only shipping census mismatch remains green', () => {
+  const legs = {
+    '3.7.0': writeLeg({
+      version: '3.7.0',
+      cases: {
+        trigger: { detector: 1, rejected: true },
+        control: { detector: 0, rejected: false },
+      },
+    }),
+  };
+
+  const { status, report, stdout } = run({ contracts: writeContracts(), legs });
+  assert.equal(status, 0);
+  assert.equal(report.result.passed, true);
+  assert.equal(report.result.blockingShippingCensusProblems, 0);
+  assert.ok(report.shippingCensus.problems.length > 0);
+  assert.equal(report.shippingCensus.blocking, false);
+  assert.match(stdout, /CENSUS REPORT-ONLY/);
+  assert.doesNotMatch(stdout, /CENSUS ENFORCED/);
 });
 
 test('a schema-v2 detector report without a census fails closed', () => {

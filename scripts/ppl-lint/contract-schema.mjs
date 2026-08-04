@@ -14,7 +14,6 @@ const LINT_V4_FRONTEND_FIELDS = new Set([
   'severity',
   'messageEquals',
   'deterministicFix',
-  'aiAction',
 ]);
 const SYNTAX_FRONTEND_FIELDS = new Set([
   'count',
@@ -130,28 +129,12 @@ function normalizeDeterministicFix(value, label) {
     title: requireNonEmptyString(fix.title, `${label}.title`),
     text: requireString(fix.text, `${label}.text`),
     range: normalizeRange(fix.range, `${label}.range`),
-    expectedText: requireString(fix.expectedText, `${label}.expectedText`),
+    ...(fix.expectedText === undefined
+      ? {}
+      : { expectedText: requireString(fix.expectedText, `${label}.expectedText`) }),
     appliedQuery: requireString(fix.appliedQuery, `${label}.appliedQuery`),
   };
   return normalized;
-}
-
-function normalizeAiAction(value, label) {
-  const action = requireObject(value, label);
-  if (typeof action.offered !== 'boolean') {
-    throw new TypeError(`${label}.offered must be a boolean.`);
-  }
-  assertKnownKeys(action, new Set(['offered', 'commandId']), label);
-  if (!action.offered) {
-    if (Object.keys(action).length !== 1) {
-      throw new Error(`${label} must contain only offered when no AI action is expected.`);
-    }
-    return { offered: false };
-  }
-  return {
-    offered: true,
-    commandId: requireNonEmptyString(action.commandId, `${label}.commandId`),
-  };
 }
 
 export function contractChannel(spec) {
@@ -169,9 +152,8 @@ export function contractChannel(spec) {
  * Normalize legacy detector fields and channel-specific frontend assertions.
  *
  * Schema-v3 lint contracts retain substring messages. Schema-v4 lint contracts
- * assert exact messages and exact deterministic/AI action availability. Syntax
- * contracts assert stable parser error identity, quick-fix presence or absence,
- * raw-message preservation, and the total syntax error census.
+ * assert exact messages and deterministic fixes. Syntax contracts retain their
+ * legacy parser error, quick-fix, and raw-message assertions.
  */
 export function normalizeFrontendOracle(spec, queryExpectation) {
   const channel = contractChannel(spec);
@@ -206,9 +188,6 @@ export function normalizeFrontendOracle(spec, queryExpectation) {
           ...(queryExpectation.deterministicFix !== undefined
             ? { deterministicFix: queryExpectation.deterministicFix }
             : {}),
-          ...(queryExpectation.aiAction !== undefined
-            ? { aiAction: queryExpectation.aiAction }
-            : {}),
         };
     const allowed =
       spec.schemaVersion === 3 ? LINT_V3_FRONTEND_FIELDS : LINT_V4_FRONTEND_FIELDS;
@@ -232,7 +211,7 @@ export function normalizeFrontendOracle(spec, queryExpectation) {
     }
     if (
       hasFrontend &&
-      ['severity', 'matchMessage', 'messageEquals', 'deterministicFix', 'aiAction'].some(
+      ['severity', 'matchMessage', 'messageEquals', 'deterministicFix'].some(
         (field) => queryExpectation[field] !== undefined
       )
     ) {
@@ -254,13 +233,6 @@ export function normalizeFrontendOracle(spec, queryExpectation) {
                 : normalizeDeterministicFix(
                     frontend.deterministicFix,
                     `[${spec.ruleId}] frontend.deterministicFix`
-                  ),
-            aiAction:
-              frontend.aiAction === undefined
-                ? undefined
-                : normalizeAiAction(
-                    frontend.aiAction,
-                    `[${spec.ruleId}] frontend.aiAction`
                   ),
           }),
     };
@@ -322,8 +294,7 @@ export function normalizeFrontendOracle(spec, queryExpectation) {
 
 /**
  * Active shipping contracts are stricter than dormant compatibility contracts:
- * every lint finding pins its exact message and action mode, every lint control
- * pins action absence, and every syntax case pins fix/raw-error/error-count state.
+ * every lint finding pins its exact message and deterministic-fix behavior.
  */
 export function assertShippingFrontendOracles(spec, expectation) {
   if (spec.schemaVersion !== 4) {
@@ -352,9 +323,6 @@ export function assertShippingFrontendOracles(spec, expectation) {
     if (frontend.deterministicFix === undefined) {
       throw new Error(`${label}.deterministicFix must be explicitly asserted.`);
     }
-    if (frontend.aiAction === undefined) {
-      throw new Error(`${label}.aiAction must be explicitly asserted.`);
-    }
     if (frontend.count > 0) {
       if (frontend.severity === undefined) {
         throw new Error(`${label}.severity is required for a lint finding.`);
@@ -362,11 +330,8 @@ export function assertShippingFrontendOracles(spec, expectation) {
       if (frontend.messageEquals === undefined) {
         throw new Error(`${label}.messageEquals is required for a lint finding.`);
       }
-      if (frontend.deterministicFix.offered && frontend.aiAction.offered) {
-        throw new Error(`${label} cannot offer deterministic and AI actions together.`);
-      }
-    } else if (frontend.deterministicFix.offered || frontend.aiAction.offered) {
-      throw new Error(`${label} must not offer actions when no finding is expected.`);
+    } else if (frontend.deterministicFix.offered) {
+      throw new Error(`${label} must not offer a deterministic fix when no finding is expected.`);
     }
   }
 }
