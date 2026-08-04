@@ -17,9 +17,13 @@
  */
 
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
 
 import {
+  findTestFiles,
   harvestContext,
   harvestFile,
   referencedIdentifiers,
@@ -35,6 +39,38 @@ const RULES = [
   'head-without-sort',
   'division-by-zero',
 ];
+
+test('test discovery recurses through current rule locations and excludes generated data', () => {
+  const osd = fs.mkdtempSync(path.join(os.tmpdir(), 'ppl-lint-harvest-'));
+  const lintRoot = path.join(osd, 'packages/osd-monaco/src/ppl/lint');
+  const files = [
+    'rules/inline_rule.test.ts',
+    'rules/__tests__/nested_rule.test.tsx',
+    '__tests__/catalog.test.ts',
+    'rules/__fixtures__/fixture.test.ts',
+    'rules/__snapshots__/snapshot.test.ts',
+    'generated/generated.test.ts',
+    'rules/slow.bench.test.ts',
+    'rules/manual.verify.test.ts',
+  ];
+  try {
+    for (const file of files) {
+      const absolute = path.join(lintRoot, file);
+      fs.mkdirSync(path.dirname(absolute), { recursive: true });
+      fs.writeFileSync(absolute, '');
+    }
+    assert.deepEqual(
+      findTestFiles(osd).map((file) => path.relative(lintRoot, file)),
+      [
+        '__tests__/catalog.test.ts',
+        'rules/__tests__/nested_rule.test.tsx',
+        'rules/inline_rule.test.ts',
+      ]
+    );
+  } finally {
+    fs.rmSync(osd, { recursive: true, force: true });
+  }
+});
 
 // --- attribution -------------------------------------------------------------
 

@@ -6,6 +6,17 @@
 const EXECUTION_BACKENDS = new Set(['standard', 'analytics']);
 const CONTRACT_SCHEMA_VERSIONS = new Set([3, 4]);
 const APPLICABLE_BACKEND_KINDS = new Set(['rejection', 'result-shape', 'advisory']);
+const CONTRACT_CHANNELS = new Set(['lint', 'syntax']);
+const QUERY_ROLES = new Set(['trigger', 'control', 'suppression-control']);
+const LINT_FRONTEND_FIELDS = new Set(['count', 'severity', 'matchMessage']);
+const SYNTAX_FRONTEND_FIELDS = new Set([
+  'count',
+  'code',
+  'fixText',
+  'matchMessage',
+  'rawMessage',
+  'totalErrors',
+]);
 
 function isObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -40,6 +51,164 @@ function assertOptionalString(value, label) {
   if (value !== undefined && (typeof value !== 'string' || value.length === 0)) {
     throw new TypeError(`${label} must be a non-empty string when present.`);
   }
+}
+
+function assertKnownKeys(value, allowed, label) {
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) {
+      throw new Error(`${label}.${key} is not valid for this contract channel.`);
+    }
+  }
+}
+
+export function contractChannel(spec) {
+  requireObject(spec, 'contract');
+  const channel = spec.channel === undefined ? 'lint' : spec.channel;
+  if (!CONTRACT_CHANNELS.has(channel)) {
+    throw new Error(
+      `contract.channel must be "lint" or "syntax", got ${describe(channel)}.`
+    );
+  }
+  return channel;
+}
+
+/**
+ * Normalize legacy detector fields and channel-specific frontend assertions.
+ *
+ * Callers continue to receive `count`, `severity`, and `matchMessage` for lint
+ * contracts while syntax contracts can assert stable parser error identity,
+ * quick-fix text, raw-message preservation, and the total syntax error census.
+ */
+export function normalizeFrontendOracle(spec, queryExpectation) {
+  const channel = contractChannel(spec);
+  requireObject(queryExpectation, `[${spec.ruleId}] query expectation`);
+
+  const hasLegacy = Object.prototype.hasOwnProperty.call(
+    queryExpectation,
+    'detectorCount'
+  );
+  const hasFrontend = Object.prototype.hasOwnProperty.call(
+    queryExpectation,
+    'frontend'
+  );
+  if (hasLegacy && hasFrontend) {
+    throw new Error(
+      `[${spec.ruleId}] query expectation must use either detectorCount or frontend, not both.`
+    );
+  }
+
+  if (channel === 'lint') {
+    const frontend = hasFrontend
+      ? requireObject(queryExpectation.frontend, `[${spec.ruleId}] frontend`)
+      : {
+          count: queryExpectation.detectorCount,
+          severity: queryExpectation.severity,
+          matchMessage: queryExpectation.matchMessage,
+        };
+    assertKnownKeys(frontend, LINT_FRONTEND_FIELDS, `[${spec.ruleId}] frontend`);
+    requireNonNegativeInteger(frontend.count, `[${spec.ruleId}] frontend.count`);
+    assertOptionalString(frontend.severity, `[${spec.ruleId}] frontend.severity`);
+    if (
+      frontend.matchMessage !== undefined &&
+      typeof frontend.matchMessage !== 'string'
+    ) {
+      throw new TypeError(
+        `[${spec.ruleId}] frontend.matchMessage must be a string when present.`
+      );
+    }
+    if (
+      hasFrontend &&
+      (queryExpectation.severity !== undefined ||
+        queryExpectation.matchMessage !== undefined)
+    ) {
+      throw new Error(
+        `[${spec.ruleId}] severity and matchMessage must be nested under frontend when frontend is present.`
+      );
+    }
+    return {
+      channel,
+      count: frontend.count,
+      severity: frontend.severity,
+      matchMessage: frontend.matchMessage,
+    };
+  }
+
+  if (hasLegacy) {
+    throw new Error(
+      `[${spec.ruleId}] syntax contracts must use frontend instead of detectorCount.`
+    );
+  }
+  const frontend = requireObject(
+    queryExpectation.frontend,
+    `[${spec.ruleId}] frontend`
+  );
+  assertKnownKeys(frontend, SYNTAX_FRONTEND_FIELDS, `[${spec.ruleId}] frontend`);
+  requireNonNegativeInteger(frontend.count, `[${spec.ruleId}] frontend.count`);
+  requireNonEmptyString(frontend.code, `[${spec.ruleId}] frontend.code`);
+  assertOptionalString(frontend.fixText, `[${spec.ruleId}] frontend.fixText`);
+  if (
+    frontend.matchMessage !== undefined &&
+    typeof frontend.matchMessage !== 'string'
+  ) {
+    throw new TypeError(
+      `[${spec.ruleId}] frontend.matchMessage must be a string when present.`
+    );
+  }
+  if (frontend.rawMessage !== undefined && typeof frontend.rawMessage !== 'boolean') {
+    throw new TypeError(`[${spec.ruleId}] frontend.rawMessage must be a boolean.`);
+  }
+  if (frontend.totalErrors !== undefined) {
+    requireNonNegativeInteger(
+      frontend.totalErrors,
+      `[${spec.ruleId}] frontend.totalErrors`
+    );
+  }
+  for (const field of ['severity', 'matchMessage']) {
+    if (Object.prototype.hasOwnProperty.call(queryExpectation, field)) {
+      throw new Error(
+        `[${spec.ruleId}] syntax ${field} must be nested under frontend.`
+      );
+    }
+  }
+  return { channel, ...frontend };
+}
+
+export function normalizeLintWiring(ruleId, wiring, label = 'wiring') {
+  requireNonEmptyString(ruleId, `${label}.id`);
+  requireObject(wiring, label);
+  const appliesTo =
+    wiring.appliesTo === undefined ? {} : requireObject(wiring.appliesTo, `${label}.appliesTo`);
+  const normalizedAppliesTo = {};
+  for (const key of ['minVersion', 'maxVersion', 'engine']) {
+    assertOptionalString(appliesTo[key], `${label}.appliesTo.${key}`);
+    if (appliesTo[key] !== undefined) {
+      normalizedAppliesTo[key] = appliesTo[key];
+    }
+  }
+  for (const key of [
+    'runtimeOnly',
+    'needsContext',
+    'needsExplain',
+    'sourceScoped',
+  ]) {
+    if (wiring[key] !== undefined && typeof wiring[key] !== 'boolean') {
+      throw new TypeError(`${label}.${key} must be a boolean when present.`);
+    }
+  }
+  if (typeof wiring.enabled !== 'boolean') {
+    throw new TypeError(`${label}.enabled must be a boolean.`);
+  }
+  return {
+    id: ruleId,
+    detector: requireNonEmptyString(wiring.detector, `${label}.detector`),
+    enabled: wiring.enabled,
+    severity: requireNonEmptyString(wiring.severity, `${label}.severity`),
+    appliesTo: normalizedAppliesTo,
+    runtimeOnly: wiring.runtimeOnly === true,
+    needsContext: wiring.needsContext === true,
+    needsExplain: wiring.needsExplain === true,
+    sourceScoped: wiring.sourceScoped === true,
+  };
 }
 
 function assertBackendOracle(oracle, ruleId, executionBackend) {
@@ -206,6 +375,38 @@ export function assertContractSchema(spec) {
     );
   }
   requireNonEmptyString(spec.ruleId, 'contract.ruleId');
+  const channel = contractChannel(spec);
+  if (spec.wiring !== undefined) {
+    const wiring = requireObject(spec.wiring, `[${spec.ruleId}] contract.wiring`);
+    if (channel === 'syntax') {
+      const keys = Object.keys(wiring);
+      if (keys.length !== 1 || keys[0] !== 'code') {
+        throw new Error(
+          `[${spec.ruleId}] syntax wiring must contain only the stable error code.`
+        );
+      }
+      requireNonEmptyString(wiring.code, `[${spec.ruleId}] contract.wiring.code`);
+    } else if (Object.prototype.hasOwnProperty.call(wiring, 'code')) {
+      throw new Error(`[${spec.ruleId}] lint wiring must not contain syntax code.`);
+    }
+  }
+  if (spec.queries !== undefined) {
+    requireObject(spec.queries, `[${spec.ruleId}] contract.queries`);
+    for (const [queryName, query] of Object.entries(spec.queries)) {
+      requireObject(query, `[${spec.ruleId}] contract.queries.${queryName}`);
+      const role = query.role === undefined ? 'trigger' : query.role;
+      if (!QUERY_ROLES.has(role)) {
+        throw new Error(
+          `[${spec.ruleId}] query "${queryName}" has invalid role ${describe(role)}.`
+        );
+      }
+      if (role === 'suppression-control' && channel !== 'syntax') {
+        throw new Error(
+          `[${spec.ruleId}] suppression-control is valid only for syntax contracts.`
+        );
+      }
+    }
+  }
   return spec.schemaVersion;
 }
 
@@ -251,32 +452,11 @@ export function assertExactQueryCoverage(spec, expectation) {
 export function resolveBackendOracle(spec, queryExpectation, executionBackend) {
   const schemaVersion = assertContractSchema(spec);
   assertExecutionBackend(executionBackend);
-  requireObject(queryExpectation, `[${spec.ruleId}] query expectation`);
-
-  requireNonNegativeInteger(
-    queryExpectation.detectorCount,
-    `[${spec.ruleId}] detectorCount`
-  );
-  if (
-    Object.prototype.hasOwnProperty.call(queryExpectation, 'severity') &&
-    (typeof queryExpectation.severity !== 'string' ||
-      queryExpectation.severity.length === 0)
-  ) {
-    throw new TypeError(
-      `[${spec.ruleId}] severity must be a non-empty string when present.`
-    );
-  }
-  if (
-    Object.prototype.hasOwnProperty.call(queryExpectation, 'matchMessage') &&
-    typeof queryExpectation.matchMessage !== 'string'
-  ) {
-    throw new TypeError(`[${spec.ruleId}] matchMessage must be a string when present.`);
-  }
-
+  const frontend = normalizeFrontendOracle(spec, queryExpectation);
   const detector = {
-    count: queryExpectation.detectorCount,
-    severity: queryExpectation.severity,
-    matchMessage: queryExpectation.matchMessage,
+    count: frontend.count,
+    severity: frontend.severity,
+    matchMessage: frontend.matchMessage,
   };
 
   let oracle;
@@ -308,6 +488,7 @@ export function resolveBackendOracle(spec, queryExpectation, executionBackend) {
       status: 'coverage-missing',
       executionBackend,
       detector,
+      frontend,
       oracle: undefined,
       reason: missingReason,
     };
@@ -319,6 +500,7 @@ export function resolveBackendOracle(spec, queryExpectation, executionBackend) {
       status: 'not-applicable',
       executionBackend,
       detector,
+      frontend,
       oracle,
       reason: oracle.reason,
     };
@@ -328,6 +510,7 @@ export function resolveBackendOracle(spec, queryExpectation, executionBackend) {
     status: 'applicable',
     executionBackend,
     detector,
+    frontend,
     oracle,
     reason: undefined,
   };

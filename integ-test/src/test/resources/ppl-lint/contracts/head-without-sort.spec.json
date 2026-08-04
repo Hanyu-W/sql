@@ -5,11 +5,12 @@
   "schedule": "pr",
   "wiring": {
     "detector": "head-without-sort",
-    "enabled": true,
+    "enabled": false,
     "severity": "info",
     "runtimeOnly": false,
     "needsContext": false,
     "needsExplain": false,
+    "sourceScoped": false,
     "appliesTo": {}
   },
   "backendFixture": {
@@ -22,7 +23,8 @@
     }
   },
   "frontendContext": {
-    "isCalcite": true
+    "isCalcite": true,
+    "forceEnable": true
   },
   "index": "opensearch-sql_test_index_account",
   "queries": {

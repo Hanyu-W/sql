@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 4,
+  "ruleId": "enabled-false-object",
+  "channel": "lint",
+  "note": "The standard Calcite route can still project and filter enabled:false object values from _source. These result-shape oracles pin that observed acceptance; the warning communicates that the object is not indexed/searchable through ordinary OpenSearch field semantics.",
+  "grammarSurface": "both",
+  "schedule": "nightly",
+  "wiring": {
+    "detector": "enabled-false-object",
+    "enabled": true,
+    "severity": "warning",
+    "runtimeOnly": false,
+    "needsContext": true,
+    "needsExplain": false,
+    "sourceScoped": true,
+    "appliesTo": {
+      "minVersion": "3.7.0",
+      "engine": "calcite"
+    }
+  },
+  "backendFixture": {
+    "indices": [
+      "PPL_LINT_DISABLED_OBJECT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
+  },
+  "frontendContext": {
+    "isCalcite": true,
+    "deriveFromMapping": {
+      "status": "keyword"
+    },
+    "disabledObjectFields": [
+      "session"
+    ]
+  },
+  "index": "opensearch-sql_test_index_ppl_lint_disabled_object",
+  "queries": {
+    "disabled-object-field": {
+      "role": "trigger",
+      "query": "source={{index}} | fields session.id | head 1"
+    },
+    "disabled-object-filter": {
+      "role": "trigger",
+      "query": "source={{index}} | where session.id = 'abc' | fields status"
+    },
+    "indexed-field-control": {
+      "role": "control",
+      "query": "source={{index}} | where status = 'ok' | fields status | head 1"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=3.7.0",
+      "engine": "calcite",
+      "queries": {
+        "disabled-object-field": {
+          "frontend": {
+            "count": 1,
+            "severity": "warning",
+            "matchMessage": "not searchable"
+          },
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            }
+          }
+        },
+        "disabled-object-filter": {
+          "frontend": {
+            "count": 1,
+            "severity": "warning",
+            "matchMessage": "not searchable"
+          },
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsCount": 1
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsCount": 1
+              }
+            }
+          }
+        },
+        "indexed-field-control": {
+          "frontend": {
+            "count": 0
+          },
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

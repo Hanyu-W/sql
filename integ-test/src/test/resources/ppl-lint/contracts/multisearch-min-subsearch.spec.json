@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "ruleId": "multisearch-min-subsearch",
   "grammarSurface": "runtime-bundle",
   "schedule": "pr",
@@ -7,7 +7,7 @@
     "multisearchCommand",
     "subSearch"
   ],
-  "notes": "Query-initial (no leading pipe) on purpose \u2014 see the note on union-min-datasets. OSD's runtime lint prepends a synthetic 'source=t ' prefix to pipe-first queries, which would change the effective parse relative to what the backend receives. A query-initial 'multisearch [...]' is sent byte-identically to both halves.",
+  "notes": "Query-initial (no leading pipe) on purpose — see the note on union-min-datasets. OSD's runtime lint prepends a synthetic 'source=t ' prefix to pipe-first queries, which would change the effective parse relative to what the backend receives. A query-initial 'multisearch [...]' is sent byte-identically to both halves.",
   "wiring": {
     "detector": "multisearch-min-subsearch",
     "enabled": true,
@@ -17,7 +17,8 @@
     "needsExplain": false,
     "appliesTo": {
       "minVersion": "3.4.0"
-    }
+    },
+    "sourceScoped": false
   },
   "backendFixture": {
     "indices": [
@@ -53,14 +54,27 @@
         "multisearch-single-subsearch": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "SyntaxCheckException",
-                "reason": "Invalid Query"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "SyntaxCheckException",
+                  "reason": "Invalid Query"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "SyntaxCheckException",
+                  "reason": "Invalid Query"
+                }
               }
             }
           }
@@ -68,25 +82,47 @@
         "multisearch-single-subsearch-with-where": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "SyntaxCheckException",
-                "reason": "Invalid Query"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "SyntaxCheckException",
+                  "reason": "Invalid Query"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "SyntaxCheckException",
+                  "reason": "Invalid Query"
+                }
               }
             }
           }
         },
         "multisearch-two-subsearches-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
             }
           }
         }

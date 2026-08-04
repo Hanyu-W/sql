@@ -877,6 +877,11 @@ public abstract class SQLIntegTestCase extends OpenSearchSQLRestTestCase {
         "flat_object",
         getFlatObjectIndexMapping(),
         "src/test/resources/flat_object.json"),
+    PPL_LINT_DISABLED_OBJECT(
+        TestsConstants.TEST_INDEX_PPL_LINT_DISABLED_OBJECT,
+        "ppl_lint_disabled_object",
+        getPplLintDisabledObjectIndexMapping(),
+        "src/test/resources/ppl_lint_disabled_object.json"),
     DUPLICATION_NULLABLE(
         TestsConstants.TEST_INDEX_DUPLICATION_NULLABLE,
         "duplication_nullable",

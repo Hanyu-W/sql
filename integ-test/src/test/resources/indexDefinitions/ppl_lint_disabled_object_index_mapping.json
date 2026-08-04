@@ -1,0 +1,13 @@
+{
+  "mappings": {
+    "properties": {
+      "session": {
+        "type": "object",
+        "enabled": false
+      },
+      "status": {
+        "type": "keyword"
+      }
+    }
+  }
+}

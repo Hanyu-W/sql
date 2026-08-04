@@ -587,6 +587,11 @@ public class TestUtils {
     return getMappingFile(mappingFile);
   }
 
+  public static String getPplLintDisabledObjectIndexMapping() {
+    String mappingFile = "ppl_lint_disabled_object_index_mapping.json";
+    return getMappingFile(mappingFile);
+  }
+
   public static String getPhraseIndexMapping() {
     String mappingFile = "phrase_index_mapping.json";
     return getMappingFile(mappingFile);

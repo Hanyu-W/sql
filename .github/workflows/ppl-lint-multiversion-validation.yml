@@ -9,18 +9,11 @@ name: PPL lint multi-version validation
 # happens to be. A rule that is correct on main can be a false positive on 3.6 or
 # a false negative on 3.7, and nothing notices.
 #
-# This workflow validates every DEFAULT-ERROR rule (enabled: true + severity:
-# error in OSD's rules_catalog.json) against SEVERAL released engine versions
-# plus the PR build, and — when a rule disagrees with any of them — says what to
-# change in the linter rather than only that a count was wrong.
-#
-# Why default-error only: an error-severity rule is one the user cannot opt out
-# of and which marks their query as broken. A wrong error is the most expensive
-# possible lint defect, so that set gets the multi-version treatment first.
-# Warning/info rules stay on the single-version check. The set is not hand-copied:
-# the detector run records the catalog's default-error census, and the aggregate
-# step fails if a rule in that census has no contract file (see manifest.json's
-# `defaultError` note).
+# This workflow validates every active shipping contract — 12 detector rules and
+# the command-suggestion syntax feature where its runtime grammar surface is
+# available — against released engine versions plus the PR build. The aggregate
+# still records the exact default-error census separately, but --all-rules makes
+# warning/info omissions and syntax regressions visible too.
 #
 # Shape — a per-version matrix of observation legs, then one aggregation:
 #

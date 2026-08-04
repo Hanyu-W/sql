@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 4,
+  "ruleId": "agg-on-text",
+  "channel": "lint",
+  "note": "The standard engine accepts both text aggregations: avg(text) returns null while sum(text) returns a non-empty numeric result (observed as 0.0). The warning catches this misleading coercion rather than predicting backend rejection.",
+  "grammarSurface": "both",
+  "schedule": "nightly",
+  "wiring": {
+    "detector": "agg-on-text",
+    "enabled": true,
+    "severity": "warning",
+    "runtimeOnly": false,
+    "needsContext": true,
+    "needsExplain": false,
+    "sourceScoped": true,
+    "appliesTo": {
+      "minVersion": "3.7.0",
+      "engine": "calcite"
+    }
+  },
+  "backendFixture": {
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
+  },
+  "frontendContext": {
+    "isCalcite": true,
+    "deriveFromMapping": {
+      "firstname": "text",
+      "balance": "long"
+    }
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "avg-text-field": {
+      "role": "trigger",
+      "query": "source={{index}} | stats avg(firstname) as avg_firstname"
+    },
+    "sum-text-field": {
+      "role": "trigger",
+      "query": "source={{index}} | stats sum(firstname) as sum_firstname"
+    },
+    "avg-numeric-control": {
+      "role": "control",
+      "query": "source={{index}} | stats avg(balance) as avg_balance"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=3.7.0",
+      "engine": "calcite",
+      "queries": {
+        "avg-text-field": {
+          "frontend": {
+            "count": 1,
+            "severity": "warning",
+            "matchMessage": "text field"
+          },
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "columnAllNull": "avg_firstname"
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "columnAllNull": "avg_firstname"
+              }
+            }
+          }
+        },
+        "sum-text-field": {
+          "frontend": {
+            "count": 1,
+            "severity": "warning",
+            "matchMessage": "text field"
+          },
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            }
+          }
+        },
+        "avg-numeric-control": {
+          "frontend": {
+            "count": 0
+          },
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

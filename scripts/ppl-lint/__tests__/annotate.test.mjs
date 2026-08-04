@@ -8,6 +8,7 @@ import test from 'node:test';
 
 import {
   buildAnnotations,
+  buildRequiredAnnotations,
   contractRepoPath,
   findExpectationLine,
   findRuleIdLine,
@@ -37,6 +38,22 @@ const CONTRACT = `{
 `;
 
 const readStub = (text) => () => text;
+const REQUIRED_MANIFEST = `{
+  "schemaVersion": 4,
+  "contracts": [
+    "invalid-capture-group-name.spec.json"
+  ],
+  "defaultError": [
+    "invalid-capture-group-name.spec.json"
+  ]
+}
+`;
+const readRequired = (_dir, file) =>
+  file === 'manifest.json'
+    ? REQUIRED_MANIFEST
+    : file === 'invalid-capture-group-name.spec.json'
+      ? CONTRACT
+      : undefined;
 
 test('anchors on the expectation entry that drifted, not the first one', () => {
   assert.equal(findExpectationLine(CONTRACT, '>=3.7.0'), 14);
@@ -211,6 +228,69 @@ test('an unreadable contract still produces a file-less annotation', () => {
   assert.equal(annotations[0].file, 'c/gone.spec.json');
 });
 
+test('required-lane failures anchor to their contract and census findings to the manifest', () => {
+  const annotations = buildRequiredAnnotations(
+    {
+      detectorFailures: [
+        '[invalid-capture-group-name/trigger] expected 1 diagnostic, got 0',
+      ],
+      censusProblems: ['active lint contracts do not equal enabled catalog rules'],
+      censusEnforced: false,
+    },
+    {
+      contractsDir: '/w/integ-test/resources/contracts',
+      workspace: '/w',
+      readFile: readRequired,
+    }
+  );
+
+  assert.equal(annotations.length, 2);
+  assert.deepEqual(
+    {
+      level: annotations[0].level,
+      file: annotations[0].file,
+      line: annotations[0].line,
+    },
+    {
+      level: 'error',
+      file: 'integ-test/resources/contracts/invalid-capture-group-name.spec.json',
+      line: 3,
+    }
+  );
+  assert.equal(annotations[1].level, 'warning');
+  assert.equal(annotations[1].file, 'integ-test/resources/contracts/manifest.json');
+  assert.match(annotations[1].message, /REPORT ONLY/);
+});
+
+test('required artifact row failures recover the rule identity for an inline annotation', () => {
+  const annotations = buildRequiredAnnotations(
+    {
+      artifactErrors: [
+        'backend row invalid-capture-group-name::trigger did not pass its oracle (outcome="fail")',
+      ],
+    },
+    {
+      contractsDir: '/w/contracts',
+      workspace: '/w',
+      readFile: readRequired,
+    }
+  );
+
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].file, 'contracts/invalid-capture-group-name.spec.json');
+  assert.match(annotations[0].title, /invalid-capture-group-name\/trigger/);
+});
+
+test('required job failures without a contract identity remain file-less', () => {
+  const annotations = buildRequiredAnnotations(
+    { backendResult: 'failure', detectorResult: 'skipped' },
+    { contractsDir: '/w/contracts', workspace: '/w', readFile: readRequired }
+  );
+  assert.equal(annotations.length, 2);
+  assert.ok(annotations.every((annotation) => annotation.file === undefined));
+});
+
 test('a clean report emits nothing', () => {
   assert.deepEqual(buildAnnotations({}, { contractsDir: '/w/c', workspace: '/w' }), []);
+  assert.deepEqual(buildRequiredAnnotations({}, { contractsDir: '/w/c', workspace: '/w' }), []);
 });

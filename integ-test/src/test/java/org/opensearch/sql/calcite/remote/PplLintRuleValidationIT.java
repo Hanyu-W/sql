@@ -32,7 +32,7 @@ import org.opensearch.sql.legacy.TestUtils;
 import org.opensearch.sql.ppl.PPLIntegTestCase;
 
 /**
- * Backend half of the schema-v3/schema-v4 PPL lint rule validation contract.
+ * Backend half of the schema-v3/schema-v4 PPL frontend validation contract.
  *
  * <p>This test drives the live {@code POST /_plugins/_ppl} endpoint on the SQL plugin built from
  * the current checkout. For every contract (see {@code
@@ -50,9 +50,9 @@ import org.opensearch.sql.ppl.PPLIntegTestCase;
  *       confirmed by a single run, e.g. head nondeterminism, fallback warnings).
  * </ul>
  *
- * <p>The contract files are shared verbatim with the SQL-owned OSD detector runner ({@code
+ * <p>The contract files are shared verbatim with the SQL-owned OSD frontend runner ({@code
  * scripts/ppl-lint/run-frontend-contract.mjs}) so the same reviewed cases pin both the OSD analyzer
- * diagnostic count and the SQL backend behavior; neither side can drift without a red build. The
+ * output and the SQL backend behavior; neither side can drift without a red build. The
  * rejection-body parsing mirrors {@link
  * org.opensearch.sql.calcite.remote.CalciteErrorReportStageIT}; the Calcite setup follows {@link
  * org.opensearch.sql.calcite.remote.CalcitePPLEventstatsIT}.
@@ -60,15 +60,14 @@ import org.opensearch.sql.ppl.PPLIntegTestCase;
  * <p>While the ephemeral cluster is alive, the test also exports the candidate runtime grammar
  * bundle it built ({@code GET /_plugins/_ppl/_grammar}) and a small target manifest pairing the
  * bundle with the backend version and grammar hash. These become workflow artifacts that the
- * detector-validation job injects into OSD's headless lint API, so both halves validate against the
- * SAME candidate grammar (design §4.2, §4.3). Export runs only when {@code
+ * detector-validation job injects into OSD's headless lint and syntax APIs, so both halves validate
+ * against the SAME candidate grammar (design §4.2, §4.3). Export runs only when {@code
  * -Dppl.lint.grammar.bundle} is set (CI); local runs without it are unaffected.
  *
  * <p>The suite honors {@code -Dppl.lint.schedule=pr|nightly} (default {@code pr}): a PR run skips
- * contracts declaring {@code schedule: "nightly"}, while nightly runs the full corpus. Every
- * contract in the corpus currently declares {@code schedule: "pr"}, so the two are equivalent
- * today; the filter stays because it is the only mechanism for holding a new contract back from PR
- * runs while its oracle is still settling.
+ * contracts declaring {@code schedule: "nightly"}, while nightly runs all 13 active contracts. The
+ * filter holds new detector and syntax contracts back from PR runs while their standard and
+ * analytics oracles are still settling.
  *
  * <p>Note that a contract which RUNS also ASSERTS. This class does not consult the manifest's
  * {@code enforced} list — that list records oracle quality and review status, not blocking

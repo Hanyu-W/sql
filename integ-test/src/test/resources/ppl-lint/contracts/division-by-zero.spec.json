@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "ruleId": "division-by-zero",
   "note": "The detector flags both division and modulo by a literal zero because both operations return null silently. The backend result-shape oracle verifies that behavior independently for each operator.",
   "grammarSurface": "both",
@@ -11,7 +11,8 @@
     "runtimeOnly": false,
     "needsContext": false,
     "needsExplain": false,
-    "appliesTo": {}
+    "appliesTo": {},
+    "sourceScoped": false
   },
   "backendFixture": {
     "indices": [
@@ -51,43 +52,79 @@
         "divide-by-zero-literal": {
           "detectorCount": 1,
           "severity": "warning",
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "columnAllNull": "ratio"
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "columnAllNull": "ratio"
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "columnAllNull": "ratio"
+              }
             }
           }
         },
         "divide-by-decimal-zero-literal": {
           "detectorCount": 1,
           "severity": "warning",
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "columnAllNull": "ratio"
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "columnAllNull": "ratio"
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "columnAllNull": "ratio"
+              }
             }
           }
         },
         "divide-by-nonzero-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
             }
           }
         },
         "modulo-by-zero-literal": {
           "detectorCount": 1,
           "severity": "warning",
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "columnAllNull": "m"
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "columnAllNull": "m"
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "columnAllNull": "m"
+              }
             }
           }
         }

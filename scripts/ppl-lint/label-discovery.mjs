@@ -306,11 +306,29 @@ function main() {
 
   const findings = labelled.filter((l) => l.finding);
   const byRule = new Map();
+  for (const coverage of corpus.ruleCoverage || []) {
+    byRule.set(coverage.ruleId, {
+      triggers: [],
+      controls: [],
+      unknown: [],
+      suppressed: 0,
+      files: new Set(coverage.filesScanned || []),
+      explicitException: coverage.explicitException || null,
+    });
+  }
   for (const row of labelled) {
     if (!byRule.has(row.ruleId)) {
-      byRule.set(row.ruleId, { triggers: [], controls: [], unknown: [], suppressed: 0 });
+      byRule.set(row.ruleId, {
+        triggers: [],
+        controls: [],
+        unknown: [],
+        suppressed: 0,
+        files: new Set(),
+        explicitException: null,
+      });
     }
     const bucket = byRule.get(row.ruleId);
+    if (row.source) bucket.files.add(row.source.split(':')[0]);
     if (row.suppressed) bucket.suppressed++;
     if (row.role === ROLES.TRIGGER) bucket.triggers.push(row.queryName);
     else if (row.role === ROLES.CONTROL) bucket.controls.push(row.queryName);
@@ -347,10 +365,16 @@ function main() {
     triggerCoverage: [...byRule]
       .map(([ruleId, b]) => ({
         ruleId,
+        filesScanned: [...b.files].sort(),
         triggers: b.triggers.length,
         controls: b.controls.length,
         unknown: b.unknown.length,
         suppressed: b.suppressed,
+        unattributedQueryCount: (corpus.stats && corpus.stats.unowned) || 0,
+        explicitException: b.explicitException,
+        coverageSatisfied:
+          b.triggers.length + b.controls.length + b.unknown.length > 0 ||
+          !!b.explicitException,
         // Below two triggers, "every trigger relaxed" is a single observation and
         // cannot support a version-scoping decision. Flagged so the gap is visible
         // rather than implied by a number nobody reads.

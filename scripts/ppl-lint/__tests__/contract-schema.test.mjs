@@ -10,7 +10,10 @@ import {
   assertContractSchema,
   assertExactQueryCoverage,
   classifyBackendReportRow,
+  contractChannel,
   indexBackendReport,
+  normalizeFrontendOracle,
+  normalizeLintWiring,
   normalizeTarget,
   resolveBackendOracle,
 } from '../contract-schema.mjs';
@@ -488,4 +491,152 @@ test('schema-v2 standard backend rows cannot omit identity', () => {
     () => indexBackendReport([{ ...row, executionBackend: 'analytics' }], target),
     /does not match target "standard"/
   );
+});
+
+test('missing channel remains a backwards-compatible lint contract', () => {
+  const contract = spec(4, {
+    detectorCount: 1,
+    severity: 'warning',
+    backends: {
+      standard: { kind: 'advisory', httpStatus: 200 },
+    },
+  });
+  assert.equal(contractChannel(contract), 'lint');
+  assert.deepEqual(
+    normalizeFrontendOracle(contract, contract.expectations[0].queries.trigger),
+    {
+      channel: 'lint',
+      count: 1,
+      severity: 'warning',
+      matchMessage: undefined,
+    }
+  );
+});
+
+test('syntax frontend assertions normalize stable code, fix, raw message, and error census', () => {
+  const contract = {
+    schemaVersion: 4,
+    ruleId: 'command-suggestion',
+    channel: 'syntax',
+    wiring: { code: 'UNKNOWN_COMMAND' },
+    queries: {
+      trigger: { role: 'trigger', query: 'source=t | wherre a > 1' },
+    },
+  };
+  const frontend = normalizeFrontendOracle(contract, {
+    frontend: {
+      count: 1,
+      code: 'UNKNOWN_COMMAND',
+      fixText: 'where',
+      matchMessage: 'where',
+      rawMessage: true,
+      totalErrors: 1,
+    },
+  });
+  assert.deepEqual(frontend, {
+    channel: 'syntax',
+    count: 1,
+    code: 'UNKNOWN_COMMAND',
+    fixText: 'where',
+    matchMessage: 'where',
+    rawMessage: true,
+    totalErrors: 1,
+  });
+  assert.equal(assertContractSchema(contract), 4);
+});
+
+test('lint and syntax frontend fields cannot cross channels', () => {
+  assert.throws(
+    () =>
+      normalizeFrontendOracle(spec(4), {
+        frontend: { count: 1, code: 'UNKNOWN_COMMAND' },
+      }),
+    /code is not valid/
+  );
+  const syntax = {
+    schemaVersion: 4,
+    ruleId: 'command-suggestion',
+    channel: 'syntax',
+    wiring: { code: 'UNKNOWN_COMMAND' },
+    queries: {
+      trigger: { role: 'trigger', query: 'source=t | wherre a > 1' },
+    },
+  };
+  assert.throws(
+    () => normalizeFrontendOracle(syntax, { detectorCount: 1 }),
+    /must use frontend/
+  );
+  assert.throws(
+    () =>
+      assertContractSchema({
+        ...syntax,
+        wiring: { code: 'UNKNOWN_COMMAND', detector: 'command-suggestion' },
+      }),
+    /must contain only/
+  );
+});
+
+test('suppression-control is syntax-only', () => {
+  assert.throws(
+    () =>
+      assertContractSchema({
+        ...spec(4),
+        queries: {
+          suppressed: {
+            role: 'suppression-control',
+            query: 'source=t | zzzzzzzz',
+          },
+        },
+      }),
+    /valid only for syntax/
+  );
+  assert.doesNotThrow(() =>
+    assertContractSchema({
+      schemaVersion: 4,
+      ruleId: 'command-suggestion',
+      channel: 'syntax',
+      wiring: { code: 'UNKNOWN_COMMAND' },
+      queries: {
+        suppressed: {
+          role: 'suppression-control',
+          query: 'source=t | zzzzzzzz',
+        },
+      },
+    })
+  );
+});
+
+test('normalized wiring exposes omitted version, engine, and source scope gates', () => {
+  const catalog = normalizeLintWiring('example-rule', {
+    detector: 'example-rule',
+    enabled: true,
+    severity: 'warning',
+    appliesTo: { minVersion: '3.7.0', engine: 'calcite' },
+    sourceScoped: true,
+  });
+  const omittedVersion = normalizeLintWiring('example-rule', {
+    detector: 'example-rule',
+    enabled: true,
+    severity: 'warning',
+    appliesTo: { engine: 'calcite' },
+    sourceScoped: true,
+  });
+  const omittedEngine = normalizeLintWiring('example-rule', {
+    detector: 'example-rule',
+    enabled: true,
+    severity: 'warning',
+    appliesTo: { minVersion: '3.7.0' },
+    sourceScoped: true,
+  });
+  const omittedSourceScope = normalizeLintWiring('example-rule', {
+    detector: 'example-rule',
+    enabled: true,
+    severity: 'warning',
+    appliesTo: { minVersion: '3.7.0', engine: 'calcite' },
+  });
+
+  assert.notDeepEqual(omittedVersion, catalog);
+  assert.notDeepEqual(omittedEngine, catalog);
+  assert.notDeepEqual(omittedSourceScope, catalog);
+  assert.equal(omittedSourceScope.sourceScoped, false);
 });

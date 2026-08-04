@@ -66,18 +66,7 @@ function fatal(message) {
   process.exit(2);
 }
 
-/**
- * Directories under an OSD checkout that hold PPL lint tests. Kept explicit
- * rather than globbing the whole repo: a wide sweep would pull in queries from
- * autocomplete/highlighting suites that were never written as lint trigger or
- * control cases, and a query harvested from the wrong intent produces a
- * "disagreement" that is really just a query nobody claimed anything about.
- */
-const LINT_TEST_DIRS = [
-  'packages/osd-monaco/src/ppl/lint/__tests__',
-  'packages/osd-monaco/src/ppl/lint/hover/__tests__',
-  'packages/osd-monaco/src/ppl/lint/explain/__tests__',
-];
+const LINT_TEST_ROOT = 'packages/osd-monaco/src/ppl/lint';
 
 /**
  * Benchmarks and repro captures are excluded. Bench files hold deliberately
@@ -85,6 +74,13 @@ const LINT_TEST_DIRS = [
  * they would dominate the corpus with near-duplicates.
  */
 const EXCLUDED_FILE_PATTERNS = [/\.bench\.test\.ts$/, /\.verify\.test\.ts$/];
+const EXCLUDED_DIRS = new Set([
+  '__fixtures__',
+  '__snapshots__',
+  'fixtures',
+  'generated',
+  'target',
+]);
 
 function parseArgs(argv) {
   const args = {
@@ -142,18 +138,25 @@ function readRuleList(value) {
     .filter((s) => s && !s.startsWith('#'));
 }
 
-/** Every lint test file under the OSD checkout, excluding benches. */
-function findTestFiles(osdRoot) {
+/** Every lint test file under the lint package, excluding generated test data. */
+export function findTestFiles(osdRoot) {
   const files = [];
-  for (const dir of LINT_TEST_DIRS) {
-    const abs = path.join(osdRoot, dir);
-    if (!fs.existsSync(abs)) continue;
-    for (const name of fs.readdirSync(abs)) {
+  const root = path.join(osdRoot, LINT_TEST_ROOT);
+  const visit = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!EXCLUDED_DIRS.has(entry.name)) {
+          visit(path.join(dir, entry.name));
+        }
+        continue;
+      }
+      const name = entry.name;
       if (!name.endsWith('.test.ts') && !name.endsWith('.test.tsx')) continue;
       if (EXCLUDED_FILE_PATTERNS.some((re) => re.test(name))) continue;
-      files.push(path.join(abs, name));
+      files.push(path.join(dir, name));
     }
-  }
+  };
+  if (fs.existsSync(root)) visit(root);
   return files.sort();
 }
 
@@ -621,6 +624,20 @@ function main() {
       'detector output; there are no pinned expectations and this corpus must never fail a build.',
     index: args.index || null,
     sourceFiles: files.map((f) => path.relative(args.osd, f)),
+    ruleCoverage: args.catalogRules
+      .map((ruleId) => {
+        const entries = kept.filter((entry) => entry.ruleId === ruleId);
+        return {
+          ruleId,
+          filesScanned: [
+            ...new Set(entries.map((entry) => entry.source.split(':')[0])),
+          ].sort(),
+          ownedQueryCount: entries.length,
+          explicitException: null,
+        };
+      })
+      .sort((a, b) => a.ruleId.localeCompare(b.ruleId)),
+    exceptions: [],
     queries: kept,
     unowned: args.keepUnowned ? unowned : [],
     stats: {

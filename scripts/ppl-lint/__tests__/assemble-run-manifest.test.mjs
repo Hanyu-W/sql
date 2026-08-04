@@ -172,3 +172,18 @@ test('detector severity and message mismatches fail the manifest and summary', (
     assert.match(fs.readFileSync(summary, 'utf8'), /advisory-rule.*accepted.*Fail/);
   }
 });
+
+test('syntax-specific frontend mismatches fail artifact validation', () => {
+  for (const field of ['fixMatched', 'rawMessageMatched', 'totalErrorsMatched']) {
+    const dir = makeRun();
+    validArtifacts(dir);
+    const file = path.join(dir, 'artifacts', 'detector-report.json');
+    const detector = JSON.parse(fs.readFileSync(file, 'utf8'));
+    detector.results[0][field] = false;
+    fs.writeFileSync(file, JSON.stringify(detector));
+
+    const result = run(dir);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /did not match its (fix|raw-message|total-error) assertion/);
+  }
+});

@@ -1,8 +1,8 @@
 # PPL lint rule validation
 
-A required, cross-repository GitHub Actions check that proves the OpenSearch
-Dashboards (OSD) PPL lint detectors and the SQL backend still agree — on the
-**same candidate runtime grammar** built by a SQL pull request.
+A cross-repository GitHub Actions check that proves the OpenSearch Dashboards
+(OSD) PPL lint detectors and runtime syntax validation still agree with the SQL
+backend on the **same candidate runtime grammar** built by a SQL pull request.
 
 PPL language behavior lives in SQL; PPL lint detectors live in OSD. A SQL change
 can silently invalidate an OSD rule (a parser refactor stops a detector matching,
@@ -32,10 +32,10 @@ backend-validation ──(target.json, ppl-grammar-bundle.json, backend-report.j
 2. **detector-validation** (`ubuntu-latest`). Checks out and bootstraps OSD as a
    Node code dependency (no OSD server, no Monaco, no browser), then runs
    [`run-frontend-contract.mjs`](run-frontend-contract.mjs). That runner
-   deserializes the candidate bundle through OSD's production headless lint API
-   (`src/plugins/data/public/antlr/opensearch_ppl/headless_ppl_lint`) and lints
-   each query with the **real** detectors on the **candidate** grammar. It then
-   asserts the detector-vs-backend differential.
+   deserializes the candidate bundle through OSD's production headless APIs and
+   runs each query with either the real lint detectors or the shared runtime
+   syntax listener on the **candidate** grammar. It then asserts the
+   frontend-vs-backend differential.
 3. **validation-result**. `if: always()`, `needs: [backend-validation,
    detector-validation]`. Fails unless both succeeded — so a skipped detector
    (because the backend failed first) still reds the check instead of looking
@@ -50,11 +50,12 @@ backend-validation ──(target.json, ppl-grammar-bundle.json, backend-report.j
 | `workflow_dispatch` (`osd_ref`) | OSD-branch evidence | the given commit/branch | No — pre-merge evidence only |
 | `schedule` (nightly) | full corpus + coverage | `main` | No |
 
-Every contract declares `schedule: "pr"`, so a PR run exercises the **whole corpus**
-— 11 rules, 35 queries. A contract that runs also asserts: neither the IT nor the
-detector runner consults the manifest's `enforced` list, so any contract on the PR
-schedule can fail the required check. Keep that in mind when adding one; a new
-contract whose oracle has not settled should say `schedule: "nightly"` until it has.
+The active corpus contains 12 detector contracts plus the
+`command-suggestion` syntax contract. Seven reviewed contracts currently declare
+`schedule: "pr"`; the six new contracts remain `nightly` until their standard and
+analytics observations are reviewed. A contract that runs also asserts: neither
+the IT nor the frontend runner consults the manifest's `enforced` list, so any
+contract on the PR schedule can fail the required check.
 
 `workflow_dispatch` inputs:
 
@@ -65,7 +66,7 @@ contract whose oracle has not settled should say `schedule: "nightly"` until it 
   an immutable commit SHA and recorded in the run manifest. A manual run **cannot**
   satisfy branch protection; merge the OSD change first, then rerun the required
   `pull_request` check against OSD `main`.
-- `schedule` — `pr` (fast blocking subset) or `nightly` (full corpus).
+- `schedule` — `pr` (reviewed blocking contracts) or `nightly` (all active contracts).
 
 To validate an OSD change that is not yet merged, push it to a branch on your OSD
 fork and dispatch with `osd_repo=<you>/OpenSearch-Dashboards` and
@@ -124,15 +125,17 @@ writes `detector-report.json`.
 
 ## Contract format (schema v3 and v4)
 
-One JSON file per rule under `contracts/`, listed in `manifest.json`. Each file
-has a top-level `queries` map (each `{ role: "trigger"|"control", query }`) and a
-version-scoped `expectations[]`. Exactly one expectation must match the candidate
-backend version (zero or more than one fails before any query runs).
+One JSON file per rule or syntax feature under `contracts/`, listed in
+`manifest.json`. Each file has `channel: "lint"|"syntax"` (missing defaults to
+`lint`), a top-level `queries` map, and version-scoped `expectations[]`.
+`suppression-control` is syntax-only: the frontend must retain a raw syntax error
+without producing the contracted friendly rewrite.
 
 ```jsonc
 {
   "schemaVersion": 4,
   "ruleId": "union-min-datasets",
+  "channel": "lint",
   "grammarSurface": "runtime-bundle",
   "schedule": "pr",
   "wiring": { "detector": "union-min-datasets", "enabled": true, "severity": "error", ... },
@@ -149,14 +152,14 @@ backend version (zero or more than one fails before any query runs).
       "engine": "calcite",
       "queries": {
         "union-single-dataset": {
-          "detectorCount": 1, "severity": "error",
+          "frontend": { "count": 1, "severity": "error" },
           "backends": {
             "standard": { "kind": "rejection", "httpStatus": 400, "body": { "status": 400, "error": { "type": "IllegalArgumentException" } } },
             "analytics": { "kind": "rejection", "httpStatus": 400, "body": { "status": 400, "error": { "type": "IllegalArgumentException" } } }
           }
         },
         "union-two-datasets-control": {
-          "detectorCount": 0,
+          "frontend": { "count": 0 },
           "backends": {
             "standard": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } },
             "analytics": { "kind": "result-shape", "httpStatus": 200, "expect": { "datarowsNonEmpty": true } }
@@ -167,6 +170,10 @@ backend version (zero or more than one fails before any query runs).
   ]
 }
 ```
+
+Legacy lint expectations using `detectorCount`, `severity`, and `matchMessage`
+normalize to the same internal frontend oracle. Syntax expectations use
+`frontend.code`, `fixText`, `rawMessage`, and `totalErrors`.
 
 Schema v3's `backend` is read only as `backends.standard`; it is never an
 implicit analytics oracle. Schema v4's `backends` selects the configured
@@ -201,32 +208,21 @@ rule cannot be validated end to end.
 
 `manifest.json` partitions the corpus:
 
-- `enforced` — reviewed error rules with a deterministic backend rejection and a
-  valid negative control. These block `validation-result` on the single-version
-  check: `invalid-capture-group-name`,
-  `unsupported-window-function-in-eventstats`, `multisearch-min-subsearch`,
-  `union-min-datasets`, `replace-wildcard-asymmetry`.
+- `enforced` — the six reviewed detector error contracts with deterministic
+  backend behavior.
 - `defaultError` — every rule that ships **enabled at error severity** in OSD's
-  `rules_catalog.json`. This is the set the **multi-version** check enforces (see
-  below). It is a superset of `enforced`, adding `field-validation` and
-  `flat-object-subfield`.
-- `pendingReview` — error rules awaiting Peng/Chen usefulness review before
-  joining `enforced`. Empty: `field-validation` and `flat-object-subfield` are now
-  pinned across versions by the multi-version check, but stay out of the
-  single-version `enforced` set because their backend oracle is a semantic
-  `Field [...] not found.` rejection they share with each other rather than a
-  rule-unique grammar rejection.
-- `nonEnforcing` — warning/info/advisory/result-shape rules. Their oracle is weaker
-  than a clean rejection: an advisory rule's query *succeeds*, so the contract can
-  only assert a result shape or plain acceptance, which is likelier to move for
-  reasons unrelated to the lint rule (`dedup-consecutive` depends on the
-  Calcite-to-v2 fallback staying on). These ran nightly-only until every contract
-  moved to the PR schedule, so they now block like any other. A red result here is
-  worth checking against the oracle before editing a rule.
+  `rules_catalog.json`; it contains exactly six detector rules.
+- `requiredSyntaxFeatures` — `command-suggestion` only. Syntax features never
+  appear in `defaultError` or the detector catalog.
+- `pendingReview` — the six nightly contracts awaiting oracle review and PR
+  promotion.
+- `nonEnforcing` — oracle-quality classification for warning, info, advisory,
+  and result-shape contracts. Scheduling determines whether a contract runs.
+- `dormantContracts` — four preserved default-off detector contracts. They do
+  not count as active shipping coverage and explicitly force-enable their rule.
 
-The `enforced` / `nonEnforcing` split therefore describes **oracle quality and review
-status, not blocking behavior** — it tells a reviewer how much to trust a red result,
-not whether one can occur.
+The `enforced` / `nonEnforcing` split describes **oracle quality and review
+status, not blocking behavior**.
 
 ## Multi-version validation
 
@@ -411,6 +407,12 @@ different places a developer looks:
    the contract's `ruleId` instead.
 2. **The job summary** — the rule × version table plus the full grouped
    remediation report, which stays the authoritative account.
+
+The required single-version lane follows the same rule: frontend and backend
+failures with a `[rule/query]` identity anchor on that contract's `ruleId`.
+Shipping-census findings anchor on `manifest.json` (as warnings while census
+enforcement is report-only). Artifact and job failures without a trustworthy
+repository location remain file-less rather than pointing at a guessed line.
 
 Without the annotations the only thing above the summary is `Process completed
 with exit code 1`, so the natural next click lands in raw job logs rather than the
