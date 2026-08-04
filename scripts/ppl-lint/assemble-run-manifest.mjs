@@ -27,8 +27,10 @@ import {
   indexBackendReport,
   normalizeTarget,
 } from './contract-schema.mjs';
+import { emitRequiredAnnotations } from './annotate.mjs';
 
 const ARTIFACTS = 'artifacts';
+const CONTRACTS = path.resolve('integ-test/src/test/resources/ppl-lint/contracts');
 
 function readJson(file, errors) {
   try {
@@ -147,6 +149,15 @@ function main() {
     if (entry.messageMatched !== true) {
       artifactErrors.push(`detector row ${key} did not match its message assertion`);
     }
+    for (const [field, label] of [
+      ['fixMatched', 'fix'],
+      ['rawMessageMatched', 'raw-message'],
+      ['totalErrorsMatched', 'total-error'],
+    ]) {
+      if (entry[field] === false) {
+        artifactErrors.push(`detector row ${key} did not match its ${label} assertion`);
+      }
+    }
   }
   for (const [key, entry] of backendByKey) {
     if (!detectorKeys.has(key)) {
@@ -212,6 +223,21 @@ function main() {
   fs.writeFileSync('run-manifest.json', JSON.stringify(manifest, null, 2));
 
   writeSummary(manifest, detector, backend);
+
+  emitRequiredAnnotations(
+    {
+      artifactErrors,
+      detectorFailures: Array.isArray(detector.failures) ? detector.failures : [],
+      censusProblems: Array.isArray(detector.census?.problems) ? detector.census.problems : [],
+      censusEnforced: detector.census?.enforced === true,
+      backendResult,
+      detectorResult,
+    },
+    {
+      contractsDir: CONTRACTS,
+      workspace: process.env.GITHUB_WORKSPACE || process.cwd(),
+    }
+  );
 
   if (artifactErrors.length > 0) {
     throw new Error(`invalid PPL lint artifacts:\n- ${artifactErrors.join('\n- ')}`);

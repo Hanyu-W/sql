@@ -1,0 +1,103 @@
+{
+  "schemaVersion": 4,
+  "ruleId": "rex-scan-cost",
+  "channel": "lint",
+  "grammarSurface": "both",
+  "schedule": "nightly",
+  "wiring": {
+    "detector": "rex-scan-cost",
+    "enabled": true,
+    "severity": "info",
+    "runtimeOnly": false,
+    "needsContext": true,
+    "needsExplain": false,
+    "sourceScoped": true,
+    "appliesTo": {}
+  },
+  "backendFixture": {
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
+  },
+  "frontendContext": {
+    "isCalcite": true,
+    "deriveFromMapping": {
+      "email": "text"
+    }
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "parse-text-field": {
+      "role": "trigger",
+      "query": "source={{index}} | parse email '.+@(?<host>.+)' | fields email, host | head 1"
+    },
+    "grok-text-field": {
+      "role": "trigger",
+      "query": "source={{index}} | grok email '.+@%{HOSTNAME:grok_host}' | fields email, grok_host | head 1"
+    },
+    "plain-field-control": {
+      "role": "control",
+      "query": "source={{index}} | fields email | head 1"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=0.0.0",
+      "queries": {
+        "parse-text-field": {
+          "frontend": {
+            "count": 1,
+            "severity": "info",
+            "matchMessage": "every input row"
+          },
+          "backends": {
+            "standard": {
+              "kind": "advisory",
+              "httpStatus": 200
+            },
+            "analytics": {
+              "kind": "advisory",
+              "httpStatus": 200
+            }
+          }
+        },
+        "grok-text-field": {
+          "frontend": {
+            "count": 1,
+            "severity": "info",
+            "matchMessage": "every input row"
+          },
+          "backends": {
+            "standard": {
+              "kind": "advisory",
+              "httpStatus": 200
+            },
+            "analytics": {
+              "kind": "advisory",
+              "httpStatus": 200
+            }
+          }
+        },
+        "plain-field-control": {
+          "frontend": {
+            "count": 0
+          },
+          "backends": {
+            "standard": {
+              "kind": "advisory",
+              "httpStatus": 200
+            },
+            "analytics": {
+              "kind": "advisory",
+              "httpStatus": 200
+            }
+          }
+        }
+      }
+    }
+  ]
+}

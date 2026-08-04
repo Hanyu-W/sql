@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "ruleId": "field-validation",
   "grammarSurface": "both",
   "schedule": "pr",
@@ -10,7 +10,8 @@
     "runtimeOnly": false,
     "needsContext": false,
     "needsExplain": false,
-    "appliesTo": {}
+    "appliesTo": {},
+    "sourceScoped": true
   },
   "backendFixture": {
     "indices": [
@@ -63,32 +64,59 @@
         "unknown-field-existence": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400
+              }
             }
           }
         },
         "grok-field-slot-shape-typo": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400
+              }
             }
           }
         },
         "known-field-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
             }
           }
         }
@@ -100,14 +128,27 @@
         "unknown-field-existence": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Invalid Query"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
               }
             }
           }
@@ -115,25 +156,47 @@
         "grok-field-slot-shape-typo": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Invalid Query"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
               }
             }
           }
         },
         "known-field-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
             }
           }
         }
@@ -146,14 +209,27 @@
           "detectorCount": 1,
           "severity": "error",
           "matchMessage": "nonexistent_field",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Field [nonexistent_field] not found."
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Field [nonexistent_field] not found."
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Field [nonexistent_field] not found."
+                }
               }
             }
           }
@@ -161,25 +237,47 @@
         "grok-field-slot-shape-typo": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Field [field] not found."
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Field [field] not found."
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Field [field] not found."
+                }
               }
             }
           }
         },
         "known-field-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
             }
           }
         }

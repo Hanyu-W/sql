@@ -5,11 +5,12 @@
   "schedule": "pr",
   "wiring": {
     "detector": "dedup-consecutive-unsupported",
-    "enabled": true,
+    "enabled": false,
     "severity": "warning",
     "runtimeOnly": false,
     "needsContext": false,
     "needsExplain": false,
+    "sourceScoped": false,
     "appliesTo": {
       "minVersion": "3.3.0",
       "engine": "calcite"
@@ -25,7 +26,8 @@
     }
   },
   "frontendContext": {
-    "isCalcite": true
+    "isCalcite": true,
+    "forceEnable": true
   },
   "index": "opensearch-sql_test_index_account",
   "queries": {

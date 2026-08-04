@@ -1,0 +1,125 @@
+{
+  "schemaVersion": 4,
+  "ruleId": "type-mismatch-numeric",
+  "channel": "lint",
+  "grammarSurface": "both",
+  "schedule": "nightly",
+  "wiring": {
+    "detector": "type-mismatch-numeric",
+    "enabled": true,
+    "severity": "warning",
+    "runtimeOnly": false,
+    "needsContext": true,
+    "needsExplain": false,
+    "sourceScoped": true,
+    "appliesTo": {
+      "minVersion": "3.7.0",
+      "engine": "calcite"
+    }
+  },
+  "backendFixture": {
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
+  },
+  "frontendContext": {
+    "isCalcite": true,
+    "deriveFromMapping": {
+      "age": "long"
+    }
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "numeric-field-string-value": {
+      "role": "trigger",
+      "query": "source={{index}} | where age = \"thirty\" | fields age"
+    },
+    "string-value-numeric-field": {
+      "role": "trigger",
+      "query": "source={{index}} | where \"thirty\" = age | fields age"
+    },
+    "numeric-string-control": {
+      "role": "control",
+      "query": "source={{index}} | where age = \"32\" | fields age | head 1"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=3.7.0",
+      "engine": "calcite",
+      "queries": {
+        "numeric-field-string-value": {
+          "frontend": {
+            "count": 1,
+            "severity": "warning",
+            "matchMessage": "not a number"
+          },
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsCount": 0
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsCount": 0
+              }
+            }
+          }
+        },
+        "string-value-numeric-field": {
+          "frontend": {
+            "count": 1,
+            "severity": "warning",
+            "matchMessage": "not a number"
+          },
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsCount": 0
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsCount": 0
+              }
+            }
+          }
+        },
+        "numeric-string-control": {
+          "frontend": {
+            "count": 0
+          },
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

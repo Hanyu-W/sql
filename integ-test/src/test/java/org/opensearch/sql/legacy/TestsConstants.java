@@ -77,6 +77,8 @@ public class TestsConstants {
   public static final String TEST_INDEX_ALIAS = TEST_INDEX + "_alias";
   public static final String TEST_INDEX_FLATTENED_VALUE = TEST_INDEX + "_flattened_value";
   public static final String TEST_INDEX_FLAT_OBJECT = TEST_INDEX + "_flat_object";
+  public static final String TEST_INDEX_PPL_LINT_DISABLED_OBJECT =
+      TEST_INDEX + "_ppl_lint_disabled_object";
   public static final String TEST_INDEX_GEOIP = TEST_INDEX + "_geoip";
   public static final String DATASOURCES = ".ql-datasources";
   public static final String TEST_INDEX_STATE_COUNTRY = TEST_INDEX + "_state_country";

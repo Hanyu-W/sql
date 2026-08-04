@@ -370,6 +370,7 @@ jobs:
       # green (design §4.4). A workflow_dispatch run is pre-merge evidence and is
       # intentionally not what repo admins pin to branch protection.
       - name: Require both validation jobs to have succeeded
+        if: ${{ always() }}
         env:
           BACKEND_RESULT: ${{ needs.backend-validation.result }}
           DETECTOR_RESULT: ${{ needs.detector-validation.result }}

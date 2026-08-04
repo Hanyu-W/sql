@@ -1,0 +1,4 @@
+{"index":{"_id":"1"}}
+{"session":{"id":"abc","raw":"not-indexed"},"status":"ok"}
+{"index":{"_id":"2"}}
+{"session":{"id":"def","raw":"not-indexed"},"status":"error"}

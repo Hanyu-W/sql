@@ -4,7 +4,7 @@
  */
 
 /**
- * GitHub Actions annotations for the PPL lint multi-version check.
+ * GitHub Actions annotations for the PPL lint required and multi-version checks.
  *
  * The drift report and the job summary already say exactly what to change. The
  * problem is WHERE a developer looks first: GitHub renders workflow-command
@@ -84,6 +84,16 @@ export function findRuleIdLine(contractText) {
   const lines = contractText.split('\n');
   for (let i = 0; i < lines.length; i++) {
     if (/^\s*"ruleId"\s*:/.test(lines[i])) return i + 1;
+  }
+  return undefined;
+}
+
+function findJsonKeyLine(jsonText, key) {
+  if (!jsonText || !key) return undefined;
+  const lines = jsonText.split('\n');
+  const pattern = new RegExp(`^\\s*${JSON.stringify(key)}\\s*:`);
+  for (let i = 0; i < lines.length; i++) {
+    if (pattern.test(lines[i])) return i + 1;
   }
   return undefined;
 }
@@ -189,7 +199,7 @@ export function buildAnnotations(report, { contractsDir, workspace, readFile = r
   for (const missing of report.missingContracts || []) {
     const ruleId = missing.ruleId || missing;
     annotations.push({
-      level: 'error',
+      level: missing.blocking === false ? 'warning' : 'error',
       // A rule with no contract has no file to point at; the manifest is where the
       // reader's edit goes.
       file: undefined,
@@ -198,10 +208,122 @@ export function buildAnnotations(report, { contractsDir, workspace, readFile = r
         `"${ruleId}" ships enabled at error severity in OSD's rules_catalog.json but ` +
         `${missing.reason || 'has no contract in this corpus'}. A default-error rule with no ` +
         `contract is invisible to this check. Add a contract file and list it under ` +
-        `manifest.defaultError, or lower the rule's severity in OSD.`,
+        `manifest.defaultError, or lower the rule's severity in OSD.` +
+        (missing.blocking === false
+          ? ' This compatibility phase reports the census mismatch without blocking until the paired OSD default-alignment change lands.'
+          : ''),
     });
   }
 
+  return annotations;
+}
+
+function ruleIdentity(message) {
+  const bracketed = String(message).match(/^\[([A-Za-z0-9._-]+)(?:\/([A-Za-z0-9._-]+))?\]/);
+  if (bracketed && !['census', 'contracts', 'grammar-export', 'report'].includes(bracketed[1])) {
+    return { ruleId: bracketed[1], queryName: bracketed[2] };
+  }
+  const row = String(message).match(
+    /\b(?:backend|detector) row ([A-Za-z0-9._-]+)::([A-Za-z0-9._-]+)\b/
+  );
+  return row ? { ruleId: row[1], queryName: row[2] } : {};
+}
+
+function loadContractFiles(contractsDir, readFile) {
+  const files = new Map();
+  const manifestText = readFile(contractsDir, 'manifest.json');
+  if (!manifestText) return { files, manifestText };
+  try {
+    const manifest = JSON.parse(manifestText);
+    const names = [...(manifest.contracts || []), ...(manifest.dormantContracts || [])];
+    for (const name of names) {
+      const text = readFile(contractsDir, name);
+      if (!text) continue;
+      try {
+        const spec = JSON.parse(text);
+        if (spec.ruleId) files.set(spec.ruleId, { name, text });
+      } catch {
+        // Malformed contracts are reported by the schema/runner. Keep this helper
+        // best-effort so annotation generation never hides the original failure.
+      }
+    }
+  } catch {
+    // The manifest parse failure is itself annotated below without a line anchor.
+  }
+  return { files, manifestText };
+}
+
+function manifestKeyFor(message) {
+  if (/defaultError/.test(message)) return 'defaultError';
+  if (/requiredSyntaxFeatures/.test(message)) return 'requiredSyntaxFeatures';
+  if (/dormantContracts/.test(message)) return 'dormantContracts';
+  return 'contracts';
+}
+
+/**
+ * Build annotations for the required single-version lane.
+ *
+ * Detector failures use their `[rule/query]` prefix to land on the owning
+ * contract. Census findings land on manifest.json. Job and artifact failures
+ * without a trustworthy repository location remain file-less.
+ */
+export function buildRequiredAnnotations(
+  report,
+  { contractsDir, workspace, readFile = readContract } = {}
+) {
+  const annotations = [];
+  const { files, manifestText } = loadContractFiles(contractsDir, readFile);
+  const seen = new Set();
+
+  const addFailure = (message, source) => {
+    const text = String(message);
+    const { ruleId, queryName } = ruleIdentity(text);
+    const contract = ruleId ? files.get(ruleId) : undefined;
+    const census = source === 'census' || /^\[census\]/.test(text);
+    const file = census
+      ? contractRepoPath(contractsDir, 'manifest.json', workspace)
+      : contract
+        ? contractRepoPath(contractsDir, contract.name, workspace)
+        : undefined;
+    const line = census
+      ? findJsonKeyLine(manifestText, manifestKeyFor(text))
+      : findRuleIdLine(contract?.text);
+    const level = census && report.censusEnforced !== true ? 'warning' : 'error';
+    const title = census
+      ? 'PPL lint shipping census mismatch'
+      : ruleId
+        ? `PPL lint required validation: ${ruleId}${queryName ? `/${queryName}` : ''}`
+        : `PPL lint required validation: ${source}`;
+    const key = `${level}\0${file || ''}\0${line || ''}\0${title}\0${text}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    annotations.push({
+      level,
+      file,
+      line,
+      title,
+      message:
+        census && report.censusEnforced !== true
+          ? `${text}\nREPORT ONLY: align the active SQL manifest with the approved OSD shipping catalog before enabling census enforcement.`
+          : text,
+    });
+  };
+
+  for (const message of report.detectorFailures || []) addFailure(message, 'frontend');
+  for (const message of report.artifactErrors || []) addFailure(message, 'artifact');
+  for (const message of report.censusProblems || []) addFailure(message, 'census');
+
+  for (const [job, result] of [
+    ['backend-validation', report.backendResult],
+    ['detector-validation', report.detectorResult],
+  ]) {
+    if (result && result !== 'success') {
+      addFailure(
+        `${job} finished with result "${result}". See that job's logs and uploaded artifacts for the underlying failure.`,
+        job
+      );
+    }
+  }
   return annotations;
 }
 
@@ -232,6 +354,18 @@ export function emitAnnotations(report, options = {}) {
   const enabled = options.force || process.env.GITHUB_ACTIONS === 'true';
   if (!enabled) return [];
   const annotations = buildAnnotations(report, options);
+  for (const annotation of annotations) {
+    // eslint-disable-next-line no-console
+    console.log(formatAnnotation(annotation));
+  }
+  return annotations;
+}
+
+/** Emit required-lane annotations under the same Actions-only policy. */
+export function emitRequiredAnnotations(report, options = {}) {
+  const enabled = options.force || process.env.GITHUB_ACTIONS === 'true';
+  if (!enabled) return [];
+  const annotations = buildRequiredAnnotations(report, options);
   for (const annotation of annotations) {
     // eslint-disable-next-line no-console
     console.log(formatAnnotation(annotation));

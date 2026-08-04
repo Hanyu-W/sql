@@ -5,11 +5,12 @@
   "schedule": "pr",
   "wiring": {
     "detector": "disabled-join-type",
-    "enabled": true,
+    "enabled": false,
     "severity": "warning",
     "runtimeOnly": false,
     "needsContext": false,
     "needsExplain": false,
+    "sourceScoped": false,
     "appliesTo": {}
   },
   "backendFixture": {
@@ -23,7 +24,8 @@
     }
   },
   "frontendContext": {
-    "isCalcite": true
+    "isCalcite": true,
+    "forceEnable": true
   },
   "index": "opensearch-sql_test_index_account",
   "queries": {
