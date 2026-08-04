@@ -61,10 +61,6 @@
             "messageEquals": "Numeric aggregation on a text field may return no value (null), because text is not stored as a number.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -91,10 +87,6 @@
             "messageEquals": "Numeric aggregation on a text field may return no value (null), because text is not stored as a number.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -118,9 +110,6 @@
           "frontend": {
             "count": 0,
             "deterministicFix": {
-              "offered": false
-            },
-            "aiAction": {
               "offered": false
             }
           },

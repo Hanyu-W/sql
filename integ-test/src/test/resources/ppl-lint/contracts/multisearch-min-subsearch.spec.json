@@ -58,10 +58,6 @@
             "messageEquals": "The multisearch command requires at least two subsearches.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -96,10 +92,6 @@
             "messageEquals": "The multisearch command requires at least two subsearches.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -131,9 +123,6 @@
           "frontend": {
             "count": 0,
             "deterministicFix": {
-              "offered": false
-            },
-            "aiAction": {
               "offered": false
             }
           },

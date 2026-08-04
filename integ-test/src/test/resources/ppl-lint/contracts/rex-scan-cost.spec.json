@@ -6,7 +6,7 @@
   "schedule": "pr",
   "wiring": {
     "detector": "rex-scan-cost",
-    "enabled": true,
+    "enabled": false,
     "severity": "info",
     "runtimeOnly": false,
     "needsContext": true,
@@ -25,6 +25,7 @@
   },
   "frontendContext": {
     "isCalcite": true,
+    "forceEnable": true,
     "deriveFromMapping": {
       "email": "text"
     }
@@ -55,9 +56,6 @@
             "messageEquals": "parse runs the pattern against every input row from text field \"email\", even when it finds no match.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": false
             }
           },
           "backends": {
@@ -78,9 +76,6 @@
             "messageEquals": "grok runs the pattern against every input row from text field \"email\", even when it finds no match.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": false
             }
           },
           "backends": {
@@ -98,9 +93,6 @@
           "frontend": {
             "count": 0,
             "deterministicFix": {
-              "offered": false
-            },
-            "aiAction": {
               "offered": false
             }
           },

@@ -51,10 +51,6 @@
             "messageEquals": "Wildcard source pattern matches no known index.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -78,9 +74,6 @@
           "frontend": {
             "count": 0,
             "deterministicFix": {
-              "offered": false
-            },
-            "aiAction": {
               "offered": false
             }
           },

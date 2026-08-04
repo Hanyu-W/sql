@@ -9,6 +9,7 @@ import { test } from 'node:test';
 import {
   assertActiveShippingContracts,
   buildCensus,
+  buildFrontendExecutionError,
   evaluateFrontendAssertions,
   selectManifestContractNames,
 } from '../run-frontend-contract.mjs';
@@ -48,12 +49,7 @@ test('exact lint assertions materialize the effective deterministic edit', () =>
         expectedText: 'bad',
         appliedQuery: 'source=t | good',
       },
-      aiAction: { offered: false },
     },
-    decideAction: ({ hasDeterministicFix }) => ({
-      kind: hasDeterministicFix ? 'deterministic' : 'ai',
-      commandId: 'ppl.lint.aiFix',
-    }),
   });
 
   assert.deepEqual(result.mismatches, []);
@@ -61,8 +57,6 @@ test('exact lint assertions materialize the effective deterministic edit', () =>
     severity: true,
     message: true,
     deterministicFix: true,
-    aiAction: true,
-    actionDecision: true,
   });
   assert.deepEqual(result.deterministicFixActual, {
     offered: true,
@@ -74,43 +68,7 @@ test('exact lint assertions materialize the effective deterministic edit', () =>
   });
 });
 
-test('deterministic fixes require the production helper to choose the deterministic action', () => {
-  const result = evaluateFrontendAssertions({
-    channel: 'lint',
-    query: 'source=t | bad',
-    matches: [
-      {
-        severity: 'warning',
-        message: 'Replace bad.',
-        range: RANGE,
-        fix: { title: 'Replace bad', text: 'good', expectedText: 'bad' },
-      },
-    ],
-    frontendOracle: {
-      deterministicFix: {
-        offered: true,
-        title: 'Replace bad',
-        text: 'good',
-        range: RANGE,
-        expectedText: 'bad',
-        appliedQuery: 'source=t | good',
-      },
-      aiAction: { offered: false },
-    },
-    decideAction: () => ({ kind: 'none' }),
-  });
-
-  assert.equal(result.deterministicFixMatched, true);
-  assert.equal(result.aiActionMatched, true);
-  assert.equal(result.actionDecisionMatched, false);
-  assert.equal(
-    result.mismatches.find(({ field }) => field === 'actionDecision')?.actual[0],
-    'none'
-  );
-});
-
-test('AI action identity and exact messages produce field-specific mismatches', () => {
-  let decisionInput;
+test('exact message mismatches are field-specific', () => {
   const result = evaluateFrontendAssertions({
     channel: 'lint',
     query: 'source=t | bad',
@@ -125,26 +83,10 @@ test('AI action identity and exact messages produce field-specific mismatches', 
     frontendOracle: {
       messageEquals: 'Expected message.',
       deterministicFix: { offered: false },
-      aiAction: { offered: true, commandId: 'ppl.lint.aiFix' },
-    },
-    decideAction: (input) => {
-      decisionInput = input;
-      return { kind: 'ai', commandId: 'wrong.command' };
     },
   });
 
-  assert.deepEqual(
-    result.mismatches.map(({ field }) => field),
-    ['message', 'aiAction']
-  );
-  assert.deepEqual(result.aiActionActual, {
-    offered: true,
-    commandId: 'wrong.command',
-  });
-  assert.equal(decisionInput.enableAIFeatures, true);
-  assert.equal(decisionInput.hasAiFixHandler, true);
-  assert.equal(decisionInput.aiAgentAvailableForSource, true);
-  assert.equal(decisionInput.aiFixEligible, true);
+  assert.deepEqual(result.mismatches.map(({ field }) => field), ['message']);
 });
 
 test('deterministic expectedText must match the source slice', () => {
@@ -178,33 +120,45 @@ test('deterministic expectedText must match the source slice', () => {
   assert.equal(result.deterministicFixActual.expectedTextMatchesSource, false);
 });
 
-test('AI assertions fail closed when the production decision export is unavailable', () => {
-  const result = evaluateFrontendAssertions({
-    channel: 'lint',
-    query: 'source=t',
-    matches: [],
-    frontendOracle: { aiAction: { offered: false } },
-  });
-
-  assert.equal(result.aiActionMatched, false);
-  assert.equal(result.mismatches[0].field, 'aiAction');
-  assert.equal(result.aiActionActual.unavailable, true);
-});
-
-test('AI assertions report production decision errors instead of passing absence', () => {
-  const result = evaluateFrontendAssertions({
-    channel: 'lint',
-    query: 'source=t | bad',
-    matches: [{ message: 'Bad', range: RANGE }],
-    frontendOracle: { aiAction: { offered: false } },
-    decideAction: () => {
-      throw new Error('decision failed');
-    },
-  });
-
-  assert.equal(result.aiActionMatched, false);
-  assert.match(result.aiActionActual.error, /decision failed/);
-  assert.equal(result.mismatches[0].field, 'aiAction');
+test('a frontend execution error remains a complete report row', () => {
+  assert.deepEqual(
+    buildFrontendExecutionError({
+      ruleId: 'example-rule',
+      channel: 'lint',
+      queryName: 'trigger',
+      role: 'trigger',
+      query: 'source=t | bad',
+      expected: 0,
+      surface: 'runtime-bundle',
+      executionBackend: 'standard',
+      error: new Error('detector crashed'),
+    }),
+    {
+      ruleId: 'example-rule',
+      channel: 'lint',
+      queryName: 'trigger',
+      role: 'trigger',
+      query: 'source=t | bad',
+      expected: 0,
+      actual: 0,
+      severities: [],
+      severityMatched: true,
+      messageMatched: true,
+      assertions: { execution: false },
+      mismatches: [
+        {
+          field: 'execution',
+          expected: 'completed',
+          actual: 'detector crashed',
+        },
+      ],
+      outcome: 'error',
+      error: 'detector crashed',
+      surface: 'runtime-bundle',
+      executionBackend: 'standard',
+      backendOracleStatus: 'error',
+    }
+  );
 });
 
 test('syntax suppression checks raw parser errors outside the suggestion code filter', () => {
@@ -295,31 +249,26 @@ test('discovery mode accepts legacy generated specs without shipping oracles', (
   );
 });
 
-test('shipping census rejects duplicate detector IDs and syntax features in the catalog', () => {
-  const syntaxContract = {
-    file: 'command-suggestion.spec.json',
+test('shipping census rejects duplicate detector IDs', () => {
+  const lintContract = {
+    file: 'example.spec.json',
     spec: {
       schemaVersion: 4,
-      ruleId: 'command-suggestion',
-      channel: 'syntax',
+      ruleId: 'example',
     },
   };
   const census = buildCensus(
-    [syntaxContract],
+    [lintContract],
     {
-      contracts: ['command-suggestion.spec.json'],
+      contracts: ['example.spec.json'],
       defaultError: [],
-      requiredSyntaxFeatures: ['command-suggestion.spec.json'],
+      requiredSyntaxFeatures: [],
     },
     [
-      { id: 'command-suggestion', enabled: false, severity: 'error' },
       { id: 'duplicate-rule', enabled: false, severity: 'info' },
       { id: 'duplicate-rule', enabled: false, severity: 'info' },
     ]
   );
 
   assert.ok(census.problems.some((problem) => /duplicate rule IDs/.test(problem)));
-  assert.ok(
-    census.problems.some((problem) => /outside the detector catalog/.test(problem))
-  );
 });

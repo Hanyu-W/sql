@@ -59,10 +59,6 @@
             "messageEquals": "The replace match and replacement have different numbers of \"*\" wildcards. The counts must match.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -97,10 +93,6 @@
             "messageEquals": "The replace match and replacement have different numbers of \"*\" wildcards. The counts must match.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -132,9 +124,6 @@
           "frontend": {
             "count": 0,
             "deterministicFix": {
-              "offered": false
-            },
-            "aiAction": {
               "offered": false
             }
           },
@@ -168,10 +157,6 @@
             "messageEquals": "The replace match and replacement have different numbers of \"*\" wildcards. The counts must match.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -206,10 +191,6 @@
             "messageEquals": "The replace match and replacement have different numbers of \"*\" wildcards. The counts must match.",
             "deterministicFix": {
               "offered": false
-            },
-            "aiAction": {
-              "offered": true,
-              "commandId": "ppl.lint.aiFix"
             }
           },
           "backends": {
@@ -241,9 +222,6 @@
           "frontend": {
             "count": 0,
             "deterministicFix": {
-              "offered": false
-            },
-            "aiAction": {
               "offered": false
             }
           },

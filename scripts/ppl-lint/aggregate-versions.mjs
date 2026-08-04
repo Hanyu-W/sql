@@ -268,8 +268,6 @@ function normalizeDetectorReport(detector, target) {
       }
       for (const field of [
         'deterministicFixMatched',
-        'aiActionMatched',
-        'actionDecisionMatched',
         'fixMatched',
         'rawMessageMatched',
         'totalErrorsMatched',
@@ -613,12 +611,9 @@ function detectorParityValue(entry) {
       typeof entry.deterministicFixMatched === 'boolean'
         ? entry.deterministicFixMatched
         : undefined,
-    aiActionMatched:
-      typeof entry.aiActionMatched === 'boolean' ? entry.aiActionMatched : undefined,
     assertions: entry.assertions,
     mismatches: entry.mismatches,
     deterministicFix: entry.deterministicFix,
-    aiAction: entry.aiAction,
     code: entry.code,
     codes: entry.codes,
     totalErrors: entry.totalErrors,
@@ -825,11 +820,11 @@ function auditShippingCensus(legs, specs, manifest) {
   if (activeLintRules.size !== 12) {
     problems.push(`expected 12 active lint contracts, found ${activeLintRules.size}`);
   }
-  if (requiredSyntaxRules.size !== 1) {
-    problems.push(`expected one required syntax feature, found ${requiredSyntaxRules.size}`);
+  if (requiredSyntaxRules.size !== 0) {
+    problems.push(`expected no required syntax features, found ${requiredSyntaxRules.size}`);
   }
-  if (activeRules.size !== 13) {
-    problems.push(`expected 13 active contracts, found ${activeRules.size}`);
+  if (activeRules.size !== 12) {
+    problems.push(`expected 12 active contracts, found ${activeRules.size}`);
   }
   if (!setsEqual(activeLintRules, enabledRules)) {
     problems.push(
@@ -882,9 +877,10 @@ function auditShippingCensus(legs, specs, manifest) {
 function readBackendObservation(backendEntry, detectorResult) {
   const verdict = backendVerdict(backendEntry);
   const hasVerdict = typeof verdict.backendRejected === 'boolean';
+  const detectorUsable = !!detectorResult && detectorResult.outcome !== 'error';
 
   return {
-    usable: hasVerdict && !!detectorResult,
+    usable: hasVerdict && detectorUsable,
     observed: {
       detectorCount: detectorResult ? detectorResult.actual : 0,
       severities: detectorResult ? detectorResult.severities || [] : [],
@@ -899,7 +895,6 @@ function readBackendObservation(backendEntry, detectorResult) {
       deterministicFixMatched: detectorResult
         ? detectorResult.deterministicFixMatched
         : undefined,
-      aiActionMatched: detectorResult ? detectorResult.aiActionMatched : undefined,
       fixMatched: detectorResult ? detectorResult.fixMatched : undefined,
       rawMessageMatched: detectorResult ? detectorResult.rawMessageMatched : undefined,
       totalErrorsMatched: detectorResult
@@ -911,6 +906,20 @@ function readBackendObservation(backendEntry, detectorResult) {
   };
 }
 
+function unusableObservationReason(detectorResult) {
+  if (!detectorResult) {
+    return 'no detector result';
+  }
+  if (detectorResult.outcome === 'error') {
+    const message =
+      typeof detectorResult.error === 'string' && detectorResult.error.length > 0
+        ? detectorResult.error
+        : 'unknown frontend execution error';
+    return `frontend execution failed: ${message}`;
+  }
+  return 'no engine verdict';
+}
+
 function failedExtendedFrontendAssertions(entry, frontendOracle) {
   if (!entry) {
     return [];
@@ -918,7 +927,6 @@ function failedExtendedFrontendAssertions(entry, frontendOracle) {
   const failures = new Set();
   for (const field of [
     'deterministicFixMatched',
-    'aiActionMatched',
     'fixMatched',
     'rawMessageMatched',
     'totalErrorsMatched',
@@ -972,9 +980,7 @@ function classifyOutOfScope({ spec, ruleId, leg, classify, divergentCases }) {
     const detectorResult = leg.detector.resultsByKey.get(rowKey);
     const { observed, usable } = readBackendObservation(backendEntry, detectorResult);
     if (!usable) {
-      unusable.push(
-        `${queryName} (${!detectorResult ? 'no detector result' : 'no engine verdict'})`
-      );
+      unusable.push(`${queryName} (${unusableObservationReason(detectorResult)})`);
       continue;
     }
     observations.set(queryName, observed);
@@ -1322,13 +1328,18 @@ function main() {
             );
           }
         }
+        if (detectorResult && detectorResult.outcome === 'error') {
+          unusable.push(`${queryName} (${unusableObservationReason(detectorResult)})`);
+          if (role === 'trigger') {
+            unobservedTriggers.push(queryName);
+          }
+          continue;
+        }
 
         if (oracleSelection.status === 'coverage-missing') {
           const { usable } = readBackendObservation(backendEntry, detectorResult);
           if (!usable) {
-            unusable.push(
-              `${queryName} (${!detectorResult ? 'no detector result' : 'no engine verdict'})`
-            );
+            unusable.push(`${queryName} (${unusableObservationReason(detectorResult)})`);
             if (role === 'trigger') {
               unobservedTriggers.push(queryName);
             }
@@ -1457,9 +1468,7 @@ function main() {
           // verdict and no detector row looks exactly like "the detector went
           // silent", and the report would tell the engineer to go fix a detector
           // that is fine. Record it as not compared and move on.
-          unusable.push(
-            `${queryName} (${!detectorResult ? 'no detector result' : 'no engine verdict'})`
-          );
+          unusable.push(`${queryName} (${unusableObservationReason(detectorResult)})`);
           if (role === 'trigger') {
             unobservedTriggers.push(queryName);
           }

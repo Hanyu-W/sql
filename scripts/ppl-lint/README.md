@@ -50,10 +50,9 @@ backend-validation ──(target.json, ppl-grammar-bundle.json, backend-report.j
 | `workflow_dispatch` (`osd_ref`) | OSD-branch evidence | the given commit/branch | No — pre-merge evidence only |
 | `schedule` (nightly) | full corpus + coverage | `main` | No |
 
-The required PR corpus contains 12 detector contracts plus the
-`command-suggestion` syntax contract. All 13 declare `schedule: "pr"` and can
-fail the required check. The nightly mode runs the same shipping corpus across
-the supported version and execution-backend matrix.
+The required PR corpus contains 12 detector contracts. The nightly mode runs
+the same active corpus plus four dormant report-only contracts across the
+supported version and execution-backend matrix.
 
 `workflow_dispatch` inputs:
 
@@ -210,8 +209,8 @@ rule cannot be validated end to end.
   backend behavior.
 - `defaultError` — every rule that ships **enabled at error severity** in OSD's
   `rules_catalog.json`; it contains exactly six detector rules.
-- `requiredSyntaxFeatures` — `command-suggestion` only. Syntax features never
-  appear in `defaultError` or the detector catalog.
+- `requiredSyntaxFeatures` — reserved for future syntax compatibility contracts;
+  currently empty.
 - `nonEnforcing` — oracle-quality classification for warning, info, advisory,
   and result-shape contracts. Scheduling determines whether a contract runs.
 - `dormantContracts` — four preserved default-off detector contracts. They do
@@ -363,13 +362,15 @@ rule with only one pinned trigger gets an explicit warning that a "fully relaxed
 verdict rests on a single observation. That is the gap the discovery corpus below
 closes.
 
-Four guards keep the check from passing vacuously. Each exists because "we could
-not check" must never render as "it is fine":
+Three hard guards keep the check from passing vacuously. The shipping census is
+also recorded, but remains report-only until the paired OSD default-alignment
+change lands:
 
-- A rule that is default-error in OSD's catalog but has no contract file fails the
-  run. The detector runner records the catalog's default-error census in
-  `detector-report.json`, and the aggregate step compares it against
-  `manifest.defaultError` — so a new error rule cannot land unvalidated.
+- A rule that is default-error in OSD's catalog but has no contract file is
+  reported in the shipping census. The detector runner records the catalog's
+  default-error census in `detector-report.json`, and the aggregate step compares
+  it against `manifest.defaultError`. This becomes blocking when census
+  enforcement is enabled after OSD defaults are aligned.
 - A leg whose artifacts are missing is a hard failure, never a silently dropped
   version. The aggregate step also checks that every version the plan asked for
   produced a report, so a dead observe job cannot shrink the matrix into a green
@@ -406,9 +407,14 @@ different places a developer looks:
 
 The required single-version lane follows the same rule: frontend and backend
 failures with a `[rule/query]` identity anchor on that contract's `ruleId`.
-Shipping-census findings anchor on `manifest.json` and fail the required lane.
-Artifact and job failures without a trustworthy
-repository location remain file-less rather than pointing at a guessed line.
+An individual detector/query execution error is recorded as an `error` row and
+does not stop the remaining contracts from running or prevent
+`detector-report.json` from being uploaded. The required check still fails after
+the complete report is written, with the failing rule/query named directly.
+Shipping-census findings anchor on `manifest.json` and remain report-only until
+the paired OSD default-alignment change lands. Artifact and job failures without
+a trustworthy repository location remain file-less rather than pointing at a
+guessed line.
 
 Without the annotations the only thing above the summary is `Process completed
 with exit code 1`, so the natural next click lands in raw job logs rather than the
@@ -483,7 +489,7 @@ harvest-queries.mjs ──▶ discovery-corpus.json ──┬──▶ run-front
    A query with no rule-owning ancestor is recorded unattributed and dropped rather
    than guessed at. Indices are rewritten onto the fixture index; JS string escapes
    are unescaped so the query matches what the test actually linted. The harvested
-   corpus is substantially larger than the curated 13-contract required corpus.
+   corpus is substantially larger than the curated 12-contract required corpus.
 
    Each file's **lint context** is harvested alongside its queries. Seven of the
    nineteen rules are `needsContext: true` and self-suppress without a `typeMap`, so

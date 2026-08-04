@@ -60,13 +60,13 @@ import org.opensearch.sql.ppl.PPLIntegTestCase;
  * <p>While the ephemeral cluster is alive, the test also exports the candidate runtime grammar
  * bundle it built ({@code GET /_plugins/_ppl/_grammar}) and a small target manifest pairing the
  * bundle with the backend version and grammar hash. These become workflow artifacts that the
- * detector-validation job injects into OSD's headless lint and syntax APIs, so both halves validate
- * against the SAME candidate grammar (design §4.2, §4.3). Export runs only when {@code
+ * detector-validation job injects into OSD's headless lint API, so both halves validate against the
+ * SAME candidate grammar (design §4.2, §4.3). Export runs only when {@code
  * -Dppl.lint.grammar.bundle} is set (CI); local runs without it are unaffected.
  *
  * <p>The suite honors {@code -Dppl.lint.schedule=pr|nightly} (default {@code pr}): a PR run skips
- * contracts declaring {@code schedule: "nightly"}, while nightly runs all 13 active contracts. The
- * filter holds new detector and syntax contracts back from PR runs while their standard and
+ * contracts declaring {@code schedule: "nightly"}, while nightly runs all 12 active detector
+ * contracts. The filter holds new detector contracts back from PR runs while their standard and
  * analytics oracles are still settling.
  *
  * <p>Note that a contract which RUNS also ASSERTS. This class does not consult the manifest's
