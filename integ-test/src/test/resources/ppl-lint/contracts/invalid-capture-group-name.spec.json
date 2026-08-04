@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "ruleId": "invalid-capture-group-name",
   "grammarSurface": "runtime-bundle",
   "schedule": "pr",
@@ -14,7 +14,10 @@
     "runtimeOnly": false,
     "needsContext": false,
     "needsExplain": false,
-    "appliesTo": {}
+    "appliesTo": {
+      "minVersion": "3.4.0"
+    },
+    "sourceScoped": false
   },
   "backendFixture": {
     "indices": [
@@ -54,14 +57,27 @@
         "rex-capture-name-underscore": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Invalid Query"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
               }
             }
           }
@@ -69,25 +85,47 @@
         "rex-capture-name-hyphen": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Invalid Query"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid Query"
+                }
               }
             }
           }
         },
         "rex-capture-name-alphanumeric-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
             }
           }
         }
@@ -100,14 +138,27 @@
         "rex-capture-name-underscore": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Invalid capture group name 'user_name'."
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid capture group name 'user_name'."
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid capture group name 'user_name'."
+                }
               }
             }
           }
@@ -115,25 +166,47 @@
         "rex-capture-name-hyphen": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "IllegalArgumentException",
-                "reason": "Invalid capture group name 'user-name'."
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid capture group name 'user-name'."
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "IllegalArgumentException",
+                  "reason": "Invalid capture group name 'user-name'."
+                }
               }
             }
           }
         },
         "rex-capture-name-alphanumeric-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
             }
           }
         }

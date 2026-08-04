@@ -82,7 +82,9 @@ import {
   assertContractSchema,
   assertExactQueryCoverage,
   classifyBackendReportRow,
+  contractChannel,
   indexBackendReport,
+  normalizeLintWiring,
   normalizeTarget,
   resolveBackendOracle,
 } from './contract-schema.mjs';
@@ -90,6 +92,8 @@ import {
 // OSD's Node-safe headless lint API (design §4.3). Deep-path module; resolved
 // against the OSD checkout root, not this script's SQL-repo location.
 const HEADLESS_MODULE = 'src/plugins/data/public/antlr/opensearch_ppl/headless_ppl_lint';
+const SYNTAX_MODULE =
+  'src/plugins/data/public/antlr/opensearch_ppl/runtime_validation_core';
 // The COMPILED-simplified surface: OSD's own checked-in grammar, used when the
 // engine cannot export a runtime bundle. See `PPL_LINT_SURFACE` below.
 const ANALYZER_MODULE = 'packages/osd-monaco/src/ppl/ppl_language_analyzer';
@@ -174,7 +178,12 @@ function loadContracts() {
     if (!fs.existsSync(single)) {
       fatal(`Contract file not found: ${single}`);
     }
-    return [loadContractFile(single)];
+    const contract = loadContractFile(single);
+    return {
+      contracts: [contract],
+      manifest: { contracts: [path.basename(single)] },
+      manifestPath: '',
+    };
   }
 
   if (!dir) {
@@ -186,8 +195,8 @@ function loadContracts() {
 
   const manifestPath = path.join(dir, 'manifest.json');
   let files;
+  let manifest;
   if (fs.existsSync(manifestPath)) {
-    let manifest;
     try {
       manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     } catch (error) {
@@ -195,6 +204,9 @@ function loadContracts() {
     }
     if (!Array.isArray(manifest.contracts)) {
       fatal(`manifest.json must have a "contracts" array of file names.`);
+    }
+    if (new Set(manifest.contracts).size !== manifest.contracts.length) {
+      fatal(`manifest.json "contracts" contains duplicate file names.`);
     }
     files = manifest.contracts.map((name) => path.join(dir, name));
   } else {
@@ -205,12 +217,13 @@ function loadContracts() {
       .map((f) => path.join(dir, f));
   }
 
-  return files.map((file) => {
+  const contracts = files.map((file) => {
     if (!fs.existsSync(file)) {
       fatal(`Contract referenced by manifest not found: ${file}`);
     }
     return loadContractFile(file);
   });
+  return { contracts, manifest: manifest || { contracts: files.map(path.basename) }, manifestPath };
 }
 
 function loadOsd() {
@@ -286,11 +299,17 @@ function loadOsd() {
         `Is the OSD checkout on a branch that ships the headless API (design §4.3)?`
     );
   }
+  const syntaxModule = resolveOsd(SYNTAX_MODULE, { optional: true });
+  const validateSyntax =
+    syntaxModule && typeof syntaxModule.validateQueryWithBundle === 'function'
+      ? syntaxModule.validateQueryWithBundle
+      : undefined;
 
   return {
     surface: SURFACE,
     deserializeBundleOrThrow,
     lintQuery: lintQueryWithBundle,
+    validateSyntax,
     getBundledCatalog,
     getDetector,
     osdRoot,
@@ -466,6 +485,9 @@ function selectExpectation(spec, version, isCalcite, failures, { allowMissing = 
  */
 function checkWiring(spec, catalog, getDetector, failures) {
   const { ruleId, wiring } = spec;
+  if (contractChannel(spec) === 'syntax') {
+    return { id: ruleId, syntaxCode: wiring && wiring.code };
+  }
   const entry = catalog.find((c) => c.id === ruleId);
   if (!entry) {
     failures.push(`[${ruleId}] not present in the OSD bundled catalog.`);
@@ -475,31 +497,20 @@ function checkWiring(spec, catalog, getDetector, failures) {
     return entry; // no wiring block to assert
   }
 
-  const checks = [
-    ['detector', wiring.detector, entry.detector],
-    ['enabled', wiring.enabled, entry.enabled],
-    ['severity', wiring.severity, entry.severity],
-    ['runtimeOnly', !!wiring.runtimeOnly, !!entry.runtimeOnly],
-    ['needsContext', !!wiring.needsContext, !!entry.needsContext],
-    ['needsExplain', !!wiring.needsExplain, !!entry.needsExplain],
-  ];
-  for (const [name, expected, actual] of checks) {
-    if (expected !== undefined && expected !== actual) {
-      failures.push(
-        `[${ruleId}] wiring.${name} expected ${JSON.stringify(expected)} but catalog has ${JSON.stringify(actual)}.`
-      );
-    }
+  let expected;
+  let actual;
+  try {
+    expected = normalizeLintWiring(ruleId, wiring, `[${ruleId}] contract.wiring`);
+    actual = normalizeLintWiring(ruleId, entry, `[${ruleId}] catalog`);
+  } catch (error) {
+    failures.push(error.message);
+    return entry;
   }
-
-  if (wiring.appliesTo) {
-    const a = entry.appliesTo || {};
-    for (const key of ['minVersion', 'maxVersion', 'engine']) {
-      if (wiring.appliesTo[key] !== undefined && wiring.appliesTo[key] !== a[key]) {
-        failures.push(
-          `[${ruleId}] wiring.appliesTo.${key} expected ${JSON.stringify(wiring.appliesTo[key])} but catalog has ${JSON.stringify(a[key])}.`
-        );
-      }
-    }
+  if (JSON.stringify(expected) !== JSON.stringify(actual)) {
+    failures.push(
+      `[${ruleId}] normalized wiring mismatch: contract=${JSON.stringify(expected)} ` +
+        `catalog=${JSON.stringify(actual)}.`
+    );
   }
 
   if (wiring.detector && typeof getDetector === 'function' && typeof getDetector(wiring.detector) !== 'function') {
@@ -553,16 +564,124 @@ function buildContext(spec, engineVersion) {
   return context;
 }
 
+function equalSets(left, right) {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function buildCensus(contracts, manifest, catalog) {
+  const problems = [];
+  const byFile = new Map(
+    contracts.map(({ file, spec }) => [path.basename(file), spec])
+  );
+  const resolveManifestRules = (field) => {
+    const names = manifest[field] || [];
+    if (!Array.isArray(names)) {
+      problems.push(`manifest.${field} must be an array.`);
+      return [];
+    }
+    if (new Set(names).size !== names.length) {
+      problems.push(`manifest.${field} contains duplicate file names.`);
+    }
+    const rules = [];
+    for (const name of names) {
+      const spec = byFile.get(name);
+      if (!spec) {
+        problems.push(`manifest.${field} references inactive or missing contract "${name}".`);
+      } else {
+        rules.push(spec.ruleId);
+      }
+    }
+    return rules;
+  };
+
+  const activeContractRules = contracts.map(({ spec }) => spec.ruleId).sort();
+  const duplicateRuleIds = activeContractRules.filter(
+    (ruleId, index) => activeContractRules.indexOf(ruleId) !== index
+  );
+  if (duplicateRuleIds.length > 0) {
+    problems.push(`active contracts contain duplicate rule IDs: ${duplicateRuleIds.join(', ')}.`);
+  }
+
+  const activeLintRules = contracts
+    .filter(({ spec }) => contractChannel(spec) === 'lint')
+    .map(({ spec }) => spec.ruleId)
+    .sort();
+  const activeSyntaxRules = contracts
+    .filter(({ spec }) => contractChannel(spec) === 'syntax')
+    .map(({ spec }) => spec.ruleId)
+    .sort();
+  const enabledRules = catalog
+    .filter((rule) => rule.enabled)
+    .map((rule) => rule.id)
+    .sort();
+  const defaultErrorRules = catalog
+    .filter((rule) => rule.enabled && rule.severity === 'error')
+    .map((rule) => rule.id)
+    .sort();
+  const manifestDefaultErrorRules = resolveManifestRules('defaultError').sort();
+  const requiredSyntaxFeatures = resolveManifestRules('requiredSyntaxFeatures').sort();
+
+  if (activeLintRules.length !== 12) {
+    problems.push(`expected 12 active lint contracts, found ${activeLintRules.length}.`);
+  }
+  if (requiredSyntaxFeatures.length !== 1) {
+    problems.push(
+      `expected one required syntax feature, found ${requiredSyntaxFeatures.length}.`
+    );
+  }
+  if (activeContractRules.length !== 13) {
+    problems.push(`expected 13 active contracts, found ${activeContractRules.length}.`);
+  }
+  if (!equalSets(new Set(activeSyntaxRules), new Set(requiredSyntaxFeatures))) {
+    problems.push(
+      `active syntax contracts ${JSON.stringify(activeSyntaxRules)} do not equal ` +
+        `manifest.requiredSyntaxFeatures ${JSON.stringify(requiredSyntaxFeatures)}.`
+    );
+  }
+  if (!equalSets(new Set(activeLintRules), new Set(enabledRules))) {
+    problems.push(
+      `active lint contracts ${JSON.stringify(activeLintRules)} do not equal enabled catalog ` +
+        `rules ${JSON.stringify(enabledRules)}.`
+    );
+  }
+  if (!equalSets(new Set(manifestDefaultErrorRules), new Set(defaultErrorRules))) {
+    problems.push(
+      `manifest.defaultError rules ${JSON.stringify(manifestDefaultErrorRules)} do not equal ` +
+        `enabled error catalog rules ${JSON.stringify(defaultErrorRules)}.`
+    );
+  }
+
+  return {
+    enabledRules,
+    defaultErrorRules,
+    requiredSyntaxFeatures,
+    activeContractRules,
+    activeLintRules,
+    activeSyntaxRules,
+    manifestDefaultErrorRules,
+    passed: problems.length === 0,
+    problems,
+  };
+}
+
 function main() {
   const schedule = process.env.PPL_LINT_SCHEDULE || 'pr';
   const reportPath = process.env.PPL_LINT_REPORT;
   const target = loadTarget();
   const backendReport = loadBackendReport(target);
-  const contracts = loadContracts();
+  const { contracts, manifest, manifestPath } = loadContracts();
 
   const osd = loadOsd();
-  const { getBundledCatalog, getDetector, lintQuery, osdRoot, surface } = osd;
+  const {
+    getBundledCatalog,
+    getDetector,
+    lintQuery,
+    validateSyntax,
+    osdRoot,
+    surface,
+  } = osd;
   const catalog = getBundledCatalog();
+  const census = buildCensus(contracts, manifest, catalog);
 
   // The compiled surface lints with OSD's own checked-in grammar, so there is no
   // candidate bundle to load. On the runtime surface a missing bundle stays a hard
@@ -610,8 +729,24 @@ function main() {
       .filter((rule) => rule.enabled && rule.severity === 'error')
       .map((rule) => rule.id)
       .sort(),
+    enabledRules: census.enabledRules,
+    requiredSyntaxFeatures: census.requiredSyntaxFeatures,
+    activeContractRules: census.activeContractRules,
+    census: {
+      enforced: process.env.PPL_LINT_ENFORCE_CENSUS === '1',
+      manifest: manifestPath,
+      ...census,
+    },
     results: [],
   };
+  if (!census.passed) {
+    for (const problem of census.problems) {
+      log(`CENSUS REPORT-ONLY: ${problem}`);
+    }
+    if (process.env.PPL_LINT_ENFORCE_CENSUS === '1') {
+      failures.push(...census.problems.map((problem) => `[census] ${problem}`));
+    }
+  }
 
   log(`OSD root: ${osdRoot}`);
   log(
@@ -623,6 +758,11 @@ function main() {
   for (const { file, spec } of contracts) {
     const ruleId = spec.ruleId;
     const index = spec.index;
+    const channel = contractChannel(spec);
+    const entry = checkWiring(spec, catalog, getDetector, failures);
+    if (!entry) {
+      continue;
+    }
 
     // A contract runs on PR only when scheduled for PR; nightly runs everything.
     const contractSchedule = spec.schedule || 'pr';
@@ -650,6 +790,7 @@ function main() {
       for (const [queryName, queryDef] of Object.entries(spec.queries || {})) {
         report.results.push({
           ruleId,
+          channel,
           queryName,
           role: queryDef.role || 'trigger',
           query: (queryDef.query || '').split('{{index}}').join(index),
@@ -659,11 +800,6 @@ function main() {
           notApplicable: `contract declares grammarSurface "${contractSurface}"`,
         });
       }
-      continue;
-    }
-
-    const entry = checkWiring(spec, catalog, getDetector, failures);
-    if (!entry) {
       continue;
     }
 
@@ -681,6 +817,7 @@ function main() {
         if (surface === 'compiled-simplified' && entry.runtimeOnly) {
           report.results.push({
             ruleId,
+            channel,
             queryName,
             role,
             query,
@@ -691,10 +828,23 @@ function main() {
           });
           continue;
         }
-        const result = lintQuery(query, grammar, context);
-        const matches = (result.diagnostics || []).filter((d) => d.ruleId === ruleId);
+        if (channel === 'syntax' && typeof validateSyntax !== 'function') {
+          fatal(
+            `Syntax contract "${ruleId}" requires validateQueryWithBundle from ${SYNTAX_MODULE}. ` +
+              `Validate this SQL branch against the OSD headless-syntax PR.`
+          );
+        }
+        const result =
+          channel === 'syntax'
+            ? validateSyntax(query, grammar)
+            : lintQuery(query, grammar, context);
+        const matches =
+          channel === 'syntax'
+            ? result.errors || []
+            : (result.diagnostics || []).filter((d) => d.ruleId === ruleId);
         report.results.push({
           ruleId,
+          channel,
           queryName,
           role,
           query,
@@ -730,9 +880,10 @@ function main() {
       } catch (error) {
         fatal(`Invalid contract ${file} query "${queryName}": ${error.message}`);
       }
-      const expectedCount = oracleSelection.detector.count;
-      const expectedSeverity = oracleSelection.detector.severity;
-      const expectedMessage = oracleSelection.detector.matchMessage;
+      const frontendOracle = oracleSelection.frontend;
+      const expectedCount = frontendOracle.count;
+      const expectedSeverity = frontendOracle.severity;
+      const expectedMessage = frontendOracle.matchMessage;
 
       // A `runtimeOnly` rule walks grammar productions that exist only in the
       // runtime bundle, so `lint_runner` skips it on the compiled surface. Its
@@ -747,6 +898,7 @@ function main() {
         );
         report.results.push({
           ruleId,
+          channel,
           queryName,
           role,
           query,
@@ -758,8 +910,22 @@ function main() {
         continue;
       }
 
-      const result = lintQuery(query, grammar, context);
-      const matches = (result.diagnostics || []).filter((d) => d.ruleId === ruleId);
+      if (channel === 'syntax' && typeof validateSyntax !== 'function') {
+        fatal(
+          `Syntax contract "${ruleId}" requires validateQueryWithBundle from ${SYNTAX_MODULE}. ` +
+            `Validate this SQL branch against the OSD headless-syntax PR.`
+        );
+      }
+      const result =
+        channel === 'syntax'
+          ? validateSyntax(query, grammar)
+          : lintQuery(query, grammar, context);
+      const allFrontendFindings =
+        channel === 'syntax' ? result.errors || [] : result.diagnostics || [];
+      const matches =
+        channel === 'syntax'
+          ? allFrontendFindings.filter((finding) => finding.code === frontendOracle.code)
+          : allFrontendFindings.filter((finding) => finding.ruleId === ruleId);
       const actual = matches.length;
       const ok = actual === expectedCount;
 
@@ -769,23 +935,51 @@ function main() {
       );
 
       const severityOk =
+        channel === 'syntax' ||
         !expectedSeverity ||
         actual === 0 ||
         matches.every((m) => m.severity === expectedSeverity);
       const messageOk =
         !expectedMessage ||
         matches.some((m) => (m.message || '').includes(expectedMessage));
+      const fixOk =
+        channel !== 'syntax' ||
+        frontendOracle.fixText === undefined ||
+        matches.some((m) => m.fix && m.fix.text === frontendOracle.fixText);
+      const rawMessageOk =
+        channel !== 'syntax' ||
+        frontendOracle.rawMessage === undefined ||
+        matches.some((m) =>
+          frontendOracle.rawMessage
+            ? typeof m.rawMessage === 'string' && m.rawMessage.length > 0
+            : m.rawMessage === undefined
+        );
+      const totalErrorsOk =
+        channel !== 'syntax' ||
+        frontendOracle.totalErrors === undefined ||
+        allFrontendFindings.length === frontendOracle.totalErrors;
 
       const resultEntry = {
         ruleId,
+        channel,
         queryName,
         role,
         query,
         expected: expectedCount,
         actual,
-        severities: matches.map((m) => m.severity),
+        severities: matches.map((m) => m.severity).filter(Boolean),
         severityMatched: severityOk,
         messageMatched: messageOk,
+        fixMatched: fixOk,
+        rawMessageMatched: rawMessageOk,
+        totalErrorsMatched: totalErrorsOk,
+        ...(channel === 'syntax'
+          ? {
+              code: frontendOracle.code,
+              codes: allFrontendFindings.map((finding) => finding.code).filter(Boolean),
+              totalErrors: allFrontendFindings.length,
+            }
+          : {}),
         executionBackend,
         backendOracleStatus: oracleSelection.status,
       };
@@ -803,6 +997,22 @@ function main() {
       if (!messageOk) {
         failures.push(
           `[${ruleId}/${queryName}] expected message to contain "${expectedMessage}" for: ${query}`
+        );
+      }
+      if (!fixOk) {
+        failures.push(
+          `[${ruleId}/${queryName}] expected fix text "${frontendOracle.fixText}" for: ${query}`
+        );
+      }
+      if (!rawMessageOk) {
+        failures.push(
+          `[${ruleId}/${queryName}] expected rawMessage=${frontendOracle.rawMessage} for: ${query}`
+        );
+      }
+      if (!totalErrorsOk) {
+        failures.push(
+          `[${ruleId}/${queryName}] expected ${frontendOracle.totalErrors} total syntax error(s), ` +
+            `got ${allFrontendFindings.length} for: ${query}`
         );
       }
 
@@ -894,21 +1104,22 @@ function main() {
                   `and backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
               );
             }
+            if (
+              role === 'suppression-control' &&
+              (detectorFlagged || !backendRejected)
+            ) {
+              failures.push(
+                `[${ruleId}/${queryName}] differential: suppression control must retain a backend ` +
+                  `syntax rejection without a "${frontendOracle.code}" suggestion, but frontend ` +
+                  `${detectorFlagged ? 'suggested a rewrite' : 'did not suggest a rewrite'} and ` +
+                  `backend ${backendRejected ? 'rejected' : 'accepted'} for: ${query}`
+              );
+            }
           }
         }
       }
 
       report.results.push(resultEntry);
-    }
-  }
-
-  // Nightly-only coverage: every enabled catalog rule must have a contract file.
-  if (schedule === 'nightly') {
-    const covered = new Set(contracts.map(({ spec }) => spec.ruleId));
-    for (const rule of catalog) {
-      if (rule.enabled && !covered.has(rule.id)) {
-        failures.push(`[coverage] enabled catalog rule "${rule.id}" has no contract file.`);
-      }
     }
   }
 

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "ruleId": "unsupported-window-function-in-eventstats",
   "detectorPath": "packages/osd-monaco/src/ppl/lint/rules/unsupported_window_function.ts",
   "grammarSurface": "both",
@@ -13,7 +13,8 @@
     "needsExplain": false,
     "appliesTo": {
       "minVersion": "3.4.0"
-    }
+    },
+    "sourceScoped": false
   },
   "backendFixture": {
     "indices": [
@@ -50,14 +51,27 @@
         "eventstats-rank": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 500,
-            "body": {
-              "status": 500,
-              "error": {
-                "type": "UnsupportedOperationException",
-                "reason": "There was internal problem at backend"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 500,
+              "body": {
+                "status": 500,
+                "error": {
+                  "type": "UnsupportedOperationException",
+                  "reason": "There was internal problem at backend"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 500,
+              "body": {
+                "status": 500,
+                "error": {
+                  "type": "UnsupportedOperationException",
+                  "reason": "There was internal problem at backend"
+                }
               }
             }
           }
@@ -65,25 +79,47 @@
         "eventstats-dense-rank": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 500,
-            "body": {
-              "status": 500,
-              "error": {
-                "type": "UnsupportedOperationException",
-                "reason": "There was internal problem at backend"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 500,
+              "body": {
+                "status": 500,
+                "error": {
+                  "type": "UnsupportedOperationException",
+                  "reason": "There was internal problem at backend"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 500,
+              "body": {
+                "status": 500,
+                "error": {
+                  "type": "UnsupportedOperationException",
+                  "reason": "There was internal problem at backend"
+                }
               }
             }
           }
         },
         "eventstats-avg-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
             }
           }
         }
@@ -95,14 +131,27 @@
         "eventstats-rank": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 500,
-            "body": {
-              "status": 500,
-              "error": {
-                "type": "UnsupportedOperationException",
-                "reason": "Unexpected window function: rank"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 500,
+              "body": {
+                "status": 500,
+                "error": {
+                  "type": "UnsupportedOperationException",
+                  "reason": "Unexpected window function: rank"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 500,
+              "body": {
+                "status": 500,
+                "error": {
+                  "type": "UnsupportedOperationException",
+                  "reason": "Unexpected window function: rank"
+                }
               }
             }
           }
@@ -110,25 +159,47 @@
         "eventstats-dense-rank": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 500,
-            "body": {
-              "status": 500,
-              "error": {
-                "type": "UnsupportedOperationException",
-                "reason": "Unexpected window function: dense_rank"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 500,
+              "body": {
+                "status": 500,
+                "error": {
+                  "type": "UnsupportedOperationException",
+                  "reason": "Unexpected window function: dense_rank"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 500,
+              "body": {
+                "status": 500,
+                "error": {
+                  "type": "UnsupportedOperationException",
+                  "reason": "Unexpected window function: dense_rank"
+                }
               }
             }
           }
         },
         "eventstats-avg-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
             }
           }
         }
@@ -140,14 +211,27 @@
         "eventstats-rank": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "CalciteUnsupportedException",
-                "reason": "Unexpected window function: rank"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "CalciteUnsupportedException",
+                  "reason": "Unexpected window function: rank"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "CalciteUnsupportedException",
+                  "reason": "Unexpected window function: rank"
+                }
               }
             }
           }
@@ -155,25 +239,47 @@
         "eventstats-dense-rank": {
           "detectorCount": 1,
           "severity": "error",
-          "backend": {
-            "kind": "rejection",
-            "httpStatus": 400,
-            "body": {
-              "status": 400,
-              "error": {
-                "type": "CalciteUnsupportedException",
-                "reason": "Unexpected window function: dense_rank"
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "CalciteUnsupportedException",
+                  "reason": "Unexpected window function: dense_rank"
+                }
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 400,
+              "body": {
+                "status": 400,
+                "error": {
+                  "type": "CalciteUnsupportedException",
+                  "reason": "Unexpected window function: dense_rank"
+                }
               }
             }
           }
         },
         "eventstats-avg-control": {
           "detectorCount": 0,
-          "backend": {
-            "kind": "result-shape",
-            "httpStatus": 200,
-            "expect": {
-              "datarowsNonEmpty": true
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
             }
           }
         }

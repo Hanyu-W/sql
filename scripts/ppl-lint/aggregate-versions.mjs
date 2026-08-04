@@ -39,6 +39,7 @@ import {
   assertExactQueryCoverage,
   assertExecutionBackend,
   classifyBackendReportRow,
+  contractChannel,
   indexBackendReport,
   normalizeTarget,
   resolveBackendOracle,
@@ -214,6 +215,22 @@ function normalizeDetectorReport(detector, target) {
   if (!Array.isArray(detector.defaultErrorRules)) {
     throw new TypeError('detector report.defaultErrorRules must be a JSON array');
   }
+  for (const field of ['enabledRules', 'requiredSyntaxFeatures', 'activeContractRules']) {
+    if (detector[field] === undefined) continue;
+    if (!Array.isArray(detector[field])) {
+      throw new TypeError(`detector report.${field} must be a JSON array`);
+    }
+    const values = new Set();
+    for (const value of detector[field]) {
+      if (typeof value !== 'string' || value.length === 0) {
+        throw new TypeError(`detector report.${field} entries must be non-empty strings`);
+      }
+      if (values.has(value)) {
+        throw new Error(`detector report.${field} contains duplicate rule "${value}"`);
+      }
+      values.add(value);
+    }
+  }
   const census = new Set();
   for (const ruleId of detector.defaultErrorRules) {
     if (typeof ruleId !== 'string' || ruleId.length === 0) {
@@ -301,7 +318,14 @@ function reportItemKey(item, kind) {
 function loadContracts(dir) {
   const manifest = readJson(path.join(dir, 'manifest.json'));
   const specs = new Map();
-  for (const name of manifest.contracts || []) {
+  const contractNames = manifest.contracts || [];
+  if (!Array.isArray(contractNames)) {
+    fatal(`${path.join(dir, 'manifest.json')} contracts must be an array`);
+  }
+  if (new Set(contractNames).size !== contractNames.length) {
+    fatal(`${path.join(dir, 'manifest.json')} contracts contains duplicate file names`);
+  }
+  for (const name of contractNames) {
     const spec = readJson(path.join(dir, name));
     try {
       assertContractSchema(spec);
@@ -318,12 +342,36 @@ function loadContracts(dir) {
     } catch (error) {
       artifactFatal(path.join(dir, name), error);
     }
+    if (specs.has(spec.ruleId)) {
+      fatal(`contract manifest contains duplicate ruleId "${spec.ruleId}"`);
+    }
     specs.set(spec.ruleId, { spec, file: name });
   }
   // `defaultError` is the multi-version enforced set: every rule that ships
   // enabled at error severity. Fall back to `enforced` for older manifests so
   // this script still runs against an un-migrated corpus.
   const enforcedFiles = new Set(manifest.defaultError || manifest.enforced || []);
+  for (const file of enforcedFiles) {
+    if (!contractNames.includes(file)) {
+      fatal(`manifest.defaultError references inactive or missing contract "${file}"`);
+    }
+  }
+  const requiredSyntaxFiles = manifest.requiredSyntaxFeatures || [];
+  if (!Array.isArray(requiredSyntaxFiles)) {
+    fatal('manifest.requiredSyntaxFeatures must be an array');
+  }
+  if (new Set(requiredSyntaxFiles).size !== requiredSyntaxFiles.length) {
+    fatal('manifest.requiredSyntaxFeatures contains duplicate file names');
+  }
+  for (const file of requiredSyntaxFiles) {
+    const entry = [...specs.values()].find((candidate) => candidate.file === file);
+    if (!entry) {
+      fatal(`manifest.requiredSyntaxFeatures references inactive or missing contract "${file}"`);
+    }
+    if (contractChannel(entry.spec) !== 'syntax') {
+      fatal(`manifest.requiredSyntaxFeatures entry "${file}" is not a syntax contract`);
+    }
+  }
   const enforcedRules = new Set();
   for (const [ruleId, { file }] of specs) {
     if (enforcedFiles.has(file)) enforcedRules.add(ruleId);
@@ -515,6 +563,7 @@ function pairBackendLegs(legs) {
 
 function detectorParityValue(entry) {
   return {
+    channel: entry.channel || 'lint',
     role: entry.role || 'trigger',
     query: entry.query || '',
     expected: entry.expected,
@@ -524,6 +573,14 @@ function detectorParityValue(entry) {
       typeof entry.severityMatched === 'boolean' ? entry.severityMatched : undefined,
     messageMatched:
       typeof entry.messageMatched === 'boolean' ? entry.messageMatched : undefined,
+    fixMatched: typeof entry.fixMatched === 'boolean' ? entry.fixMatched : undefined,
+    rawMessageMatched:
+      typeof entry.rawMessageMatched === 'boolean' ? entry.rawMessageMatched : undefined,
+    totalErrorsMatched:
+      typeof entry.totalErrorsMatched === 'boolean' ? entry.totalErrorsMatched : undefined,
+    code: entry.code,
+    codes: entry.codes,
+    totalErrors: entry.totalErrors,
   };
 }
 
@@ -660,7 +717,107 @@ function auditDefaultErrorCensus(legs, specs, enforcedRules) {
       });
     }
   }
+  for (const ruleId of [...enforcedRules].sort()) {
+    if (!census.has(ruleId)) {
+      missing.push({
+        ruleId,
+        reason: 'listed under manifest.defaultError but not enabled at error severity in OSD',
+      });
+    }
+  }
   return missing;
+}
+
+function setsEqual(left, right) {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function auditShippingCensus(legs, specs, manifest) {
+  const reports = legs
+    .map((leg) => leg.detector)
+    .filter(
+      (detector) =>
+        Array.isArray(detector.enabledRules) &&
+        Array.isArray(detector.activeContractRules) &&
+        Array.isArray(detector.requiredSyntaxFeatures)
+    );
+  if (reports.length === 0) {
+    return {
+      available: false,
+      enforced: false,
+      passed: false,
+      problems: [
+        'detector reports predate the active shipping census; rerun with the channel-aware frontend runner',
+      ],
+    };
+  }
+
+  const activeRules = new Set(specs.keys());
+  const activeLintRules = new Set(
+    [...specs.entries()]
+      .filter(([, { spec }]) => contractChannel(spec) === 'lint')
+      .map(([ruleId]) => ruleId)
+  );
+  const activeSyntaxRules = new Set(
+    [...specs.entries()]
+      .filter(([, { spec }]) => contractChannel(spec) === 'syntax')
+      .map(([ruleId]) => ruleId)
+  );
+  const requiredSyntaxRules = new Set(
+    (manifest.requiredSyntaxFeatures || [])
+      .map((file) => [...specs.entries()].find(([, entry]) => entry.file === file))
+      .filter(Boolean)
+      .map(([ruleId]) => ruleId)
+  );
+  const enabledRules = new Set(reports.flatMap((report) => report.enabledRules));
+  const reportedActiveRules = new Set(
+    reports.flatMap((report) => report.activeContractRules)
+  );
+  const reportedSyntaxRules = new Set(
+    reports.flatMap((report) => report.requiredSyntaxFeatures)
+  );
+  const problems = [];
+
+  if (activeLintRules.size !== 12) {
+    problems.push(`expected 12 active lint contracts, found ${activeLintRules.size}`);
+  }
+  if (requiredSyntaxRules.size !== 1) {
+    problems.push(`expected one required syntax feature, found ${requiredSyntaxRules.size}`);
+  }
+  if (activeRules.size !== 13) {
+    problems.push(`expected 13 active contracts, found ${activeRules.size}`);
+  }
+  if (!setsEqual(activeLintRules, enabledRules)) {
+    problems.push(
+      `active lint rules ${JSON.stringify([...activeLintRules].sort())} do not equal enabled OSD ` +
+        `rules ${JSON.stringify([...enabledRules].sort())}`
+    );
+  }
+  if (!setsEqual(activeSyntaxRules, requiredSyntaxRules)) {
+    problems.push(
+      `active syntax rules ${JSON.stringify([...activeSyntaxRules].sort())} do not equal manifest ` +
+        `required syntax features ${JSON.stringify([...requiredSyntaxRules].sort())}`
+    );
+  }
+  if (!setsEqual(activeRules, reportedActiveRules)) {
+    problems.push('detector report activeContractRules does not match this manifest');
+  }
+  if (!setsEqual(requiredSyntaxRules, reportedSyntaxRules)) {
+    problems.push('detector report requiredSyntaxFeatures does not match this manifest');
+  }
+
+  return {
+    available: true,
+    enforced: reports.some(
+      (report) => report.census && report.census.enforced === true
+    ),
+    enabledRules: [...enabledRules].sort(),
+    activeContractRules: [...activeRules].sort(),
+    activeLintRules: [...activeLintRules].sort(),
+    requiredSyntaxFeatures: [...requiredSyntaxRules].sort(),
+    passed: problems.length === 0,
+    problems,
+  };
 }
 
 /**
@@ -877,6 +1034,16 @@ function main() {
   // the census each detector leg recorded from the OSD catalog it linted with, so
   // a new default-error rule cannot land unvalidated.
   const missingContracts = auditDefaultErrorCensus(legs, specs, enforcedRules);
+  const shippingCensus = auditShippingCensus(legs, specs, manifest);
+  const blockCensusDrift = !shippingCensus.available || shippingCensus.enforced;
+  for (const entry of missingContracts) {
+    entry.blocking = blockCensusDrift;
+  }
+  if (!shippingCensus.passed) {
+    for (const problem of shippingCensus.problems) {
+      log(`CENSUS REPORT-ONLY: ${problem}`);
+    }
+  }
 
   for (const [ruleId, { spec, file }] of specs) {
     const isEnforced = enforcedRules.has(ruleId);
@@ -1366,6 +1533,26 @@ function main() {
     }
   }
 
+  for (const collection of [drifts, coverageHoles, inconclusive, notApplicable, matrix]) {
+    for (const entry of collection) {
+      const contract = specs.get(entry.ruleId);
+      entry.channel = contract ? contractChannel(contract.spec) : 'lint';
+    }
+  }
+  for (const drift of drifts) {
+    if (drift.channel !== 'syntax') continue;
+    drift.remediation = {
+      action: 'review-syntax-validation',
+      target:
+        'OSD runtime_validation_core and the syntax contract expectation',
+      detail:
+        `Reproduce "${drift.ruleId}" with the candidate runtime grammar. Update the shared OSD ` +
+        `parser/listener core if UNKNOWN_COMMAND identity, suppression, or quick-fix behavior ` +
+        `regressed; update this contract only after confirming an intentional syntax UX change. ` +
+        `Do not change detector catalog appliesTo metadata for a syntax-channel failure.`,
+    };
+  }
+
   const isObservedAnalyticsFinding = (entry) =>
     args.observeAnalytics &&
     (entry.executionBackend === 'analytics' ||
@@ -1375,10 +1562,12 @@ function main() {
       entry.driftClass === DRIFT_CLASSES.BACKEND_ORACLE_MISMATCH ||
       entry.kind === 'backend-oracle');
   for (const drift of drifts) {
-    drift.blocking = !!drift.enforced && !isObservedAnalyticsFinding(drift);
+    drift.blocking =
+      (!!drift.enforced || args.allRules) && !isObservedAnalyticsFinding(drift);
   }
   for (const hole of coverageHoles) {
-    hole.blocking = !!hole.enforced && !isObservedAnalyticsFinding(hole);
+    hole.blocking =
+      (!!hole.enforced || args.allRules) && !isObservedAnalyticsFinding(hole);
   }
   const enforcedDrifts = drifts.filter((d) => d.blocking);
   const enforcedHoles = coverageHoles.filter((h) => h.blocking);
@@ -1387,6 +1576,7 @@ function main() {
   // verdict is an infrastructure failure for every rule we asked the run to
   // observe.
   const enforcedInconclusive = inconclusive.filter((i) => i.enforced || args.allRules);
+  const blockingMissingContracts = missingContracts.filter((entry) => entry.blocking);
   for (const row of matrix) {
     row.key = reportItemKey(row, 'matrix');
   }
@@ -1421,6 +1611,7 @@ function main() {
     })),
     enforcedRules: [...enforcedRules].sort(),
     missingContracts,
+    shippingCensus,
     manifestDescription: manifest.description || '',
     matrix,
     drifts,
@@ -1435,13 +1626,14 @@ function main() {
         drifts.filter((d) => d.enforced && !d.blocking).length +
         coverageHoles.filter((h) => h.enforced && !h.blocking).length,
       missingContractCount: missingContracts.length,
+      blockingMissingContractCount: blockingMissingContracts.length,
       enforcedInconclusive: enforcedInconclusive.length,
       // An inconclusive default-error rule fails too: "we could not check" must
       // never render as "it is fine".
       passed:
         enforcedDrifts.length === 0 &&
         enforcedHoles.length === 0 &&
-        missingContracts.length === 0 &&
+        blockingMissingContracts.length === 0 &&
         enforcedInconclusive.length === 0,
     },
   };
@@ -1475,13 +1667,14 @@ function main() {
     // eslint-disable-next-line no-console
     console.error(
       `[ppl-lint-multiversion] FAIL: ${enforcedDrifts.length} drift(s), ` +
-        `${enforcedHoles.length} coverage hole(s), ${missingContracts.length} unvalidated ` +
+        `${enforcedHoles.length} coverage hole(s), ${blockingMissingContracts.length} unvalidated ` +
         `default-error rule(s) and ${enforcedInconclusive.length} inconclusive rule/version pair(s).`
     );
     process.exit(1);
   }
   log(
-    `PASS: every default-error rule agrees with all ${legs.length} engine version(s)` +
+    `PASS: every ${args.allRules ? 'active shipping' : 'default-error'} rule agrees with all ` +
+      `${legs.length} engine version(s)` +
       (drifts.length > 0 ? ` (${drifts.length} non-enforced finding(s) reported)` : '') +
       '.'
   );

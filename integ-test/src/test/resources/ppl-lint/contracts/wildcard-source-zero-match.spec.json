@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 4,
+  "ruleId": "wildcard-source-zero-match",
+  "channel": "lint",
+  "grammarSurface": "both",
+  "schedule": "nightly",
+  "wiring": {
+    "detector": "wildcard-source-zero-match",
+    "enabled": true,
+    "severity": "info",
+    "runtimeOnly": false,
+    "needsContext": true,
+    "needsExplain": false,
+    "sourceScoped": false,
+    "appliesTo": {}
+  },
+  "backendFixture": {
+    "indices": [
+      "ACCOUNT"
+    ],
+    "clusterSettings": {
+      "calcite": true,
+      "calciteFallback": false
+    }
+  },
+  "frontendContext": {
+    "isCalcite": true,
+    "visibleIndices": [
+      "{{index}}"
+    ]
+  },
+  "index": "opensearch-sql_test_index_account",
+  "queries": {
+    "missing-wildcard-source": {
+      "role": "trigger",
+      "query": "source={{index}}-definitely-missing-* | head 1"
+    },
+    "matching-wildcard-control": {
+      "role": "control",
+      "query": "source={{index}}* | head 1"
+    }
+  },
+  "expectations": [
+    {
+      "version": ">=0.0.0",
+      "queries": {
+        "missing-wildcard-source": {
+          "frontend": {
+            "count": 1,
+            "severity": "info",
+            "matchMessage": "matches no known index"
+          },
+          "backends": {
+            "standard": {
+              "kind": "rejection",
+              "httpStatus": 404,
+              "body": {
+                "status": 404
+              }
+            },
+            "analytics": {
+              "kind": "rejection",
+              "httpStatus": 404,
+              "body": {
+                "status": 404
+              }
+            }
+          }
+        },
+        "matching-wildcard-control": {
+          "frontend": {
+            "count": 0
+          },
+          "backends": {
+            "standard": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            },
+            "analytics": {
+              "kind": "result-shape",
+              "httpStatus": 200,
+              "expect": {
+                "datarowsNonEmpty": true
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

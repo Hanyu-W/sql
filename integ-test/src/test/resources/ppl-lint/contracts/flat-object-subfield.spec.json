@@ -10,12 +10,16 @@
   "notes": "Live-verified on OpenSearch 3.8 with Calcite on: a flat_object field cannot be referenced by PPL at all. BOTH a dotted subfield (`fields attributes.service`) AND the bare root (`fields attributes`) fail with IllegalArgumentException 'Field [...] not found.', and the same holds in a where clause. NOTE the rejection reason is byte-identical to the one field-validation produces for a genuinely absent field, so the backend reason alone cannot attribute a diagnostic to a rule — attribution comes from the detector's ruleId, which is why every case here pins detectorCount for THIS ruleId only. The detector self-suppresses without a typeMap, hence the deriveFromMapping block below (needsContext: true). The analytics feature build cannot create flat_object in composite/Parquet storage, so every analytics backend oracle is explicitly non-applicable while the frontend detector assertions still run.",
   "wiring": {
     "detector": "flat-object-subfield",
-    "enabled": true,
+    "enabled": false,
     "severity": "error",
     "runtimeOnly": false,
     "needsContext": true,
     "needsExplain": false,
-    "appliesTo": {}
+    "sourceScoped": true,
+    "appliesTo": {
+      "minVersion": "3.8.0",
+      "engine": "calcite"
+    }
   },
   "backendFixture": {
     "indices": [
@@ -28,6 +32,7 @@
   },
   "frontendContext": {
     "isCalcite": true,
+    "forceEnable": true,
     "deriveFromMapping": {
       "name": "keyword",
       "status": "integer",
