@@ -4,7 +4,12 @@
  */
 
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import {
   assertActiveShippingContracts,
@@ -13,6 +18,8 @@ import {
   evaluateFrontendAssertions,
   selectManifestContractNames,
 } from '../run-frontend-contract.mjs';
+
+const SCRIPT = fileURLToPath(new URL('../run-frontend-contract.mjs', import.meta.url));
 
 const RANGE = {
   startLine: 1,
@@ -159,6 +166,133 @@ test('a frontend execution error remains a complete report row', () => {
       backendOracleStatus: 'error',
     }
   );
+});
+
+test('the runner writes later rule rows after one frontend execution error', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ppl-lint-runner-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const osdRoot = path.join(root, 'osd');
+  const contractDir = path.join(root, 'contracts');
+  const reportPath = path.join(root, 'detector-report.json');
+  const grammarPath = path.join(root, 'ppl-grammar-bundle.json');
+  const targetPath = path.join(root, 'target.json');
+  fs.mkdirSync(
+    path.join(osdRoot, 'src/plugins/data/public/antlr/opensearch_ppl'),
+    { recursive: true }
+  );
+  fs.mkdirSync(path.join(osdRoot, 'packages/osd-monaco'), { recursive: true });
+  fs.mkdirSync(contractDir, { recursive: true });
+
+  const wiring = (ruleId) => ({
+    detector: ruleId,
+    enabled: true,
+    severity: 'info',
+    runtimeOnly: false,
+    needsContext: false,
+    needsExplain: false,
+    sourceScoped: false,
+    appliesTo: {},
+  });
+  const contract = (ruleId, query) => ({
+    schemaVersion: 4,
+    ruleId,
+    grammarSurface: 'runtime-bundle',
+    schedule: 'pr',
+    wiring: wiring(ruleId),
+    index: 'test-index',
+    queries: {
+      trigger: { role: 'trigger', query },
+    },
+    expectations: [
+      {
+        version: '>=0.0.0',
+        queries: {
+          trigger: {
+            frontend: {
+              count: 0,
+              deterministicFix: { offered: false },
+            },
+            backends: {
+              standard: { kind: 'advisory', httpStatus: 200 },
+              analytics: { kind: 'advisory', httpStatus: 200 },
+            },
+          },
+        },
+      },
+    ],
+  });
+  const files = ['first-rule.spec.json', 'second-rule.spec.json'];
+  fs.writeFileSync(
+    path.join(contractDir, files[0]),
+    JSON.stringify(contract('first-rule', 'source={{index}} | fail'))
+  );
+  fs.writeFileSync(
+    path.join(contractDir, files[1]),
+    JSON.stringify(contract('second-rule', 'source={{index}} | pass'))
+  );
+  fs.writeFileSync(
+    path.join(contractDir, 'manifest.json'),
+    JSON.stringify({
+      schemaVersion: 4,
+      contracts: files,
+      defaultError: [],
+      requiredSyntaxFeatures: [],
+    })
+  );
+  fs.writeFileSync(
+    path.join(osdRoot, 'packages/osd-monaco/ppl-lint.js'),
+    `const wiring = (id) => ({
+      id, detector: id, enabled: true, severity: 'info', runtimeOnly: false,
+      needsContext: false, needsExplain: false, sourceScoped: false, appliesTo: {}
+    });
+    exports.getBundledCatalog = () => [wiring('first-rule'), wiring('second-rule')];`
+  );
+  fs.writeFileSync(
+    path.join(
+      osdRoot,
+      'src/plugins/data/public/antlr/opensearch_ppl/headless_ppl_lint.js'
+    ),
+    `exports.deserializeBundleOrThrow = (bundle) => bundle;
+    exports.lintQueryWithBundle = (query) => {
+      if (query.includes('| fail')) throw new Error('detector crashed');
+      return { diagnostics: [] };
+    };`
+  );
+  fs.writeFileSync(grammarPath, JSON.stringify({ grammarHash: 'sha256:test' }));
+  fs.writeFileSync(
+    targetPath,
+    JSON.stringify({
+      schemaVersion: 2,
+      executionBackend: 'standard',
+      engineVersion: '3.8.0-SNAPSHOT',
+      grammarHash: 'sha256:test',
+      storage: 'lucene',
+      shardCount: 1,
+    })
+  );
+
+  const result = spawnSync(process.execPath, [SCRIPT], {
+    cwd: osdRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      PPL_LINT_CONTRACT_DIR: contractDir,
+      PPL_LINT_SCHEDULE: 'pr',
+      PPL_LINT_GRAMMAR_BUNDLE: grammarPath,
+      PPL_LINT_TARGET_MANIFEST: targetPath,
+      PPL_LINT_REPORT: reportPath,
+    },
+  });
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /first-rule\/trigger.*frontend\.execution failed/s);
+  assert.match(result.stdout, /PASS second-rule\/trigger/);
+  const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+  assert.equal(report.results.length, 2);
+  assert.equal(report.results[0].outcome, 'error');
+  assert.equal(report.results[0].error, 'detector crashed');
+  assert.equal(report.results[1].ruleId, 'second-rule');
+  assert.equal(report.results[1].actual, 0);
 });
 
 test('syntax suppression checks raw parser errors outside the suggestion code filter', () => {
