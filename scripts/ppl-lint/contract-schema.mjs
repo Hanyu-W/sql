@@ -8,7 +8,14 @@ const CONTRACT_SCHEMA_VERSIONS = new Set([3, 4]);
 const APPLICABLE_BACKEND_KINDS = new Set(['rejection', 'result-shape', 'advisory']);
 const CONTRACT_CHANNELS = new Set(['lint', 'syntax']);
 const QUERY_ROLES = new Set(['trigger', 'control', 'suppression-control']);
-const LINT_FRONTEND_FIELDS = new Set(['count', 'severity', 'matchMessage']);
+const LINT_V3_FRONTEND_FIELDS = new Set(['count', 'severity', 'matchMessage']);
+const LINT_V4_FRONTEND_FIELDS = new Set([
+  'count',
+  'severity',
+  'messageEquals',
+  'deterministicFix',
+  'aiAction',
+]);
 const SYNTAX_FRONTEND_FIELDS = new Set([
   'count',
   'code',
@@ -40,6 +47,13 @@ function requireNonEmptyString(value, label) {
   return value;
 }
 
+function requireString(value, label) {
+  if (typeof value !== 'string') {
+    throw new TypeError(`${label} must be a string.`);
+  }
+  return value;
+}
+
 function requireNonNegativeInteger(value, label) {
   if (!Number.isInteger(value) || value < 0) {
     throw new TypeError(`${label} must be a non-negative integer.`);
@@ -61,6 +75,85 @@ function assertKnownKeys(value, allowed, label) {
   }
 }
 
+function normalizeRange(value, label) {
+  const range = requireObject(value, label);
+  assertKnownKeys(
+    range,
+    new Set(['startLine', 'startColumn', 'endLine', 'endColumn']),
+    label
+  );
+  for (const field of ['startLine', 'endLine']) {
+    if (!Number.isInteger(range[field]) || range[field] < 1) {
+      throw new TypeError(`${label}.${field} must be a positive integer.`);
+    }
+  }
+  for (const field of ['startColumn', 'endColumn']) {
+    requireNonNegativeInteger(range[field], `${label}.${field}`);
+  }
+  if (
+    range.endLine < range.startLine ||
+    (range.endLine === range.startLine && range.endColumn < range.startColumn)
+  ) {
+    throw new Error(`${label} must end at or after its start.`);
+  }
+  return {
+    startLine: range.startLine,
+    startColumn: range.startColumn,
+    endLine: range.endLine,
+    endColumn: range.endColumn,
+  };
+}
+
+function normalizeDeterministicFix(value, label) {
+  const fix = requireObject(value, label);
+  if (typeof fix.offered !== 'boolean') {
+    throw new TypeError(`${label}.offered must be a boolean.`);
+  }
+  const allowed = new Set([
+    'offered',
+    'title',
+    'text',
+    'range',
+    'expectedText',
+    'appliedQuery',
+  ]);
+  assertKnownKeys(fix, allowed, label);
+  if (!fix.offered) {
+    if (Object.keys(fix).length !== 1) {
+      throw new Error(`${label} must contain only offered when no fix is expected.`);
+    }
+    return { offered: false };
+  }
+
+  const normalized = {
+    offered: true,
+    title: requireNonEmptyString(fix.title, `${label}.title`),
+    text: requireString(fix.text, `${label}.text`),
+    range: normalizeRange(fix.range, `${label}.range`),
+    expectedText: requireString(fix.expectedText, `${label}.expectedText`),
+    appliedQuery: requireString(fix.appliedQuery, `${label}.appliedQuery`),
+  };
+  return normalized;
+}
+
+function normalizeAiAction(value, label) {
+  const action = requireObject(value, label);
+  if (typeof action.offered !== 'boolean') {
+    throw new TypeError(`${label}.offered must be a boolean.`);
+  }
+  assertKnownKeys(action, new Set(['offered', 'commandId']), label);
+  if (!action.offered) {
+    if (Object.keys(action).length !== 1) {
+      throw new Error(`${label} must contain only offered when no AI action is expected.`);
+    }
+    return { offered: false };
+  }
+  return {
+    offered: true,
+    commandId: requireNonEmptyString(action.commandId, `${label}.commandId`),
+  };
+}
+
 export function contractChannel(spec) {
   requireObject(spec, 'contract');
   const channel = spec.channel === undefined ? 'lint' : spec.channel;
@@ -75,9 +168,10 @@ export function contractChannel(spec) {
 /**
  * Normalize legacy detector fields and channel-specific frontend assertions.
  *
- * Callers continue to receive `count`, `severity`, and `matchMessage` for lint
- * contracts while syntax contracts can assert stable parser error identity,
- * quick-fix text, raw-message preservation, and the total syntax error census.
+ * Schema-v3 lint contracts retain substring messages. Schema-v4 lint contracts
+ * assert exact messages and exact deterministic/AI action availability. Syntax
+ * contracts assert stable parser error identity, quick-fix presence or absence,
+ * raw-message preservation, and the total syntax error census.
  */
 export function normalizeFrontendOracle(spec, queryExpectation) {
   const channel = contractChannel(spec);
@@ -103,33 +197,72 @@ export function normalizeFrontendOracle(spec, queryExpectation) {
       : {
           count: queryExpectation.detectorCount,
           severity: queryExpectation.severity,
-          matchMessage: queryExpectation.matchMessage,
+          ...(queryExpectation.matchMessage !== undefined
+            ? { matchMessage: queryExpectation.matchMessage }
+            : {}),
+          ...(queryExpectation.messageEquals !== undefined
+            ? { messageEquals: queryExpectation.messageEquals }
+            : {}),
+          ...(queryExpectation.deterministicFix !== undefined
+            ? { deterministicFix: queryExpectation.deterministicFix }
+            : {}),
+          ...(queryExpectation.aiAction !== undefined
+            ? { aiAction: queryExpectation.aiAction }
+            : {}),
         };
-    assertKnownKeys(frontend, LINT_FRONTEND_FIELDS, `[${spec.ruleId}] frontend`);
+    const allowed =
+      spec.schemaVersion === 3 ? LINT_V3_FRONTEND_FIELDS : LINT_V4_FRONTEND_FIELDS;
+    assertKnownKeys(frontend, allowed, `[${spec.ruleId}] frontend`);
     requireNonNegativeInteger(frontend.count, `[${spec.ruleId}] frontend.count`);
     assertOptionalString(frontend.severity, `[${spec.ruleId}] frontend.severity`);
-    if (
-      frontend.matchMessage !== undefined &&
-      typeof frontend.matchMessage !== 'string'
-    ) {
-      throw new TypeError(
-        `[${spec.ruleId}] frontend.matchMessage must be a string when present.`
+    if (spec.schemaVersion === 3) {
+      if (
+        frontend.matchMessage !== undefined &&
+        typeof frontend.matchMessage !== 'string'
+      ) {
+        throw new TypeError(
+          `[${spec.ruleId}] frontend.matchMessage must be a string when present.`
+        );
+      }
+    } else {
+      assertOptionalString(
+        frontend.messageEquals,
+        `[${spec.ruleId}] frontend.messageEquals`
       );
     }
     if (
       hasFrontend &&
-      (queryExpectation.severity !== undefined ||
-        queryExpectation.matchMessage !== undefined)
+      ['severity', 'matchMessage', 'messageEquals', 'deterministicFix', 'aiAction'].some(
+        (field) => queryExpectation[field] !== undefined
+      )
     ) {
       throw new Error(
-        `[${spec.ruleId}] severity and matchMessage must be nested under frontend when frontend is present.`
+        `[${spec.ruleId}] lint assertions must be nested under frontend when frontend is present.`
       );
     }
     return {
       channel,
       count: frontend.count,
       severity: frontend.severity,
-      matchMessage: frontend.matchMessage,
+      ...(spec.schemaVersion === 3
+        ? { matchMessage: frontend.matchMessage }
+        : {
+            messageEquals: frontend.messageEquals,
+            deterministicFix:
+              frontend.deterministicFix === undefined
+                ? undefined
+                : normalizeDeterministicFix(
+                    frontend.deterministicFix,
+                    `[${spec.ruleId}] frontend.deterministicFix`
+                  ),
+            aiAction:
+              frontend.aiAction === undefined
+                ? undefined
+                : normalizeAiAction(
+                    frontend.aiAction,
+                    `[${spec.ruleId}] frontend.aiAction`
+                  ),
+          }),
     };
   }
 
@@ -145,7 +278,15 @@ export function normalizeFrontendOracle(spec, queryExpectation) {
   assertKnownKeys(frontend, SYNTAX_FRONTEND_FIELDS, `[${spec.ruleId}] frontend`);
   requireNonNegativeInteger(frontend.count, `[${spec.ruleId}] frontend.count`);
   requireNonEmptyString(frontend.code, `[${spec.ruleId}] frontend.code`);
-  assertOptionalString(frontend.fixText, `[${spec.ruleId}] frontend.fixText`);
+  if (
+    frontend.fixText !== undefined &&
+    frontend.fixText !== null &&
+    (typeof frontend.fixText !== 'string' || frontend.fixText.length === 0)
+  ) {
+    throw new TypeError(
+      `[${spec.ruleId}] frontend.fixText must be a non-empty string or null when present.`
+    );
+  }
   if (
     frontend.matchMessage !== undefined &&
     typeof frontend.matchMessage !== 'string'
@@ -170,7 +311,64 @@ export function normalizeFrontendOracle(spec, queryExpectation) {
       );
     }
   }
+  if (spec.wiring && frontend.code !== spec.wiring.code) {
+    throw new Error(
+      `[${spec.ruleId}] frontend.code ${describe(frontend.code)} does not match ` +
+        `contract.wiring.code ${describe(spec.wiring.code)}.`
+    );
+  }
   return { channel, ...frontend };
+}
+
+/**
+ * Active shipping contracts are stricter than dormant compatibility contracts:
+ * every lint finding pins its exact message and action mode, every lint control
+ * pins action absence, and every syntax case pins fix/raw-error/error-count state.
+ */
+export function assertShippingFrontendOracles(spec, expectation) {
+  if (spec.schemaVersion !== 4) {
+    throw new Error(`[${spec.ruleId}] active shipping contracts must use schemaVersion 4.`);
+  }
+  for (const queryName of assertExactQueryCoverage(spec, expectation)) {
+    const frontend = normalizeFrontendOracle(spec, expectation.queries[queryName]);
+    const label = `[${spec.ruleId}/${queryName}] frontend`;
+
+    if (frontend.channel === 'syntax') {
+      if (frontend.fixText === undefined) {
+        throw new Error(`${label}.fixText must explicitly assert fix presence or absence.`);
+      }
+      if (frontend.rawMessage === undefined) {
+        throw new Error(`${label}.rawMessage must be explicitly asserted.`);
+      }
+      if (frontend.totalErrors === undefined) {
+        throw new Error(`${label}.totalErrors must be explicitly asserted.`);
+      }
+      if (frontend.count > 0 && frontend.matchMessage === undefined) {
+        throw new Error(`${label}.matchMessage is required for a syntax finding.`);
+      }
+      continue;
+    }
+
+    if (frontend.deterministicFix === undefined) {
+      throw new Error(`${label}.deterministicFix must be explicitly asserted.`);
+    }
+    if (frontend.aiAction === undefined) {
+      throw new Error(`${label}.aiAction must be explicitly asserted.`);
+    }
+    if (frontend.count > 0) {
+      if (frontend.severity === undefined) {
+        throw new Error(`${label}.severity is required for a lint finding.`);
+      }
+      if (frontend.messageEquals === undefined) {
+        throw new Error(`${label}.messageEquals is required for a lint finding.`);
+      }
+      if (frontend.deterministicFix.offered && frontend.aiAction.offered) {
+        throw new Error(`${label} cannot offer deterministic and AI actions together.`);
+      }
+    } else if (frontend.deterministicFix.offered || frontend.aiAction.offered) {
+      throw new Error(`${label} must not offer actions when no finding is expected.`);
+    }
+  }
 }
 
 export function normalizeLintWiring(ruleId, wiring, label = 'wiring') {
@@ -453,11 +651,7 @@ export function resolveBackendOracle(spec, queryExpectation, executionBackend) {
   const schemaVersion = assertContractSchema(spec);
   assertExecutionBackend(executionBackend);
   const frontend = normalizeFrontendOracle(spec, queryExpectation);
-  const detector = {
-    count: frontend.count,
-    severity: frontend.severity,
-    matchMessage: frontend.matchMessage,
-  };
+  const { channel: _channel, ...detector } = frontend;
 
   let oracle;
   let missingReason;

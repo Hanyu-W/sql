@@ -50,12 +50,10 @@ backend-validation ──(target.json, ppl-grammar-bundle.json, backend-report.j
 | `workflow_dispatch` (`osd_ref`) | OSD-branch evidence | the given commit/branch | No — pre-merge evidence only |
 | `schedule` (nightly) | full corpus + coverage | `main` | No |
 
-The active corpus contains 12 detector contracts plus the
-`command-suggestion` syntax contract. Seven reviewed contracts currently declare
-`schedule: "pr"`; the six new contracts remain `nightly` until their standard and
-analytics observations are reviewed. A contract that runs also asserts: neither
-the IT nor the frontend runner consults the manifest's `enforced` list, so any
-contract on the PR schedule can fail the required check.
+The required PR corpus contains 12 detector contracts plus the
+`command-suggestion` syntax contract. All 13 declare `schedule: "pr"` and can
+fail the required check. The nightly mode runs the same shipping corpus across
+the supported version and execution-backend matrix.
 
 `workflow_dispatch` inputs:
 
@@ -214,8 +212,6 @@ rule cannot be validated end to end.
   `rules_catalog.json`; it contains exactly six detector rules.
 - `requiredSyntaxFeatures` — `command-suggestion` only. Syntax features never
   appear in `defaultError` or the detector catalog.
-- `pendingReview` — the six nightly contracts awaiting oracle review and PR
-  promotion.
 - `nonEnforcing` — oracle-quality classification for warning, info, advisory,
   and result-shape contracts. Scheduling determines whether a contract runs.
 - `dormantContracts` — four preserved default-off detector contracts. They do
@@ -410,8 +406,8 @@ different places a developer looks:
 
 The required single-version lane follows the same rule: frontend and backend
 failures with a `[rule/query]` identity anchor on that contract's `ruleId`.
-Shipping-census findings anchor on `manifest.json` (as warnings while census
-enforcement is report-only). Artifact and job failures without a trustworthy
+Shipping-census findings anchor on `manifest.json` and fail the required lane.
+Artifact and job failures without a trustworthy
 repository location remain file-less rather than pointing at a guessed line.
 
 Without the annotations the only thing above the summary is `Process completed
@@ -470,10 +466,9 @@ node --test "scripts/ppl-lint/__tests__/*.test.mjs"
 
 ## Discovery corpus (harvested, never enforced)
 
-The enforced corpus is hand-pinned, which is what lets a mismatch red the build —
-and also why it is small (about one trigger per rule). One trigger is not enough to
-tell a full engine fix from a partial one, so the `discovery` job builds a second,
-much larger corpus that pins nothing.
+The required corpus is hand-pinned, which is what lets a mismatch red the build.
+The `discovery` job builds a larger unpinned corpus to distinguish full engine
+fixes from partial behavior changes.
 
 ```
 harvest-queries.mjs ──▶ discovery-corpus.json ──┬──▶ run-frontend-contract.mjs ──▶ detector report
@@ -487,9 +482,8 @@ harvest-queries.mjs ──▶ discovery-corpus.json ──┬──▶ run-front
    (matched as a prefix, so `describe('rex-scan-cost (compiled surface)')` counts).
    A query with no rule-owning ancestor is recorded unattributed and dropped rather
    than guessed at. Indices are rewritten onto the fixture index; JS string escapes
-   are unescaped so the query matches what the test actually linted. Against OSD
-   `main` today this yields **~109 queries across 12 rules** versus 27 across 11 in
-   the enforced corpus.
+   are unescaped so the query matches what the test actually linted. The harvested
+   corpus is substantially larger than the curated 13-contract required corpus.
 
    Each file's **lint context** is harvested alongside its queries. Seven of the
    nineteen rules are `needsContext: true` and self-suppress without a `typeMap`, so

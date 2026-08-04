@@ -46,6 +46,47 @@ function readJson(file, errors) {
   return undefined;
 }
 
+function failedFrontendAssertions(entry) {
+  const failures = new Set();
+  for (const [field, label] of [
+    ['severityMatched', 'severity'],
+    ['messageMatched', 'message'],
+  ]) {
+    if (entry[field] !== true) {
+      failures.add(label);
+    }
+  }
+  for (const [field, label] of [
+    ['deterministicFixMatched', 'deterministic-fix'],
+    ['aiActionMatched', 'AI-action'],
+    ['actionDecisionMatched', 'action-decision'],
+    ['fixMatched', 'syntax-fix'],
+    ['rawMessageMatched', 'raw-parser-error'],
+    ['totalErrorsMatched', 'total-error'],
+  ]) {
+    if (entry[field] === false) {
+      failures.add(label);
+    }
+  }
+  if (
+    entry.assertions &&
+    typeof entry.assertions === 'object' &&
+    !Array.isArray(entry.assertions)
+  ) {
+    for (const [field, matched] of Object.entries(entry.assertions)) {
+      if (matched === false) {
+        failures.add(field);
+      }
+    }
+  }
+  for (const mismatch of Array.isArray(entry.mismatches) ? entry.mismatches : []) {
+    if (mismatch && typeof mismatch.field === 'string') {
+      failures.add(mismatch.field);
+    }
+  }
+  return [...failures].sort();
+}
+
 function main() {
   const artifactErrors = [];
   const targetRaw = readJson(path.join(ARTIFACTS, 'target.json'), artifactErrors) || {};
@@ -118,6 +159,7 @@ function main() {
     artifactErrors.push('detector-report.json must contain a non-empty results array');
   }
   const detectorKeys = new Set();
+  const reportOnlyDetectorKeys = new Set();
   for (const entry of Array.isArray(detector.results) ? detector.results : []) {
     const key = `${entry.ruleId}::${entry.queryName}`;
     if (!entry.ruleId || !entry.queryName) {
@@ -128,6 +170,10 @@ function main() {
       artifactErrors.push(`detector-report.json contains duplicate row ${key}`);
     }
     detectorKeys.add(key);
+    if (entry.reportOnly === true) {
+      reportOnlyDetectorKeys.add(key);
+      continue;
+    }
     if (entry.executionBackend !== executionBackend) {
       artifactErrors.push(
         `detector row ${key} executionBackend ${JSON.stringify(entry.executionBackend)} does not match target ${JSON.stringify(executionBackend)}`
@@ -143,23 +189,28 @@ function main() {
         `detector row ${key} count mismatch: expected ${entry.expected}, got ${entry.actual}`
       );
     }
-    if (entry.severityMatched !== true) {
-      artifactErrors.push(`detector row ${key} did not match its severity assertion`);
+    if (
+      entry.assertions !== undefined &&
+      (!entry.assertions ||
+        typeof entry.assertions !== 'object' ||
+        Array.isArray(entry.assertions) ||
+        Object.values(entry.assertions).some((matched) => typeof matched !== 'boolean'))
+    ) {
+      artifactErrors.push(`detector row ${key} assertions must contain only booleans`);
     }
-    if (entry.messageMatched !== true) {
-      artifactErrors.push(`detector row ${key} did not match its message assertion`);
+    if (entry.mismatches !== undefined && !Array.isArray(entry.mismatches)) {
+      artifactErrors.push(`detector row ${key} mismatches must be an array`);
     }
-    for (const [field, label] of [
-      ['fixMatched', 'fix'],
-      ['rawMessageMatched', 'raw-message'],
-      ['totalErrorsMatched', 'total-error'],
-    ]) {
-      if (entry[field] === false) {
-        artifactErrors.push(`detector row ${key} did not match its ${label} assertion`);
-      }
+    for (const assertion of failedFrontendAssertions(entry)) {
+      artifactErrors.push(
+        `detector row ${key} did not match its ${assertion} assertion`
+      );
     }
   }
   for (const [key, entry] of backendByKey) {
+    if (reportOnlyDetectorKeys.has(key)) {
+      continue;
+    }
     if (!detectorKeys.has(key)) {
       artifactErrors.push(`backend row ${key} has no matching detector row`);
     }
@@ -192,7 +243,11 @@ function main() {
   // The selected validation set is the set of rules the detector run actually
   // evaluated (post schedule filtering).
   const validationSet = Array.from(
-    new Set((detector.results || []).map((r) => r.ruleId))
+    new Set(
+      (detector.results || [])
+        .filter((row) => row.reportOnly !== true)
+        .map((row) => row.ruleId)
+    )
   ).sort();
 
   const manifest = {
@@ -286,14 +341,17 @@ function writeSummary(manifest, detector, backend) {
           ? `HTTP ${be.observed ? be.observed.httpStatus : '4xx'}`
           : 'accepted';
     const ok =
-      r.actual === r.expected &&
-      r.severityMatched === true &&
-      r.messageMatched === true &&
-      !!be &&
-      be.outcome === 'pass';
+      r.reportOnly === true
+        ? undefined
+        : r.actual === r.expected &&
+          failedFrontendAssertions(r).length === 0 &&
+          !!be &&
+          be.outcome === 'pass';
     lines.push(
       `| \`${r.ruleId}\` | \`${r.queryName}\` | \`${manifest.engineVersion || '—'}\` | ` +
-        `\`${shortHash(manifest.grammarHash)}\` | ${detectorCell} | ${backendCell} | ${ok ? 'Pass' : 'Fail'} |`
+        `\`${shortHash(manifest.grammarHash)}\` | ${detectorCell} | ${backendCell} | ${
+          ok === undefined ? 'Report only' : ok ? 'Pass' : 'Fail'
+        } |`
     );
   }
 

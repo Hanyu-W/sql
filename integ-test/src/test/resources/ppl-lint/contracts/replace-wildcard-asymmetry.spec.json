@@ -53,8 +53,18 @@
       "engine": "calcite",
       "queries": {
         "replace-wildcard-count-mismatch": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "The replace match and replacement have different numbers of \"*\" wildcards. The counts must match.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -81,8 +91,18 @@
           }
         },
         "replace-wildcard-count-mismatch-reverse": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "The replace match and replacement have different numbers of \"*\" wildcards. The counts must match.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -109,7 +129,15 @@
           }
         },
         "replace-symmetric-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",
@@ -134,8 +162,18 @@
       "engine": "calcite",
       "queries": {
         "replace-wildcard-count-mismatch": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "The replace match and replacement have different numbers of \"*\" wildcards. The counts must match.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -162,8 +200,18 @@
           }
         },
         "replace-wildcard-count-mismatch-reverse": {
-          "detectorCount": 1,
-          "severity": "error",
+          "frontend": {
+            "count": 1,
+            "severity": "error",
+            "messageEquals": "The replace match and replacement have different numbers of \"*\" wildcards. The counts must match.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
+          },
           "backends": {
             "standard": {
               "kind": "rejection",
@@ -190,7 +238,15 @@
           }
         },
         "replace-symmetric-control": {
-          "detectorCount": 0,
+          "frontend": {
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
+          },
           "backends": {
             "standard": {
               "kind": "result-shape",

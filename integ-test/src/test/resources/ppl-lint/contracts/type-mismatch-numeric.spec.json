@@ -3,7 +3,7 @@
   "ruleId": "type-mismatch-numeric",
   "channel": "lint",
   "grammarSurface": "both",
-  "schedule": "nightly",
+  "schedule": "pr",
   "wiring": {
     "detector": "type-mismatch-numeric",
     "enabled": true,
@@ -56,7 +56,14 @@
           "frontend": {
             "count": 1,
             "severity": "warning",
-            "matchMessage": "not a number"
+            "messageEquals": "This field is numeric, but the compared value is not a number, so the comparison returns no rows.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
           },
           "backends": {
             "standard": {
@@ -79,7 +86,14 @@
           "frontend": {
             "count": 1,
             "severity": "warning",
-            "matchMessage": "not a number"
+            "messageEquals": "This field is numeric, but the compared value is not a number, so the comparison returns no rows.",
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": true,
+              "commandId": "ppl.lint.aiFix"
+            }
           },
           "backends": {
             "standard": {
@@ -100,7 +114,13 @@
         },
         "numeric-string-control": {
           "frontend": {
-            "count": 0
+            "count": 0,
+            "deterministicFix": {
+              "offered": false
+            },
+            "aiAction": {
+              "offered": false
+            }
           },
           "backends": {
             "standard": {

@@ -837,6 +837,8 @@ jobs:
             env "${surface_env[@]}" "${observe_env[@]}" \
             PPL_LINT_CONTRACT_DIR="$GITHUB_WORKSPACE/integ-test/src/test/resources/ppl-lint/contracts" \
             PPL_LINT_SCHEDULE=nightly \
+            PPL_LINT_ENFORCE_CENSUS=1 \
+            PPL_LINT_INCLUDE_DORMANT=1 \
             PPL_LINT_TARGET_MANIFEST="$leg/target.json" \
             PPL_LINT_REPORT="$leg/detector-report.json" \
             node -r ./src/setup_node_env \
