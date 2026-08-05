@@ -1,132 +1,146 @@
 # PPL Lint Runtime Compatibility CI
 
-- **Status:** Proposed revision for the SQL PPL lint CI
+- **Status:** Draft implementation design
 - **Last updated:** 2026-08-04
 - **Scope:** `.github/workflows/ppl-lint-multiversion-validation.yml`
 
 ## 1. Decision
 
-The multi-version workflow validates PPL lint compatibility only against
-standard OpenSearch runtime grammar bundles:
+The multi-surface workflow validates the 12 active PPL lint detectors against
+exactly three standard-engine configurations:
 
 ```text
-OpenSearch 3.6 release ─┐
-OpenSearch 3.7 release ─┼─> Aggregate rule compatibility
-SQL pull request build ─┘
+OpenSearch 2.19.6 + OSD compiled-simplified fallback grammar --+
+Latest eligible GA + its exported runtime grammar -------------+--> Aggregate rule compatibility
+SQL pull request build + its exported runtime grammar ----------+
 ```
+
+The fixed `2.19.6` leg covers the checked-in grammar OSD uses when an engine
+cannot export a runtime grammar bundle. The planner reads the SQL pull request's
+default `opensearch.version`, normalizes prerelease/build suffixes, and selects
+the highest exact-semver OpenSearch release tag at or below that target for the
+GA runtime leg. The PR leg validates the candidate runtime grammar built by the
+change under review.
 
 The workflow does not run:
 
-- the compiled-simplified grammar surface for pre-3.6 engines;
 - the analytics engine or composite/Parquet storage;
 - syntax-channel features;
 - AI action tests.
 
 Analytics coverage is deferred until that engine and its fixtures provide a
-stable CI contract. Pre-3.6 coverage is removed because those engines cannot
-export the runtime grammar bundle consumed by the production lint path.
-
-The required single-version workflow remains responsible for proving that all
-active shipping detectors agree with the standard SQL pull request build. The
-multi-version workflow explains where each rule works and fails its final
-aggregation job when a declared-supported version drifts.
+stable CI contract. The required single-version workflow remains responsible
+for proving that all active detectors agree with the standard SQL pull request
+build. The multi-surface workflow explains compatibility across shipping grammar
+surfaces and fails its final aggregation job when declared support drifts.
 
 ## 2. Rule Inventory
 
-The active inventory currently contains **12 detector rules**, not 13.
-`command-suggestion` was removed from this effort and must not be silently
-reintroduced as a lint rule. The final table is generated from
-`manifest.json`. CI also asserts that the current inventory is exactly these 12
-rules, so adding a future reviewed rule requires an intentional guard and test
-update.
+The active inventory contains **12 detector rules**, not 13.
+`command-suggestion` is not a lint rule and must not be silently reintroduced.
+The final table is generated from `manifest.json`, and CI asserts the exact
+inventory so adding a future reviewed rule requires an intentional guard and
+test update.
 
-| Rule | Declared compatibility |
-| --- | --- |
-| `agg-on-text` | Calcite, OpenSearch >= 3.7 |
-| `division-by-zero` | All runtime-bundle versions |
-| `enabled-false-object` | Calcite, OpenSearch >= 3.7 |
-| `field-validation` | All runtime-bundle versions |
-| `invalid-capture-group-name` | OpenSearch >= 3.4 |
-| `multisearch-min-subsearch` | OpenSearch >= 3.4 |
-| `replace-wildcard-asymmetry` | Calcite, OpenSearch >= 3.4 |
-| `rex-scan-cost` | All runtime-bundle versions |
-| `type-mismatch-numeric` | Calcite, OpenSearch >= 3.7 |
-| `union-min-datasets` | Calcite, OpenSearch >= 3.7 |
-| `unsupported-window-function-in-eventstats` | OpenSearch >= 3.4 |
-| `wildcard-source-zero-match` | All runtime-bundle versions |
+| Rule | Grammar surface | Declared scope |
+| --- | --- | --- |
+| `agg-on-text` | Both | Calcite, OpenSearch >= 3.7 |
+| `division-by-zero` | Both | All versions and engine modes |
+| `enabled-false-object` | Both | Calcite, OpenSearch >= 3.7 |
+| `field-validation` | Both | All versions and engine modes |
+| `invalid-capture-group-name` | Runtime bundle | OpenSearch >= 3.4 |
+| `multisearch-min-subsearch` | Runtime bundle | OpenSearch >= 3.4 |
+| `replace-wildcard-asymmetry` | Runtime bundle | Calcite, OpenSearch >= 3.4 |
+| `rex-scan-cost` | Both | All versions and engine modes |
+| `type-mismatch-numeric` | Both | Calcite, OpenSearch >= 3.7 |
+| `union-min-datasets` | Runtime bundle | Calcite, OpenSearch >= 3.7 |
+| `unsupported-window-function-in-eventstats` | Both | OpenSearch >= 3.4 |
+| `wildcard-source-zero-match` | Both | All versions and engine modes |
+
+Four preserved default-off contracts remain in `dormantContracts`. They do not
+count toward the 12-rule active inventory.
 
 ## 3. Workflow Shape
 
-### 3.1 Plan
+### 3.1 Plan configurations
 
-`Plan matrix` resolves:
+`Plan compatibility matrix` resolves:
 
-- released engines: `3.6.0` and `3.7.0`;
+- the fixed compiled-fallback target, `2.19.6`;
+- the highest official GA release at or below the normalized PR target;
+- the raw and normalized PR target from `build.gradle`;
 - the OSD repository and revision;
-- the discovery engine, currently the newest released engine.
+- immutable configuration IDs, surfaces, engine modes, and artifact names.
 
-There is no compiled-surface input or analytics target.
+Only exact `X.Y.Z` release tags are eligible. The plan is uploaded as
+`compatibility-plan.json` and drives the released-engine matrix.
 
-### 3.2 Observe released engines
+### 3.2 Observe released configurations
 
-One `Observe engine <version>` job runs per released engine. Each job:
+One `Observe engine <version> (<surface>)` matrix job runs for each released
+configuration:
 
-1. starts the official OpenSearch distribution containing its matching SQL
+1. start the matching official OpenSearch distribution, which includes its SQL
    plugin;
-2. runs the contract queries in observe-only mode;
-3. exports that engine's runtime grammar bundle;
-4. uploads `target.json`, `backend-report.json`, and
-   `ppl-grammar-bundle.json`.
+2. run the same contract corpus in observe-only mode;
+3. record `target.json` and `backend-report.json`;
+4. export `ppl-grammar-bundle.json` only for the runtime-bundle configuration;
+5. upload the observation even when a semantic mismatch is found.
 
-An expectation mismatch is observation data, not a job failure.
+The `2.19.6` configuration records backend behavior but intentionally has no
+runtime bundle. Its detector pass uses OSD's compiled-simplified fallback
+grammar. The selected GA configuration exports and uses that release's runtime
+bundle.
 
 ### 3.3 Observe the pull request build
 
-`Observe engine pr-build` runs the same corpus against the standard Gradle test
-cluster built from the pull request. It exports the same artifact shape as the
-released legs.
+`Observe engine pr-build (runtime)` runs the same corpus against the standard
+Gradle test cluster built from the pull request. It exports the candidate
+runtime grammar and the same target/backend artifact shape as the GA runtime
+leg.
 
 ### 3.4 Aggregate rule compatibility
 
 `Aggregate rule compatibility` is the only fan-in job. It:
 
-1. waits for the released and pull request observation jobs;
-2. downloads every `ppl-lint-leg-*` artifact;
-3. bootstraps OSD once;
-4. runs the production headless lint detector against each engine's runtime
-   grammar bundle;
-5. compares declared compatibility with observed detector and backend results;
-6. writes `drift-report.json`;
-7. publishes the Markdown compatibility table in the GitHub step summary;
-8. uploads the mandatory `ppl-lint-multiversion-drift` artifact and
-   supplemental `ppl-lint-multiversion-evidence` artifact;
-9. fails if the aggregate result recorded supported-version drift.
+1. waits for the plan and all three backend observations;
+2. downloads every `ppl-lint-observation-*` artifact;
+3. bootstraps OSD once at the resolved revision;
+4. runs production headless lint against the compiled fallback or each runtime
+   bundle, as specified by the plan;
+5. applies surface, version, then engine-mode exclusions before detector
+   execution;
+6. compares declared compatibility with detector and backend evidence;
+7. writes the complete 12 x 3 `drift-report.json`;
+8. publishes the Markdown compatibility table and file-aware annotations;
+9. uploads the mandatory report and supplemental evidence before enforcement;
+10. fails if the recorded result contains supported-configuration drift or an
+    enforced inconclusive cell.
 
-The job display name is intentionally explicit. A reader should not have to
-infer that a job named "detect" is the final aggregation.
+The display name is intentionally explicit. A reader should not have to infer
+that this fan-in is the final compatibility decision.
 
 ## 4. Expected Versus Actual Compatibility
 
 The aggregate summary has one row per active rule:
 
-| Rule | Expected compatibility | 3.6 actual | 3.7 actual | PR build actual |
+| Rule | Expected compatibility | 2.19.6 compiled | Latest GA runtime | PR runtime |
 | --- | --- | --- | --- | --- |
-| `agg-on-text` | Calcite, >= 3.7 | expected n/a | compatible | compatible |
-| `division-by-zero` | all versions | compatible | compatible | compatible |
+| `agg-on-text` | Both surfaces, Calcite >= 3.7 | expected n/a | compatible | compatible |
+| `division-by-zero` | Both surfaces, all versions | compatible | compatible | compatible |
 
 Each actual cell uses one of these states:
 
 | State | Meaning |
 | --- | --- |
 | `compatible` | Detector output and backend behavior match the contract. |
-| `expected n/a` | The engine is outside `wiring.appliesTo`, such as 3.6 for a rule with `minVersion: 3.7.0`. |
-| `drift` | The engine is declared compatible but detector or backend behavior differs. |
-| `inconclusive` | A fixture, query, or detector execution did not produce a trustworthy verdict. |
+| `expected n/a` | Surface, version, or engine mode is outside `wiring.appliesTo`. |
+| `drift` | The configuration is declared compatible but observed behavior differs. |
+| `inconclusive` | A fixture, query, artifact, or detector execution did not produce a trustworthy verdict. |
 
-`minVersion` is part of the expected result, not a workaround applied after
-the fact. If a rule is intentionally unsupported on 3.6 and declares
-`minVersion: 3.7.0`, the 3.6 cell is `expected n/a` and does not count as
-drift.
+Applicability is part of the expected result, not a workaround applied after
+observation. For example, a Calcite-only rule is expected n/a on the legacy
+compiled configuration and does not count as drift there.
 
 The JSON report retains query-level evidence and remediation details. The
 Markdown table is the concise compatibility view, not a replacement for the
@@ -137,42 +151,41 @@ machine-readable report.
 Compatibility aggregation is write-first and then enforcing:
 
 - observation jobs record detector and backend mismatches without failing;
-- expected out-of-scope versions do not fail the workflow;
-- an inconclusive rule produces an `inconclusive` cell and annotation;
-- one rule cannot prevent results for the other rules;
+- expected out-of-scope configurations do not fail the workflow;
+- one rule cannot prevent results for the remaining rules;
+- detector execution errors become complete inconclusive cells;
 - the fan-in writes the complete table and `drift-report.json`;
-- the artifact upload runs even when the aggregate result is failing;
-- only after those outputs exist does supported-version drift or an enforced
-  inconclusive result fail the final aggregation job.
-
-This ordering is required. A bare `Process completed with exit code 1` before
-the table exists is not an actionable compatibility result.
+- artifact upload runs before the enforcement step;
+- only after those outputs exist does supported drift or an enforced
+  inconclusive result fail the job.
 
 Structural failures remain errors because no truthful table can be produced:
 
-- a planned engine leg uploads no artifacts;
+- a planned observation uploads no usable artifacts;
 - JSON artifacts are malformed;
-- target identity conflicts with report identity;
+- target and report identities conflict;
 - the contract manifest is malformed;
+- a runtime configuration has no grammar bundle;
 - `drift-report.json` cannot be written.
 
-The artifact upload must require `drift-report.json`. An artifact named
-`ppl-lint-multiversion-drift` that contains only raw target files is not a drift
-report and must not be presented as one.
+An artifact named `ppl-lint-multiversion-drift` must contain
+`drift-report.json`; raw target files alone are not a compatibility report.
 
 ## 6. Outputs
 
 Every run produces:
 
+- `compatibility-plan.json`;
 - a GitHub step-summary table with expected and actual compatibility;
 - `drift-report.json`;
-- one detector report and detector log per engine leg;
-- target manifests that identify the exact engine and grammar hash.
+- one detector report and detector log per configuration;
+- target manifests that identify exact SQL, engine, surface, backend, and
+  grammar identities.
 
-The required PPL lint workflow remains the stable branch-protection signal.
-The multi-version aggregation job is also red on declared-supported drift, with
-the table and artifact serving as the evidence for adjusting `minVersion`,
-narrowing a detector, or updating a backend oracle after review.
+The required PPL lint workflow remains the stable branch-protection signal. The
+multi-surface aggregation is also red on declared-supported drift, with the
+table and artifacts providing evidence for adjusting applicability, narrowing a
+detector, or updating a backend oracle after review.
 
 ## 7. Deferred Coverage
 
@@ -183,6 +196,5 @@ Analytics-engine validation may return only after:
 - route attestation is stable;
 - a rule-specific analytics limitation cannot invalidate unrelated rules.
 
-Compiled-simplified coverage may return only if pre-3.6 support becomes a
-shipping requirement. It must be a separate workflow because it tests OSD's
-checked-in grammar rather than the SQL runtime grammar bundle.
+Syntax-channel and AI-action behavior require separate contracts and are not
+part of this detector compatibility matrix.
