@@ -89,13 +89,13 @@ The repository already contains most of the required test infrastructure:
   `LogicalTableScan(table=[[opensearch,` and not
   `CalciteLogicalIndexScan`.
 
-### 2.3 Gap in the existing analytics workflow
+### 2.3 Gap in the retired analytics workflow
 
-`.github/workflows/analytics-engine-compat.yml` runs only
-`AnalyticsEngineCompatIT`. Its purpose is plugin coexistence. Its PPL assertion
-uses the `rest` row source, which is explicitly excluded from analytics
-routing. The workflow can therefore pass without executing a PPL query through
-DataFusion.
+The removed `.github/workflows/analytics-engine-compat.yml` ran only
+`AnalyticsEngineCompatIT`. Its purpose was plugin coexistence. Its PPL
+assertion used the `rest` row source, which is explicitly excluded from
+analytics routing. The workflow could therefore pass without executing a PPL
+query through DataFusion.
 
 The `analyticsEngineCompat` cluster is also intentionally smaller than the
 stack required for real analytics execution. It does not install the composite
@@ -763,8 +763,8 @@ After the required lane is stable, evaluate:
 - Matching released analytics stacks.
 - A scheduled three-shard analytics leg.
 - Analytics execution for the discovery corpus.
-- Consolidating or retiring redundant parts of
-  `analytics-engine-compat.yml`.
+- Reintroducing a standalone analytics workflow only if it validates the
+  routed analytics contract described here.
 
 These are separate changes and are not prerequisites for initial enforcement.
 
