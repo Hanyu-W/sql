@@ -1,4 +1,4 @@
-name: PPL lint rule validation
+name: "[Linter] PPL rule validation"
 
 permissions:
   contents: read

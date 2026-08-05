@@ -1,4 +1,4 @@
-name: PPL lint multi-surface compatibility
+name: "[Linter] PPL multi-surface compatibility"
 
 # Validate the 12 active PPL lint rules on the checked-in OSD fallback grammar
 # and on runtime grammar bundles exported by the latest eligible GA engine and
