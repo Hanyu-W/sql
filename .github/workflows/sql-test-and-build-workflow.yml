@@ -2,19 +2,10 @@ name: SQL Java CI
 
 on:
   pull_request:
-    paths:
-      - '**/*.java'
-      - '**/*.g4'
-      - '!sql-jdbc/**'
-      - '**gradle*'
-      - '**lombok*'
-      - 'integ-test/**'
-      - '**/*.jar'
-      - '**/*.pom'
   push:
-    branches:
-      - 'main'
-      - '[0-9]*'
+    branches-ignore:
+      - 'backport/**'
+      - 'dependabot/**'
     paths:
       - '**/*.java'
       - '**/*.g4'
@@ -26,10 +17,6 @@ on:
       - '**/*.pom'
       - '.github/workflows/sql-test-and-build-workflow.yml'
   merge_group:
-
-concurrency:
-  group: sql-java-${{ github.event.pull_request.head.ref || github.ref_name }}
-  cancel-in-progress: true
 
 jobs:
   Get-CI-Image-Tag:
@@ -63,13 +50,13 @@ jobs:
 
       - name: Build and Test
         run: |
-          chown -R 1000:1000 "$(pwd)"
+          chown -R 1000:1000 `pwd`
           if [ "${{ matrix.test-type }}" = "unit" ]; then
-            su "$(id -un 1000)" -c "./gradlew --continue build -x integTest -x yamlRestTest -x doctest"
+            su `id -un 1000` -c "./gradlew --continue build -x integTest -x yamlRestTest -x doctest"
           elif [ "${{ matrix.test-type }}" = "integration" ]; then
-            su "$(id -un 1000)" -c "./gradlew --continue integTest yamlRestTest"
+            su `id -un 1000` -c "./gradlew --continue integTest yamlRestTest"
           else
-            su "$(id -un 1000)" -c "./gradlew --continue doctest"
+            su `id -un 1000` -c "./gradlew --continue doctest"
           fi
 
       - name: Create Artifact Path
@@ -216,8 +203,8 @@ jobs:
 
       - name: Run backward compatibility tests in rolling upgrade
         run: |
-          chown -R 1000:1000 "$(pwd)"
-          su "$(id -un 1000)" -c "./scripts/bwctest-rolling-upgrade.sh"
+          chown -R 1000:1000 `pwd`
+          su `id -un 1000` -c "./scripts/bwctest-rolling-upgrade.sh"
 
       - name: Upload test reports
         if: ${{ always() }}
@@ -262,8 +249,8 @@ jobs:
 
       - name: Run backward compatibility tests in full restart
         run: |
-          chown -R 1000:1000 "$(pwd)"
-          su "$(id -un 1000)" -c "./scripts/bwctest-full-restart.sh"
+          chown -R 1000:1000 `pwd`
+          su `id -un 1000` -c "./scripts/bwctest-full-restart.sh"
 
       - name: Upload test reports
         if: ${{ always() }}

@@ -2,20 +2,14 @@ name: Security Plugin IT
 
 on:
   pull_request:
-    paths:
-      - 'integ-test/**'
   push:
-    branches:
-      - 'main'
-      - '[0-9]*'
+    branches-ignore:
+      - 'backport/**'
+      - 'dependabot/**'
     paths:
       - 'integ-test/**'
       - '.github/workflows/integ-tests-with-security.yml'
   merge_group:
-
-concurrency:
-  group: security-plugin-it-${{ github.event.pull_request.head.ref || github.ref_name }}
-  cancel-in-progress: true
 
 jobs:
   Get-CI-Image-Tag:
@@ -39,7 +33,7 @@ jobs:
     steps:
     - name: Run start commands
       run: ${{ needs.Get-CI-Image-Tag.outputs.ci-image-start-command }}
-
+      
     - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
     - name: Set up JDK ${{ matrix.java }}
@@ -50,15 +44,15 @@ jobs:
 
     - name: Build with Gradle
       run: |
-        chown -R 1000:1000 "$(pwd)"
-        su "$(id -un 1000)" -c "./gradlew integTestWithSecurity"
+        chown -R 1000:1000 `pwd`
+        su `id -un 1000` -c "./gradlew integTestWithSecurity"
 
     - name: Upload test reports
       if: ${{ always() }}
       uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       continue-on-error: true
       with:
-        name: test-reports-ubuntu-latest-${{ matrix.java }}
+        name: test-reports-${{ matrix.os }}-${{ matrix.java }}
         path: |
           integ-test/build/reports/**
           integ-test/build/testclusters/*/logs/*
